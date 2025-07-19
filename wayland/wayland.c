@@ -18,11 +18,11 @@
 #define FALLBACK_H 480
 
 /* user-supplied input callbacks */
-typedef void (*uf_key_cb)(void *ud, uint32_t key, uint32_t state);         /* wl_keyboard key */
-typedef void (*uf_pointer_cb)(void *ud, int32_t x, int32_t y, uint32_t b); /* wl_pointer button */
+typedef void (*key_cb)(void *ud, uint32_t key, uint32_t state);         /* wl_keyboard key */
+typedef void (*pointer_cb)(void *ud, int32_t x, int32_t y, uint32_t b); /* wl_pointer button */
 
 /* ===== internal state ===== */
-struct uf_ctx {
+struct ctx {
     struct wl_display    *dpy;
     struct wl_compositor *comp;
     struct wl_shm        *shm;
@@ -39,8 +39,8 @@ struct uf_ctx {
     int     configured;
 
     /* user callbacks */
-    uf_key_cb     key_cb;
-    uf_pointer_cb ptr_cb;
+    key_cb     key_cb;
+    pointer_cb ptr_cb;
     void         *ud;
 };
 
@@ -53,7 +53,7 @@ static int memfd(size_t len)
     if (fd < 0 || ftruncate(fd, (off_t)len) < 0) { perror("memfd"); exit(1); }
     return fd;
 }
-static void alloc_buffer(struct uf_ctx *st, int w, int h)
+static void alloc_buffer(struct ctx *st, int w, int h)
 {
     size_t stride = (size_t)w * 4, len = stride * h;
     int fd = memfd(len);
@@ -76,14 +76,14 @@ static void alloc_buffer(struct uf_ctx *st, int w, int h)
 static void kb_key(void *data, struct wl_keyboard *kbd, uint32_t serial,
                    uint32_t time, uint32_t key, uint32_t state)
 {
-    struct uf_ctx *c = data;
+    struct ctx *c = data;
     if (c->key_cb) c->key_cb(c->ud, key, state);
 }
 
 static void ptr_button(void *data, struct wl_pointer *ptr, uint32_t serial,
                        uint32_t time, uint32_t button, uint32_t state)
 {
-    struct uf_ctx *c = data;
+    struct ctx *c = data;
     /* we don’t have coordinates here; simplify */
     if (c->ptr_cb) c->ptr_cb(c->ud, 0, 0, state);
 }
@@ -134,7 +134,7 @@ static const struct wl_pointer_listener ptr_lis = {
 static void reg_add(void *data, struct wl_registry *reg,
                     uint32_t id, const char *iface, uint32_t ver)
 {
-    struct uf_ctx *st = data;
+    struct ctx *st = data;
     if (!strcmp(iface, "wl_compositor"))
         st->comp = wl_registry_bind(reg, id, &wl_compositor_interface, 4);
     else if (!strcmp(iface, "wl_shm"))
@@ -157,7 +157,7 @@ static const struct xdg_wm_base_listener wm_lis = { ping_cb };
 
 static void surf_cfg(void *d, struct xdg_surface *s, uint32_t serial)
 {
-    struct uf_ctx *st = d;
+    struct ctx *st = d;
     xdg_surface_ack_configure(s, serial);
     st->configured = 1;
 }
@@ -166,14 +166,14 @@ static const struct xdg_surface_listener surf_lis = { surf_cfg };
 static void top_cfg(void *d, struct xdg_toplevel *t,
                     int32_t w, int32_t h, struct wl_array *st_)
 {
-    struct uf_ctx *st = d;
+    struct ctx *st = d;
     if (w > 0) st->win_w = w;
     if (h > 0) st->win_h = h;
 }
 static const struct xdg_toplevel_listener top_lis = { top_cfg, NULL };
 
 /* simple helper: run until *flag set */
-static void run_until(struct uf_ctx *st, int *flag)
+static void run_until(struct ctx *st, int *flag)
 {
     while (!*flag) {
         wl_display_flush(st->dpy);
@@ -182,9 +182,9 @@ static void run_until(struct uf_ctx *st, int *flag)
 }
 
 /* ===== public API ===== */
-struct uf_ctx *uf_create_window(int w, int h, const char *title)
+struct ctx *create_window(int w, int h, const char *title)
 {
-    struct uf_ctx *st = calloc(1, sizeof *st);
+    struct ctx *st = calloc(1, sizeof *st);
     st->win_w = w ? w : FALLBACK_W;
     st->win_h = h ? h : FALLBACK_H;
 
@@ -233,13 +233,13 @@ fail:
     return NULL;
 }
 
-void *uf_get_pixels(struct uf_ctx *c, int *stride_out)
+void *uf_get_pixels(struct ctx *c, int *stride_out)
 {
     if (stride_out) *stride_out = c->stride;
     return c->pixels;
 }
 
-void uf_commit(struct uf_ctx *c)
+void commit(struct ctx *c)
 {
     wl_surface_attach(c->surf, c->buf, 0, 0);
     wl_surface_damage_buffer(c->surf, 0, 0, c->win_w, c->win_h);
@@ -247,14 +247,14 @@ void uf_commit(struct uf_ctx *c)
     wl_display_flush(c->dpy);
 }
 
-void uf_set_input_cb(struct uf_ctx *c, uf_key_cb k, uf_pointer_cb p, void *ud)
+void set_input_cb(struct ctx *c, key_cb k, pointer_cb p, void *ud)
 {
     c->key_cb = k;
     c->ptr_cb = p;
     c->ud     = ud;
 }
 
-int uf_poll(struct uf_ctx *c)
+int poll(struct ctx *c)
 {
     wl_display_flush(c->dpy);
     if (wl_display_dispatch(c->dpy) < 0) {
@@ -264,7 +264,7 @@ int uf_poll(struct uf_ctx *c)
     return 1;
 }
 
-void uf_destroy(struct uf_ctx *c)
+void destroy(struct ctx *c)
 {
     if (!c) return;
     wl_buffer_destroy(c->buf);
