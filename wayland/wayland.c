@@ -233,7 +233,7 @@ fail:
     return NULL;
 }
 
-void *uf_get_pixels(struct ctx *c, int *stride_out)
+void *get_pixels(struct ctx *c, int *stride_out)
 {
     if (stride_out) *stride_out = c->stride;
     return c->pixels;
@@ -254,7 +254,7 @@ void set_input_cb(struct ctx *c, key_cb k, pointer_cb p, void *ud)
     c->ud     = ud;
 }
 
-int poll(struct ctx *c)
+int window_poll(struct ctx *c)
 {
     wl_display_flush(c->dpy);
     if (wl_display_dispatch(c->dpy) < 0) {
