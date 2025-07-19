@@ -1,7 +1,3 @@
-#define _GNU_SOURCE
-#include "wayland.h"
-
-/* ------- original includes ------- */
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -20,6 +16,10 @@
 #define BLUE 0xFF2E73B3u
 #define FALLBACK_W 640
 #define FALLBACK_H 480
+
+/* user-supplied input callbacks */
+typedef void (*uf_key_cb)(void *ud, uint32_t key, uint32_t state);         /* wl_keyboard key */
+typedef void (*uf_pointer_cb)(void *ud, int32_t x, int32_t y, uint32_t b); /* wl_pointer button */
 
 /* ===== internal state ===== */
 struct uf_ctx {
@@ -47,6 +47,8 @@ struct uf_ctx {
 /* ========= helpers ========= */
 static int memfd(size_t len)
 {
+    #define MFD_CLOEXEC        0x0001U
+    #define MFD_ALLOW_SEALING  0x0002U
     int fd = syscall(SYS_memfd_create, "ultrafast", MFD_CLOEXEC|MFD_ALLOW_SEALING);
     if (fd < 0 || ftruncate(fd, (off_t)len) < 0) { perror("memfd"); exit(1); }
     return fd;
@@ -180,9 +182,9 @@ static void run_until(struct uf_ctx *st, int *flag)
 }
 
 /* ===== public API ===== */
-uf_ctx *uf_create_window(int w, int h, const char *title)
+struct uf_ctx *uf_create_window(int w, int h, const char *title)
 {
-    uf_ctx *st = calloc(1, sizeof *st);
+    struct uf_ctx *st = calloc(1, sizeof *st);
     st->win_w = w ? w : FALLBACK_W;
     st->win_h = h ? h : FALLBACK_H;
 
@@ -231,13 +233,13 @@ fail:
     return NULL;
 }
 
-void *uf_get_pixels(uf_ctx *c, int *stride_out)
+void *uf_get_pixels(struct uf_ctx *c, int *stride_out)
 {
     if (stride_out) *stride_out = c->stride;
     return c->pixels;
 }
 
-void uf_commit(uf_ctx *c)
+void uf_commit(struct uf_ctx *c)
 {
     wl_surface_attach(c->surf, c->buf, 0, 0);
     wl_surface_damage_buffer(c->surf, 0, 0, c->win_w, c->win_h);
@@ -245,14 +247,14 @@ void uf_commit(uf_ctx *c)
     wl_display_flush(c->dpy);
 }
 
-void uf_set_input_cb(uf_ctx *c, uf_key_cb k, uf_pointer_cb p, void *ud)
+void uf_set_input_cb(struct uf_ctx *c, uf_key_cb k, uf_pointer_cb p, void *ud)
 {
     c->key_cb = k;
     c->ptr_cb = p;
     c->ud     = ud;
 }
 
-int uf_poll(uf_ctx *c)
+int uf_poll(struct uf_ctx *c)
 {
     wl_display_flush(c->dpy);
     if (wl_display_dispatch(c->dpy) < 0) {
@@ -262,7 +264,7 @@ int uf_poll(uf_ctx *c)
     return 1;
 }
 
-void uf_destroy(uf_ctx *c)
+void uf_destroy(struct uf_ctx *c)
 {
     if (!c) return;
     wl_buffer_destroy(c->buf);

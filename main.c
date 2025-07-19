@@ -1,15 +1,14 @@
-/* compile: gcc -O3 -pipe -march=native -fno-stack-protector \
-             -fno-asynchronous-unwind-tables -s demo.c ultrafast.c \
-             -lwayland-client -lrt -o demo */
-
+// tcc main.c wayland.c -lwayland-client -run
 #include <stdio.h>
 #include <stdint.h>
 #include <time.h>
-#include <unistd.h>
-#include "wayland.h"
+
+// sudo apt install libwayland-dev
+#include "wayland/wayland.c"
 
 static void key(void *ud, uint32_t key, uint32_t state)
 {
+    if (key == 1) exit(0);
     if (state) printf("key %u down\n", key);
     else       printf("key %u up\n", key);
 }
@@ -20,7 +19,7 @@ static void ptr(void *ud, int32_t x, int32_t y, uint32_t b)
 
 int main(void)
 {
-    uf_ctx *u = uf_create_window(800, 600, "ultrafast-demo");
+    struct uf_ctx *u = uf_create_window(800, 600, "ultrafast-demo");
     uf_set_input_cb(u, key, ptr, NULL);
 
     struct timespec ts={0};
@@ -45,7 +44,7 @@ int main(void)
 
         /* event pump & ~60 fps throttle */
         if (!uf_poll(u)) break;
-        clock_gettime(CLOCK_MONOTONIC, &ts);
+        clock_gettime(1, &ts); // 1 is CLOCK_MONOTONIC
         usleep(16666 - ts.tv_nsec/1000 % 16666);
     }
     uf_destroy(u);
