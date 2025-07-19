@@ -1,0 +1,273 @@
+#define _GNU_SOURCE
+#include "wayland.h"
+
+/* ------- original includes ------- */
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#include <wayland-client.h>
+#include "xdg-shell-client-protocol.h"
+#include "xdg-shell-protocol.c"
+
+#define BLUE 0xFF2E73B3u
+#define FALLBACK_W 640
+#define FALLBACK_H 480
+
+/* ===== internal state ===== */
+struct uf_ctx {
+    struct wl_display    *dpy;
+    struct wl_compositor *comp;
+    struct wl_shm        *shm;
+    struct xdg_wm_base   *wm;
+
+    struct wl_surface    *surf;
+    struct xdg_surface   *xs;
+    struct xdg_toplevel  *top;
+
+    struct wl_buffer     *buf;
+    void   *pixels;
+    int     buf_w, buf_h, stride;
+    int     win_w, win_h;
+    int     configured;
+
+    /* user callbacks */
+    uf_key_cb     key_cb;
+    uf_pointer_cb ptr_cb;
+    void         *ud;
+};
+
+/* ========= helpers ========= */
+static int memfd(size_t len)
+{
+    int fd = syscall(SYS_memfd_create, "ultrafast", MFD_CLOEXEC|MFD_ALLOW_SEALING);
+    if (fd < 0 || ftruncate(fd, (off_t)len) < 0) { perror("memfd"); exit(1); }
+    return fd;
+}
+static void alloc_buffer(struct uf_ctx *st, int w, int h)
+{
+    size_t stride = (size_t)w * 4, len = stride * h;
+    int fd = memfd(len);
+
+    st->pixels = mmap(NULL, len, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+    if (st->pixels == MAP_FAILED) { perror("mmap"); exit(1); }
+
+    struct wl_shm_pool *pool = wl_shm_create_pool(st->shm, fd, (int)len);
+    st->buf = wl_shm_pool_create_buffer(pool, 0, w, h, (int)stride,
+                                        WL_SHM_FORMAT_ARGB8888);
+    wl_shm_pool_destroy(pool);
+    st->buf_w = w; st->buf_h = h; st->stride = (int)stride;
+
+    /* paint once (blue) */
+    for (uint32_t *p = st->pixels, *end = p + (size_t)w * h; p < end; ++p)
+        *p = BLUE;
+}
+
+// INPUT CALLBACKS
+static void kb_key(void *data, struct wl_keyboard *kbd, uint32_t serial,
+                   uint32_t time, uint32_t key, uint32_t state)
+{
+    struct uf_ctx *c = data;
+    if (c->key_cb) c->key_cb(c->ud, key, state);
+}
+
+static void ptr_button(void *data, struct wl_pointer *ptr, uint32_t serial,
+                       uint32_t time, uint32_t button, uint32_t state)
+{
+    struct uf_ctx *c = data;
+    /* we don’t have coordinates here; simplify */
+    if (c->ptr_cb) c->ptr_cb(c->ud, 0, 0, state);
+}
+
+/* ---------- keyboard no-ops ---------- */
+static void kb_keymap(void *d, struct wl_keyboard *k,
+                      uint32_t format, int32_t fd, uint32_t size) {}
+static void kb_enter(void *d, struct wl_keyboard *k, uint32_t serial,
+                     struct wl_surface *s, struct wl_array *keys) {}
+static void kb_leave(void *d, struct wl_keyboard *k, uint32_t serial,
+                     struct wl_surface *s) {}
+static void kb_modifiers(void *d, struct wl_keyboard *k, uint32_t serial,
+                         uint32_t dep, uint32_t lat, uint32_t lock, uint32_t grp) {}
+static void kb_repeat_info(void *d, struct wl_keyboard *k,
+                           int32_t rate, int32_t delay) {}
+
+/* every slot filled → no aborts */
+static const struct wl_keyboard_listener kbd_lis = {
+    .keymap       = kb_keymap,
+    .enter        = kb_enter,
+    .leave        = kb_leave,
+    .key          = kb_key,
+    .modifiers    = kb_modifiers,
+    .repeat_info  = kb_repeat_info
+};
+
+/* ---------- pointer no-ops ---------- */
+static void ptr_enter(void *d, struct wl_pointer *p, uint32_t serial,
+                      struct wl_surface *s, wl_fixed_t sx, wl_fixed_t sy) {}
+static void ptr_leave(void *d, struct wl_pointer *p, uint32_t serial,
+                      struct wl_surface *s) {}
+static void ptr_motion(void *d, struct wl_pointer *p, uint32_t time,
+                       wl_fixed_t sx, wl_fixed_t sy) {}
+static void ptr_axis(void *d, struct wl_pointer *p, uint32_t time,
+                     uint32_t axis, wl_fixed_t value) {}
+static void ptr_frame(void *d, struct wl_pointer *p) {}
+
+static const struct wl_pointer_listener ptr_lis = {
+    .enter  = ptr_enter,
+    .leave  = ptr_leave,
+    .motion = ptr_motion,
+    .button = ptr_button,
+    .axis   = ptr_axis,
+    .frame  = ptr_frame
+};
+
+/* ===== Wayland listeners ===== */
+static void reg_add(void *data, struct wl_registry *reg,
+                    uint32_t id, const char *iface, uint32_t ver)
+{
+    struct uf_ctx *st = data;
+    if (!strcmp(iface, "wl_compositor"))
+        st->comp = wl_registry_bind(reg, id, &wl_compositor_interface, 4);
+    else if (!strcmp(iface, "wl_shm"))
+        st->shm  = wl_registry_bind(reg, id, &wl_shm_interface,       1);
+    else if (!strcmp(iface, "xdg_wm_base"))
+        st->wm   = wl_registry_bind(reg, id, &xdg_wm_base_interface,  1);
+    else if (!strcmp(iface, "wl_seat")) {
+        struct wl_seat *seat = wl_registry_bind(reg, id, &wl_seat_interface, 4);
+        struct wl_keyboard *kbd = wl_seat_get_keyboard(seat);
+        if (kbd) wl_keyboard_add_listener(kbd, &kbd_lis, st);
+        struct wl_pointer  *ptr = wl_seat_get_pointer(seat);
+        if (ptr) wl_pointer_add_listener(ptr, &ptr_lis, st);
+    }
+}
+static const struct wl_registry_listener reg_lis = { reg_add, NULL };
+
+static void ping_cb(void *d, struct xdg_wm_base *wm, uint32_t serial)
+{ xdg_wm_base_pong(wm, serial); }
+static const struct xdg_wm_base_listener wm_lis = { ping_cb };
+
+static void surf_cfg(void *d, struct xdg_surface *s, uint32_t serial)
+{
+    struct uf_ctx *st = d;
+    xdg_surface_ack_configure(s, serial);
+    st->configured = 1;
+}
+static const struct xdg_surface_listener surf_lis = { surf_cfg };
+
+static void top_cfg(void *d, struct xdg_toplevel *t,
+                    int32_t w, int32_t h, struct wl_array *st_)
+{
+    struct uf_ctx *st = d;
+    if (w > 0) st->win_w = w;
+    if (h > 0) st->win_h = h;
+}
+static const struct xdg_toplevel_listener top_lis = { top_cfg, NULL };
+
+/* simple helper: run until *flag set */
+static void run_until(struct uf_ctx *st, int *flag)
+{
+    while (!*flag) {
+        wl_display_flush(st->dpy);
+        if (wl_display_dispatch(st->dpy) < 0) exit(1);
+    }
+}
+
+/* ===== public API ===== */
+uf_ctx *uf_create_window(int w, int h, const char *title)
+{
+    uf_ctx *st = calloc(1, sizeof *st);
+    st->win_w = w ? w : FALLBACK_W;
+    st->win_h = h ? h : FALLBACK_H;
+
+    if (!(st->dpy = wl_display_connect(NULL))) { perror("connect"); goto fail; }
+
+    struct wl_registry *r = wl_display_get_registry(st->dpy);
+    wl_registry_add_listener(r, &reg_lis, st);
+
+    /* Pump events until we have compositor, shm & wm */
+    while (!st->comp || !st->shm || !st->wm)
+        wl_display_dispatch(st->dpy);
+    xdg_wm_base_add_listener(st->wm, &wm_lis, NULL);
+
+    /* create surface */
+    st->surf = wl_compositor_create_surface(st->comp);
+    st->xs   = xdg_wm_base_get_xdg_surface(st->wm, st->surf);
+    st->top  = xdg_surface_get_toplevel(st->xs);
+    xdg_surface_add_listener(st->xs,  &surf_lis, st);
+    xdg_toplevel_add_listener(st->top, &top_lis, st);
+    if (title) xdg_toplevel_set_title(st->top, title);
+    wl_surface_commit(st->surf);           /* 1st commit: no buffer */
+    wl_display_flush(st->dpy);
+
+    /* prepare fallback buffer during first roundtrip */
+    alloc_buffer(st, st->win_w, st->win_h);
+
+    /* wait until we’re configured */
+    run_until(st, &st->configured);
+
+    /* compositor may have asked for larger size */
+    if (st->win_w > st->buf_w || st->win_h > st->buf_h) {
+        wl_buffer_destroy(st->buf);
+        munmap(st->pixels, (size_t)st->buf_h * st->stride);
+        alloc_buffer(st, st->win_w, st->win_h);
+    }
+
+    /* attach once so window appears */
+    wl_surface_attach(st->surf, st->buf, 0, 0);
+    wl_surface_damage_buffer(st->surf, 0, 0, st->win_w, st->win_h);
+    wl_surface_commit(st->surf);
+    wl_display_flush(st->dpy);
+
+    return st;
+fail:
+    free(st);
+    return NULL;
+}
+
+void *uf_get_pixels(uf_ctx *c, int *stride_out)
+{
+    if (stride_out) *stride_out = c->stride;
+    return c->pixels;
+}
+
+void uf_commit(uf_ctx *c)
+{
+    wl_surface_attach(c->surf, c->buf, 0, 0);
+    wl_surface_damage_buffer(c->surf, 0, 0, c->win_w, c->win_h);
+    wl_surface_commit(c->surf);
+    wl_display_flush(c->dpy);
+}
+
+void uf_set_input_cb(uf_ctx *c, uf_key_cb k, uf_pointer_cb p, void *ud)
+{
+    c->key_cb = k;
+    c->ptr_cb = p;
+    c->ud     = ud;
+}
+
+int uf_poll(uf_ctx *c)
+{
+    wl_display_flush(c->dpy);
+    if (wl_display_dispatch(c->dpy) < 0) {
+        if (errno == EPIPE) return 0; /* compositor gone */
+        perror("dispatch");
+    }
+    return 1;
+}
+
+void uf_destroy(uf_ctx *c)
+{
+    if (!c) return;
+    wl_buffer_destroy(c->buf);
+    munmap(c->pixels, (size_t)c->buf_h * c->stride);
+    wl_surface_destroy(c->surf);
+    wl_display_disconnect(c->dpy);
+    free(c);
+}
