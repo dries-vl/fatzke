@@ -134,7 +134,7 @@ int move_unit(int player, int unit, int to_x, int to_y) {
         return -2; // Invalid move
     }
     if (grid[to_x][to_y].unit[0] || grid[to_x][to_y].unit[1]) {
-        printf("Tile (%d, %d) already occupied\n", to_x, to_y);
+        //printf("Tile (%d, %d) already occupied\n", to_x, to_y);
         return -3; // Tile already occupied
     }
     int from_x = player_units[player][unit].x;
@@ -222,22 +222,22 @@ int find_target(int player, int unit, struct unit *target) {
     }
     int x = player_units[player][unit].x;
     int y = player_units[player][unit].y;
-    if (grid[x+1][y].unit[1 - player]) {
+    if (grid[x+1][y].unit[1 - player] && x+1 < GRID_W) {
         target->type = 1; target->x = x+1; target->y = y;
         printf("Target found at (%d, %d) for player %d\n", x, y, player);
         return 1; // Return target x coordinate
     }
-    if (grid[x-1][y].unit[1 - player]) {
+    if (grid[x-1][y].unit[1 - player] && x-1 >= 0) {
         target->type = 1; target->x = x-1; target->y = y;
         printf("Target found at (%d, %d) for player %d\n", x, y, player);
         return 1; // Return target x coordinate
     }
-    if (grid[x][y+1].unit[1 - player]) {
+    if (grid[x][y+1].unit[1 - player] && y+1 < GRID_H) {
         target->type = 1; target->x = x; target->y = y+1;
         printf("Target found at (%d, %d) for player %d\n", x, y, player);
         return 1; // Return target x coordinate
     }
-    if (grid[x][y-1].unit[1 - player]) {
+    if (grid[x][y-1].unit[1 - player] && y-1 >= 0) {
         target->type = 1; target->x = x; target->y = y-1;
         printf("Target found at (%d, %d) for player %d\n", x, y, player);
         return 1; // Return target x coordinate
@@ -307,7 +307,7 @@ void script(int frame) {
 
 static inline struct tga tga_load(const char *path)
 {
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    int fd = open(path, O_RDONLY | 02000000);
     assert(fd >= 0);
 
     uint8_t h18[18];
