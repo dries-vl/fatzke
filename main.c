@@ -124,7 +124,6 @@ static inline uint8_t clamp_mul(uint8_t ch, float factor) {
 int battle(int attacker, int defender, int unit_att, int unit_def);
 
 int pathing(int from_x, int from_y, int to_x, int to_y, pos *path, int pathlength) { // no cost yet BITshift versie??
-    printf("pathing\n");
     if (from_x < 0 || from_x >= GRID_W || from_y < 0 || from_y >= GRID_H ||
         to_x < 0 || to_x >= GRID_W || to_y < 0 || to_y >= GRID_H) {
         return -1; // Invalid coordinates
@@ -209,7 +208,6 @@ void draw_unit(enum players player, int unit_x, int unit_y, uint32_t *buffer)
 }
 
 void draw_units(uint32_t *buffer) {
-    printf("draw units\n");
     for (int player = 0; player < PLAYER_COUNT; player++) {
         if (player_unit_count[player] == 0) continue; // skip empty players
         for (int unit = 0; unit < player_unit_count[player]; ++unit) {
@@ -221,33 +219,31 @@ void draw_units(uint32_t *buffer) {
 }
 
 int move_unit(int player, int unit, int to_x, int to_y) {
-    printf("move unit to %d, %d\n", to_x, to_y);
     if (!player_units[player] || unit < 0 || unit >= player_unit_count[player]) {
-        printf("Invalid player or unit index\n");
+        //printf("Invalid player or unit index\n");
         return -1; // Invalid player or unit
     }
     if (to_x < 0 || to_x >= GRID_W || to_y < 0 || to_y >= GRID_H) {
-        printf("Invalid move to (%d, %d)\n", to_x, to_y);
+        //printf("Invalid move to (%d, %d)\n", to_x, to_y);
         return -2; // Invalid move
     }
     if (map.pix[to_y * map.w + to_x] == SEA) {
-        printf("Cannot move to water tile (%d, %d)\n", to_x, to_y);
+        //printf("Cannot move to water tile (%d, %d)\n", to_x, to_y);
         return -4; // Cannot move to water tile
     }
     if (units.pix[to_y * units.w + to_x] == player_colors[player]) {
-        printf("Tile (%d, %d) already occupied\n", to_x, to_y);
+        //printf("Tile (%d, %d) already occupied\n", to_x, to_y);
         return -3; // Tile already occupied
     }
     else if (units.pix[to_y * units.w + to_x] != 0 && units.pix[to_y * units.w + to_x] != player_colors[player]) { // BATTLE!
         //printf("Tile (%d, %d) occupied by enemy\n", to_x, to_y);
-        printf("Battle at (%d, %d)!\n", to_x, to_y);
+        //printf("Battle at (%d, %d)!\n", to_x, to_y);
         for (int defender = 0; defender < player_unit_count[1 - player]; defender++) {
             if (player_units[1 - player][defender].x == to_x && player_units[1 - player][defender].y == to_y) {
                 return battle(player, 1 - player, unit, defender);
             }
         }
     }
-    printf("move it \n");
     int from_x = player_units[player][unit].x;
     int from_y = player_units[player][unit].y;
     units.pix[to_y * units.w + to_x] = units.pix[from_y * units.w + from_x];
@@ -259,21 +255,20 @@ int move_unit(int player, int unit, int to_x, int to_y) {
 }
 
 int add_unit(int player, int x, int y) {
-    printf("add unit\n");
     if (player < 0 || player >= PLAYER_COUNT) {
-        printf("Invalid player index\n");
+        //printf("Invalid player index\n");
         return -1; // Invalid player
     }
     if (x < 0 || x >= GRID_W || y < 0 || y >= GRID_H) {
-        printf("Invalid position (%d, %d)\n", x, y);
+        //printf("Invalid position (%d, %d)\n", x, y);
         return -2; // Invalid position
     }
     if (player_unit_count[player] >= MAX_UNITS) {
-        printf("Max units reached for player %d\n", player);
+        // printf("Max units reached for player %d\n", player);
         return -3; // Max units reached
     }
     if (units.pix[y * units.w + x] != 0) {
-        printf("Tile (%d, %d) already occupied\n", x, y);
+        // printf("Tile (%d, %d) already occupied\n", x, y);
         return -4; // Tile already occupied
     }
     player_units[player][player_unit_count[player]] = (struct unit){x, y, 1};
@@ -300,7 +295,6 @@ int remove_unit(int player, int unit) {
 }
 
 int battle(int attacker, int defender, int unit_att, int unit_def) {
-    printf("do a battle\n");
     if (attacker < 0 || attacker >= PLAYER_COUNT || defender < 0 || defender >= PLAYER_COUNT) {
         printf("Invalid player index\n");
         return -1; // Invalid player
@@ -460,7 +454,6 @@ int find_target(int player, int unit, struct unit *target) {
 }
 
 int spawn_unit(enum players player) {
-    printf("spawn unit\n");
     // try to spawn around a unit
     for (int unit_id = 0; unit_id < player_unit_count[player]; unit_id++) {
         struct unit unit = player_units[player][unit_id];
@@ -484,7 +477,6 @@ int spawn_unit(enum players player) {
 }
 
 void player_turn(enum players player) {
-    printf("player turn\n");
     // verify that the player exists in the player enum
     if (player < 0 || player >= PLAYER_COUNT) {
         printf("Invalid player index\n");
