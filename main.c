@@ -52,7 +52,8 @@ enum directions {
     UP_LEFT,
     UP_RIGHT,
     DOWN_LEFT,
-    DOWN_RIGHT
+    DOWN_RIGHT,
+    DIRECTIONS_COUNT
 };
 pos dir_offsets[] = {
     [UP] = {0, -1},
@@ -466,14 +467,21 @@ void spawn_unit(enum players player) {
     // try to spawn around a unit
     for (int unit_id = 0; unit_id < player_unit_count[player]; unit_id++) {
         struct unit unit = player_units[player][unit_id];
-        for (int dir = 0; dir < MAX_DIR; dir++) {
-            int spawn_x = unit.x + 
-            bool has_unit = units.pix[unit.y * units.w + unit.x] != 0;
-            bool is_sea = map.pix[unit.y * map.w + unit.x] == SEA;
-            if (!has_unit && !is_sea)
-                add_unit(player, unit.x, unit.y);
+        for (int dir = 0; dir < DIRECTIONS_COUNT; dir++) {
+            int spawn_x = unit.x + dir_offsets[dir].x;
+            int spawn_y = unit.y + dir_offsets[dir].y;
+            if (spawn_y >= 0 && spawn_x >= 0 && spawn_y < units.w && spawn_x < units.w) {
+                bool has_unit = units.pix[spawn_y * units.w + spawn_x] != 0;
+                bool is_sea = map.pix[spawn_y * map.w + spawn_x] == SEA;
+                if (!has_unit && !is_sea) {
+                    printf("Spawned a new unit!\n");
+                    add_unit(player, spawn_x, spawn_y);
+                    return;
+                }
+            }
         }
     }
+    printf("Could not find location to spawn the unit\n");
 }
 
 void player_turn(enum players player) {
@@ -485,10 +493,10 @@ void player_turn(enum players player) {
     // add 1 money for every city
     player_money[player] += player_cities[player];
     // buy units for every 10 money
-    int money_to_use = player_money[player] / 10;
+    int units_to_buy = player_money[player] / 10;
+    int money_to_use = units_to_buy * 10;
     player_money[player] -= money_to_use;
-    // pick a tile to put a new unit on
-    // try 
+    for (int i = 0; i<units_to_buy; i++) spawn_unit(player);
 
     // unit movement
     struct unit front_units[MAX_UNITS];
