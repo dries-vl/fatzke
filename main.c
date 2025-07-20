@@ -36,7 +36,10 @@ enum players {
 uint32_t player_colors[PLAYER_COUNT] = {
     [GERMANY] = GERMANY_COLOR,
     [SOVIET] = SOVIET_COLOR
-}; 
+};
+
+uint32_t player_cities[PLAYER_COUNT] = {0};
+uint32_t player_money[PLAYER_COUNT] = {0};
 
 typedef struct {
     int x, y;
@@ -50,7 +53,8 @@ enum directions {
     UP_LEFT,
     UP_RIGHT,
     DOWN_LEFT,
-    DOWN_RIGHT
+    DOWN_RIGHT,
+    DIRECTIONS_COUNT
 };
 pos dir_offsets[] = {
     [UP] = {0, -1},
@@ -63,18 +67,11 @@ pos dir_offsets[] = {
     [DOWN_RIGHT] = {1, 1}
 };
 
-struct tile {
-    int terrain;
-    int x, y;
-    int unit[2]; // 0 = player, 1 = enemy
-    int building; // wa random shit
-};
 struct unit {
     int x, y; // position on grid
     int type;
 };
-struct tile grid[GRID_W][GRID_H];
-int player_unit_count[] = {0, 0}; // number of units per player
+int player_unit_count[PLAYER_COUNT] = {0}; // number of units per player
 struct unit player_units[PLAYER_COUNT][MAX_UNITS] = {0};
 
 struct unit player_target[PLAYER_COUNT] = {{0, 0, 0}, {0, 0, 0}};
@@ -90,6 +87,15 @@ struct tga {
 struct tga map;
 struct tga units;
 struct tga countries;
+
+int get_player(int x, int y) {
+    uint32_t player_color = countries.pix[y * map.w + x];
+    for (int i = 0; i < PLAYER_COUNT; i++)
+        if (player_colors[i] == player_color)
+            return i;
+    printf("Player not found\n");
+    return -1;
+}; 
 
 static void key_input_callback(void *ud, uint32_t key, uint32_t state)
 {
@@ -196,40 +202,31 @@ void draw_grid(uint32_t *buffer)
     }
 }
 
-void draw_unit(struct tile *t, uint32_t *buffer)
+void draw_unit(enum players player, int unit_x, int unit_y, uint32_t *buffer)
 {
-    int x = t->x * PIXEL_SIZE + PIXEL_SIZE / 2;
-    int y = t->y * PIXEL_SIZE + PIXEL_SIZE / 2;
-    if (t->unit[0]) {
-        // Draw player unit
-        for (int dx = -UNIT_SIZE/2; dx <= UNIT_SIZE/2; ++dx) {
-            for (int dy = -UNIT_SIZE/2; dy <= UNIT_SIZE/2; ++dy) {
-                buffer[(y + dy) * WIDTH + (x + dx)] = LIGHTEN(player_colors[0], 2.0f);
-            }
-        }
-    }
-    if (t->unit[1]) {
-        // Draw enemy unit
-        for (int dx = -UNIT_SIZE/2; dx <= UNIT_SIZE/2; ++dx) {
-            for (int dy = -UNIT_SIZE/2; dy <= UNIT_SIZE/2; ++dy) {
-                buffer[(y + dy) * WIDTH + (x + dx)] = LIGHTEN(player_colors[1], 2.0f);
-            }
+    int x = unit_x * PIXEL_SIZE + PIXEL_SIZE / 2;
+    int y = unit_y * PIXEL_SIZE + PIXEL_SIZE / 2;
+    for (int dx = -UNIT_SIZE/2; dx <= UNIT_SIZE/2; ++dx) {
+        for (int dy = -UNIT_SIZE/2; dy <= UNIT_SIZE/2; ++dy) {
+            buffer[(y + dy) * WIDTH + (x + dx)] = LIGHTEN(player_colors[player], 2.0f);
         }
     }
 }
 
 void draw_units(uint32_t *buffer) {
+    printf("draw units\n");
     for (int player = 0; player < PLAYER_COUNT; player++) {
         if (player_unit_count[player] == 0) continue; // skip empty players
         for (int unit = 0; unit < player_unit_count[player]; ++unit) {
             int x = player_units[player][unit].x;
             int y = player_units[player][unit].y;
-            draw_unit(&grid[x][y], buffer);
+            draw_unit(player, x, y, buffer);
         }
     }
 }
 
 int move_unit(int player, int unit, int to_x, int to_y) {
+    printf("move unit to %d, %d\n", to_x, to_y);
     if (!player_units[player] || unit < 0 || unit >= player_unit_count[player]) {
         printf("Invalid player or unit index\n");
         return -1; // Invalid player or unit
@@ -238,15 +235,15 @@ int move_unit(int player, int unit, int to_x, int to_y) {
         printf("Invalid move to (%d, %d)\n", to_x, to_y);
         return -2; // Invalid move
     }
-    if (grid[to_x][to_y].terrain == 1) {
-        //printf("Cannot move to water tile (%d, %d)\n", to_x, to_y);
+    if (map.pix[to_y * map.w + to_x] == SEA) {
+        printf("Cannot move to water tile (%d, %d)\n", to_x, to_y);
         return -4; // Cannot move to water tile
     }
-    if (grid[to_x][to_y].unit[player]) {
-        //printf("Tile (%d, %d) already occupied\n", to_x, to_y);
+    if (units.pix[to_y * units.w + to_x] == player_colors[player]) {
+        printf("Tile (%d, %d) already occupied\n", to_x, to_y);
         return -3; // Tile already occupied
     }
-    else if (grid[to_x][to_y].unit[1 - player]) { // BATTLE!
+    else if (units.pix[to_y * units.w + to_x] != 0 && units.pix[to_y * units.w + to_x] != player_colors[player]) { // BATTLE!
         //printf("Tile (%d, %d) occupied by enemy\n", to_x, to_y);
         //printf("Battle at (%d, %d)!\n", to_x, to_y);
         for (int defender = 0; defender < player_unit_count[1 - player]; defender++) {
@@ -255,10 +252,11 @@ int move_unit(int player, int unit, int to_x, int to_y) {
             }
         }
     }
+    printf("move it \n");
     int from_x = player_units[player][unit].x;
     int from_y = player_units[player][unit].y;
-    grid[to_x][to_y].unit[player] = grid[from_x][from_y].unit[player];
-    grid[from_x][from_y].unit[player] = 0;
+    units.pix[to_y * units.w + to_x] = units.pix[from_y * units.w + from_x];
+    units.pix[from_y * units.w + from_x] = 0;
     countries.pix[to_y * countries.w + to_x] = player_colors[player]; // Update country color
     player_units[player][unit].x = to_x; // Update player unit position
     player_units[player][unit].y = to_y;
@@ -266,6 +264,7 @@ int move_unit(int player, int unit, int to_x, int to_y) {
 }
 
 int add_unit(int player, int x, int y) {
+    printf("add unit\n");
     if (player < 0 || player >= PLAYER_COUNT) {
         printf("Invalid player index\n");
         return -1; // Invalid player
@@ -278,12 +277,12 @@ int add_unit(int player, int x, int y) {
         printf("Max units reached for player %d\n", player);
         return -3; // Max units reached
     }
-    if (grid[x][y].unit[0] || grid[x][y].unit[1]) {
+    if (units.pix[y * units.w + x] != 0) {
         printf("Tile (%d, %d) already occupied\n", x, y);
         return -4; // Tile already occupied
     }
     player_units[player][player_unit_count[player]] = (struct unit){x, y, 1};
-    grid[x][y].unit[player] = 1; // Mark unit on grid
+    units.pix[y * units.w + x] = player_colors[player]; // add the unit to the map
     player_unit_count[player]++;
     return 0; // Unit added successfully
 }
@@ -295,7 +294,7 @@ int remove_unit(int player, int unit) {
     }
     int x = player_units[player][unit].x;
     int y = player_units[player][unit].y;
-    grid[x][y].unit[player] = 0; // Remove unit from grid
+    units.pix[y * units.w + x] = 0; // Remove unit from grid
     player_units[player][unit] = (struct unit){0, 0, 0}; // Clear unit data
     for (int unit_iterator = unit; unit_iterator < player_unit_count[player] - 1; ++unit_iterator) {
         player_units[player][unit_iterator] = player_units[player][unit_iterator + 1]; // Shift units left
@@ -306,6 +305,7 @@ int remove_unit(int player, int unit) {
 }
 
 int battle(int attacker, int defender, int unit_att, int unit_def) {
+    printf("do a battle\n");
     if (attacker < 0 || attacker >= PLAYER_COUNT || defender < 0 || defender >= PLAYER_COUNT) {
         printf("Invalid player index\n");
         return -1; // Invalid player
@@ -357,12 +357,12 @@ int move_towards(int player, int unit, int target_x, int target_y) {
         // Try to move in the other random direction
         int random = rand() % 2; 
         if (dir_x == 0) {
-            result = move_towards(player, unit, x + 1 - random*2, y + dir_y);
+            result = move_unit(player, unit, x + 1 - random*2, y + dir_y);
         } else if (dir_y == 0) {
-            result = move_towards(player, unit, x + dir_x, y + 1 - random*2);
+            result = move_unit(player, unit, x + dir_x, y + 1 - random*2);
         } else if (dir_x != 0 && dir_y != 0) {
             // If both directions are available, try to move in the other direction
-            result = move_towards(player, unit, x + dir_x*random, y + dir_y*(1 - random));
+            result = move_unit(player, unit, x + dir_x*random, y + dir_y*(1 - random));
         }
     }
     return result;
@@ -441,22 +441,22 @@ int find_target(int player, int unit, struct unit *target) {
     }
     int x = player_units[player][unit].x;
     int y = player_units[player][unit].y;
-    if (grid[x+1][y].unit[1 - player] && x+1 < GRID_W) {
+    if ((units.pix[y * units.w + x+1] != 0 && units.pix[y * units.w + x+1] != player_colors[player]) && x+1 < GRID_W) {
         target->type = 1; target->x = x+1; target->y = y;
         printf("Target found at (%d, %d) for player %d\n", x, y, player);
         return 1; // Return target x coordinate
     }
-    if (grid[x-1][y].unit[1 - player] && x-1 >= 0) {
+    if ((units.pix[y * units.w + x-1] != 0 && units.pix[y * units.w + x-1] != player_colors[player]) && x-1 >= 0) {
         target->type = 1; target->x = x-1; target->y = y;
         printf("Target found at (%d, %d) for player %d\n", x, y, player);
         return 1; // Return target x coordinate
     }
-    if (grid[x][y+1].unit[1 - player] && y+1 < GRID_H) {
+    if ((units.pix[(y+1) * units.w + x] != 0 && units.pix[(y+1) * units.w + x] != player_colors[player]) && y+1 < GRID_H) {
         target->type = 1; target->x = x; target->y = y+1;
         printf("Target found at (%d, %d) for player %d\n", x, y, player);
         return 1; // Return target x coordinate
     }
-    if (grid[x][y-1].unit[1 - player] && y-1 >= 0) {
+    if ((units.pix[(y-1) * units.w + x] != 0 && units.pix[(y-1) * units.w + x] != player_colors[player]) && y-1 >= 0) {
         target->type = 1; target->x = x; target->y = y-1;
         printf("Target found at (%d, %d) for player %d\n", x, y, player);
         return 1; // Return target x coordinate
@@ -464,11 +464,50 @@ int find_target(int player, int unit, struct unit *target) {
     return 0; // No target found
 }
 
+int spawn_unit(enum players player) {
+    printf("spawn unit\n");
+    // try to spawn around a unit
+    for (int unit_id = 0; unit_id < player_unit_count[player]; unit_id++) {
+        struct unit unit = player_units[player][unit_id];
+        for (int dir = 0; dir < DIRECTIONS_COUNT; dir++) {
+            int spawn_x = unit.x + dir_offsets[dir].x;
+            int spawn_y = unit.y + dir_offsets[dir].y;
+            if (spawn_y >= 0 && spawn_x >= 0 && spawn_y < units.w && spawn_x < units.w) {
+                bool has_unit = units.pix[spawn_y * units.w + spawn_x] != 0;
+                bool is_sea = map.pix[spawn_y * map.w + spawn_x] == SEA;
+                if (!has_unit && !is_sea && get_player(spawn_x, spawn_y) == player) {
+                    if (add_unit(player, spawn_x, spawn_y) == 0) {
+                        printf("Spawned a new unit!\n");
+                        return 1;
+                    }
+                }
+            }
+        }
+    }
+    printf("Could not find location to spawn the unit\n");
+    return -1;
+}
+
 void player_turn(enum players player) {
+    printf("player turn\n");
+    // verify that the player exists in the player enum
     if (player < 0 || player >= PLAYER_COUNT) {
         printf("Invalid player index\n");
         return; // Invalid player
     }
+    // add 1 money for every city
+    player_money[player] += player_cities[player];
+    // buy units for every 10 money
+    static const int UNIT_COST = 10;
+    int units_to_buy = player_money[player] / UNIT_COST;
+    int money_to_use = units_to_buy * UNIT_COST;
+    player_money[player] -= money_to_use;
+    for (int i = 0; i<units_to_buy; i++) { 
+        if (spawn_unit(player) == -1) 
+            player_money[player] += UNIT_COST; // refund if cannot be spawned anywhere 
+    }
+
+    // unit movement
     struct unit front_units[MAX_UNITS];
     int count = 0;
     find_front(1 - player, 0, 0, front_units, &count); // Get front units for other player
@@ -547,11 +586,11 @@ void player_turn(int player) {
 */
 
 void script(int frame) {
-    if (frame % 20 == 0) {
-        player_turn(0); // Player 0's turn every 60 frames
+    if (frame % 2 == 1) {
+        player_turn(0);
     }
-    if (frame % 40 == 15) {
-        player_turn(1); // Player 1's turn every 120 frames
+    if (frame % 2 == 0) {
+        player_turn(1);
     }
 }
 
@@ -602,28 +641,14 @@ int main(void)
     struct timespec ts = {0};
     int stride;
     uint32_t frame = 0;
-    // Initialize grid
-    for (int x = 0; x < GRID_W; ++x) {
-        for (int y = 0; y < GRID_H; ++y) {
-            grid[x][y].terrain = 0; // 0, 1, or 2
-            grid[x][y].x = x;
-            grid[x][y].y = y;
-            grid[x][y].unit[0] = 0; // no player unit
-            grid[x][y].unit[1] = 0; // no enemy unit
-            grid[x][y].building = 0; // random building presence
-        }
-    }
 
-    // loop over map tga and fill the grid with terrain
+    // find the cities on the map
     for (int y = 0; y < map.h; ++y) {
         for (int x = 0; x < map.w; ++x) {
             uint32_t pixel = map.pix[y * map.w + x];
-            if (pixel == SEA) {
-                grid[x][y].terrain = 1; // water
-            } else if (pixel == LAND) {
-                grid[x][y].terrain = 0; // land
-            } else {
-                grid[x][y].terrain = 2; // random terrain
+            if (pixel == CITY) {
+                int player_id = get_player(x, y);
+                if (player_id != -1) player_cities[player_id]++;
             }
         }
     }
@@ -633,20 +658,10 @@ int main(void)
         for (int x = 0; x < units.w; ++x) {
             uint32_t pixel = units.pix[y * units.w + x];
             if (pixel != 0) { // unit is not empty pixel
-                uint32_t country_pixel = countries.pix[y * countries.w + x];
-                if (country_pixel == GERMANY_COLOR) {
-                    add_unit(GERMANY, x, y);
-                } else if (country_pixel == SOVIET_COLOR) {
-                    add_unit(SOVIET, x, y);
-                }
+                units.pix[y * units.w + x] = 0;
+                add_unit(get_player(x, y), x, y);
             }
         }
-    }
-    for (int unit = 0; unit < player_unit_count[0]; unit++) {
-        grid[player_units[0][unit].x][player_units[0][unit].y].unit[0] = 1; // player unit
-    }
-    for (int unit = 0; unit < player_unit_count[1]; unit++) {
-        grid[player_units[1][unit].x][player_units[1][unit].y].unit[1] = 1; // enemy unit
     }
 
     // test Pathing
