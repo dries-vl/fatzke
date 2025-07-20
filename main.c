@@ -123,23 +123,26 @@ static inline uint8_t clamp_mul(uint8_t ch, float factor) {
 
 int battle(int attacker, int defender, int unit_att, int unit_def);
 
-int pathing(int from_x, int from_y, int to_x, int to_y, pos *path, int pathlength) { // no cost yet BITshift versie??
+int pathing(int from_x, int from_y, int to_x, int to_y, pos *path, int *pathlength) { // no cost yet, BITshift versie??
+    if (!path || !pathlength) return -1; // Invalid arguments
     if (from_x < 0 || from_x >= GRID_W || from_y < 0 || from_y >= GRID_H ||
         to_x < 0 || to_x >= GRID_W || to_y < 0 || to_y >= GRID_H) {
         return -1; // Invalid coordinates
     }
     int paths_count = 1;
-    pos paths[GRID_W + GRID_H][GRID_H + GRID_W] = {0};
+    pos paths[GRID_W * GRID_H][GRID_H + GRID_W] = {0}; // STACK OVERFLOW ?????
     paths[0][0] = (pos){1, 0}; // path length
     paths[0][1] = (pos){from_x, from_y};
     for (int i = 0; i < paths_count; i++) {
         int pass = 0;
-        if (paths_count >= GRID_W + GRID_H) {
+        if (paths_count >= GRID_W * GRID_H) {
+            printf("Too many paths, aborting\n");
             return 0; // ran out of memory
         }
         int x;
         int y;
-        for (int dir = UP; dir >= DOWN_RIGHT; dir++){
+        for (int dir = UP; dir <= DOWN_RIGHT; dir++){
+            pass = 0; // reset pass for each direction
             // Generic
             x = paths[i][1].x + dir_offsets[dir].x;
             y = paths[i][1].y + dir_offsets[dir].y;
@@ -147,10 +150,12 @@ int pathing(int from_x, int from_y, int to_x, int to_y, pos *path, int pathlengt
             if (to_x == x && to_y == y) { // found target
                 paths[paths_count][0] = (pos){paths[i][0].x + 1, 0};
                 paths[paths_count][1] = (pos){x, y};
-                for (int j = 2; j < paths[i][0].x; j++) {
+                for (int j = 2; j < paths[i][0].x + 2; j++) {
                     paths[paths_count][j] = paths[i][j-1];
                 }
-                return paths_count + 1; // found path
+                *pathlength = paths[paths_count][0].x; // set path length
+                memcpy(path, paths[paths_count] + 1, sizeof(pos) * (*pathlength)); // copy path to output
+                return 1; // found path
             }
             if (map.pix[y*map.w + x] != SEA) { // better terrain handling needed
                 for (int j = 0; j < paths_count; j++) {
@@ -162,7 +167,7 @@ int pathing(int from_x, int from_y, int to_x, int to_y, pos *path, int pathlengt
                 if (pass == 0) {
                     paths[paths_count][0] = (pos){paths[i][0].x + 1, 0};
                     paths[paths_count][1] = (pos){x, y};
-                    for (int j = 2; j < paths[i][0].x; j++) {
+                    for (int j = 2; j < paths[i][0].x + 2; j++) {
                         paths[paths_count][j] = paths[i][j-1];
                     }
                     paths_count++;
@@ -170,6 +175,7 @@ int pathing(int from_x, int from_y, int to_x, int to_y, pos *path, int pathlengt
             }
         }
     }
+    return 0; // no path found
 }
 
 
@@ -313,16 +319,16 @@ int battle(int attacker, int defender, int unit_att, int unit_def) {
     }
     int random = rand() % 20; // Random number between 0 and 5
     if (random == 20) { // Attacker wins 1/3
-        printf("Attacker wins!\n");
+        //printf("Attacker wins!\n");
         remove_unit(defender, unit_def); // Remove defender unit
         move_unit(attacker, unit_att, x_def, y_def); // Move attacker to defender position
         return 1; // Attacker wins
     } else if (random < 3) { // Defender wins 1/3
-        printf("Defender wins!\n"); // Defender wins 2/3
+        //printf("Defender wins!\n"); // Defender wins 2/3
         remove_unit(attacker, unit_att); // Remove attacker unit
         return 2; // Defender wins
     } else { // Draw 1/3
-        printf("Draw!\n");
+        //printf("Draw!\n");
         return 3; // Draw
     }
     return 0; // something went wrong
@@ -652,7 +658,13 @@ int main(void)
     }
 
     // test Pathing
-    pathing(0, 0, 10, 10, NULL, 0); // path from (0,0) to (10,10)
+    pos path[GRID_W + GRID_H];
+    int path_length = 0;
+    int result = pathing(20, 0, 20, 5, path, &path_length); // path from (0,0) to (10,10)
+    printf("Pathing result: %d\n", result);
+    for (int i = 0; i < path_length; i++) {
+        printf("Path step %d: (%d, %d)\n", i, path[i].x, path[i].y);
+    }
 
     while(window_poll(window)) {// poll for events and break if compositor connection is lost
         uint32_t *buffer = get_pixels(window, &stride);
