@@ -373,10 +373,13 @@ void spawn_unit(enum players player) {
     // try to spawn around a unit
     for (int unit_id = 0; unit_id < player_unit_count[player]; unit_id++) {
         struct unit unit = player_units[player][unit_id];
-        bool has_unit = units.pix[unit.y * units.w + unit.x] != 0;
-        bool is_sea = map.pix[unit.y * map.w + unit.x] == SEA;
-        if (!has_unit && !is_sea)
-            add_unit(player, unit.x, unit.y);
+        for (int dir = 0; dir < MAX_DIR; dir++) {
+            int spawn_x = unit.x + 
+            bool has_unit = units.pix[unit.y * units.w + unit.x] != 0;
+            bool is_sea = map.pix[unit.y * map.w + unit.x] == SEA;
+            if (!has_unit && !is_sea)
+                add_unit(player, unit.x, unit.y);
+        }
     }
 }
 
