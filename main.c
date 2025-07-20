@@ -40,6 +40,31 @@ uint32_t player_colors[PLAYER_COUNT] = {
 uint32_t player_cities[PLAYER_COUNT] = {0};
 uint32_t player_money[PLAYER_COUNT] = {0};
 
+typedef struct {
+    int x, y;
+} pos;
+
+enum directions {
+    UP,
+    DOWN,
+    LEFT,
+    RIGHT,
+    UP_LEFT,
+    UP_RIGHT,
+    DOWN_LEFT,
+    DOWN_RIGHT
+};
+pos dir_offsets[] = {
+    [UP] = {0, -1},
+    [DOWN] = {0, 1},
+    [LEFT] = {-1, 0},
+    [RIGHT] = {1, 0},
+    [UP_LEFT] = {-1, -1},
+    [UP_RIGHT] = {1, -1},
+    [DOWN_LEFT] = {-1, 1},
+    [DOWN_RIGHT] = {1, 1}
+};
+
 struct tile {
     int terrain;
     int x, y;
@@ -59,7 +84,7 @@ struct unit player_target[PLAYER_COUNT] = {{0, 0, 0}, {0, 0, 0}};
 /* 32-bit uncompressed, top-left-origin TGA */
 struct tga { 
     int w, h;                /* dimensions                    */
-    const uint32_t *pix;       /* BGRA pixel pointer            */
+    uint32_t *pix;       /* BGRA pixel pointer            */
     const void *map;      /* whole mmapped file            */
     size_t map_len;  /* length for munmap             */
 };
@@ -91,6 +116,60 @@ static inline uint8_t clamp_mul(uint8_t ch, float factor) {
     | (clamp_mul(((c)>>16)&0xFF, f) << 16) \
     | ((c)&0xFF000000) \
 )
+
+int battle(int attacker, int defender, int unit_att, int unit_def);
+
+int pathing(int from_x, int from_y, int to_x, int to_y, pos *path, int pathlength) { // no cost yet BITshift versie??
+    if (from_x < 0 || from_x >= GRID_W || from_y < 0 || from_y >= GRID_H ||
+        to_x < 0 || to_x >= GRID_W || to_y < 0 || to_y >= GRID_H) {
+        return -1; // Invalid coordinates
+    }
+    int paths_count = 1;
+    pos paths[GRID_W + GRID_H][GRID_H + GRID_W] = {0};
+    paths[0][0] = (pos){1, 0}; // path length
+    paths[0][1] = (pos){from_x, from_y};
+    for (int i = 0; i < paths_count; i++) {
+        int pass = 0;
+        if (paths_count >= GRID_W + GRID_H) {
+            return 0; // ran out of memory
+        }
+        int x;
+        int y;
+        for (int dir = UP; dir >= DOWN_RIGHT; dir++){
+            // Generic
+            x = paths[i][1].x + dir_offsets[dir].x;
+            y = paths[i][1].y + dir_offsets[dir].y;
+            if (x < 0 || x >= GRID_W || y < 0 || y >= GRID_H) continue; // out of bounds
+            if (to_x == x && to_y == y) { // found target
+                paths[paths_count][0] = (pos){paths[i][0].x + 1, 0};
+                paths[paths_count][1] = (pos){x, y};
+                for (int j = 2; j < paths[i][0].x; j++) {
+                    paths[paths_count][j] = paths[i][j-1];
+                }
+                return paths_count + 1; // found path
+            }
+            if (map.pix[y*map.w + x] != SEA) { // better terrain handling needed
+                for (int j = 0; j < paths_count; j++) {
+                    if (paths[j][1].x == x && paths[j][1].y == y) {
+                        pass = 1;
+                        break;
+                    }
+                }
+                if (pass == 0) {
+                    paths[paths_count][0] = (pos){paths[i][0].x + 1, 0};
+                    paths[paths_count][1] = (pos){x, y};
+                    for (int j = 2; j < paths[i][0].x; j++) {
+                        paths[paths_count][j] = paths[i][j-1];
+                    }
+                    paths_count++;
+                }
+            }
+        }
+    }
+
+
+}
+
 
 void draw_grid(uint32_t *buffer)
 {
@@ -178,6 +257,7 @@ int move_unit(int player, int unit, int to_x, int to_y) {
     int from_y = player_units[player][unit].y;
     grid[to_x][to_y].unit[player] = grid[from_x][from_y].unit[player];
     grid[from_x][from_y].unit[player] = 0;
+    countries.pix[to_y * countries.w + to_x] = player_colors[player]; // Update country color
     player_units[player][unit].x = to_x; // Update player unit position
     player_units[player][unit].y = to_y;
     return 0; // Move successful
@@ -270,7 +350,20 @@ int move_towards(int player, int unit, int target_x, int target_y) {
     int y = player_units[player][unit].y;
     int dir_x = (target_x - x) < 0 ? -1 : (target_x - x) > 0 ? 1 : 0; // get direction x-axis
     int dir_y = (target_y - y) < 0 ? -1 : (target_y - y) > 0 ? 1 : 0; // get direction y-axis
-    return move_unit(player, unit, x + dir_x, y + dir_y);
+    int result =  move_unit(player, unit, x + dir_x, y + dir_y);
+    if (result == -3) { // Tile already occupied
+        // Try to move in the other random direction
+        int random = rand() % 2; 
+        if (dir_x == 0) {
+            result = move_towards(player, unit, x + 1 - random*2, y + dir_y);
+        } else if (dir_y == 0) {
+            result = move_towards(player, unit, x + dir_x, y + 1 - random*2);
+        } else if (dir_x != 0 && dir_y != 0) {
+            // If both directions are available, try to move in the other direction
+            result = move_towards(player, unit, x + dir_x*random, y + dir_y*(1 - random));
+        }
+    }
+    return result;
 }
 
 
@@ -426,8 +519,7 @@ void player_turn(enum players player) {
                 target = front_units[enemy];
             }
         }
-        printf("Unit %d at (%d, %d) targeting (%d, %d)\n", unit, x, y, target.x, target.y);
-        move_towards(player, unit, target.x, target.y);
+        int result = move_towards(player, unit, target.x, target.y);
     }
 }
 /*
@@ -480,7 +572,7 @@ void script(int frame) {
     if (frame % 20 == 0) {
         player_turn(0); // Player 0's turn every 60 frames
     }
-    if (frame % 20 == 6) {
+    if (frame % 40 == 15) {
         player_turn(1); // Player 1's turn every 120 frames
     }
 }
@@ -508,7 +600,7 @@ static inline struct tga tga_load(const char *path)
     fstat(fd,&st);
     assert(off + bytes <= (size_t)st.st_size);
 
-    const void *map = mmap(0, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    const void *map = mmap(0, st.st_size, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
     assert(map != MAP_FAILED);
     close(fd);
 
@@ -590,6 +682,9 @@ int main(void)
     for (int unit = 0; unit < player_unit_count[1]; unit++) {
         grid[player_units[1][unit].x][player_units[1][unit].y].unit[1] = 1; // enemy unit
     }
+
+    // test Pathing
+    pathing(0, 0, 10, 10, NULL, 0); // path from (0,0) to (10,10)
 
     while(window_poll(window)) {// poll for events and break if compositor connection is lost
         uint32_t *buffer = get_pixels(window, &stride);
