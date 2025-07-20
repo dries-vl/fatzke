@@ -23,6 +23,7 @@
 
 #define SEA 0xFF90ccd4
 #define LAND 0xFF21480e
+#define CITY 0xFFff1a1a
 
 #define GERMANY_COLOR 0xFF6a3e0d
 #define SOVIET_COLOR 0xFF6a0d33
@@ -366,7 +367,7 @@ int find_target(int player, int unit, struct unit *target) {
     return 0; // No target found
 }
 
-void player_turn(int player) {
+void player_turn(enum players player) {
     if (player < 0 || player >= PLAYER_COUNT) {
         printf("Invalid player index\n");
         return; // Invalid player
@@ -450,13 +451,6 @@ void player_turn(int player) {
 */
 
 void script(int frame) {
-    /*
-    if (frame == 100){move_unit(0, 0, 6, 6);}
-    if (frame == 140){move_unit(1, 0, 9, 7);}
-    if (frame == 180){add_unit(1, 11, 9);}
-    if (frame == 220){move_unit(1, 0, 9, 6);}
-    if (frame == 260){move_unit(1, 2, 10, 9);}
-    */
     if (frame % 20 == 0) {
         player_turn(0); // Player 0's turn every 60 frames
     }
