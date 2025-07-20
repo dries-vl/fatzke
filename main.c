@@ -133,9 +133,18 @@ int move_unit(int player, int unit, int to_x, int to_y) {
         printf("Invalid move to (%d, %d)\n", to_x, to_y);
         return -2; // Invalid move
     }
-    if (grid[to_x][to_y].unit[0] || grid[to_x][to_y].unit[1]) {
+    if (grid[to_x][to_y].unit[player]) {
         //printf("Tile (%d, %d) already occupied\n", to_x, to_y);
         return -3; // Tile already occupied
+    }
+    else if (grid[to_x][to_y].unit[1 - player]) { // BATTLE!
+        //printf("Tile (%d, %d) occupied by enemy\n", to_x, to_y);
+        printf("Battle at (%d, %d)!\n", to_x, to_y);
+        for (int defender = 0; defender < player_unit_count[1 - player]; defender++) {
+            if (player_units[1 - player][defender].x == to_x && player_units[1 - player][defender].y == to_y) {
+                return battle(player, 1 - player, unit, defender);
+            }
+        }
     }
     int from_x = player_units[player][unit].x;
     int from_y = player_units[player][unit].y;
@@ -167,6 +176,57 @@ int add_unit(int player, int x, int y) {
     grid[x][y].unit[player] = 1; // Mark unit on grid
     player_unit_count[player]++;
     return 0; // Unit added successfully
+}
+
+int remove_unit(int player, int unit) {
+    if (player < 0 || player >= PLAYER_COUNT || unit < 0 || unit >= player_unit_count[player]) {
+        printf("Invalid player or unit index\n");
+        return -1; // Invalid player or unit
+    }
+    int x = player_units[player][unit].x;
+    int y = player_units[player][unit].y;
+    grid[x][y].unit[player] = 0; // Remove unit from grid
+    player_units[player][unit] = (struct unit){0, 0, 0}; // Clear unit data
+    for (int unit_iterator = unit; unit_iterator < player_unit_count[player] - 1; ++unit_iterator) {
+        player_units[player][unit_iterator] = player_units[player][unit_iterator + 1]; // Shift units left
+    }
+    player_units[player][player_unit_count[player] - 1] = (struct unit){0, 0, 0}; // Clear last unit
+    player_unit_count[player]--;
+    return 0; // Unit removed successfully
+}
+
+int battle(int attacker, int defender, int unit_att, int unit_def) {
+    if (attacker < 0 || attacker >= PLAYER_COUNT || defender < 0 || defender >= PLAYER_COUNT) {
+        printf("Invalid player index\n");
+        return -1; // Invalid player
+    }
+    if (unit_att < 0 || unit_att >= player_unit_count[attacker] || unit_def < 0 || unit_def >= player_unit_count[defender]) {
+        printf("Invalid unit index\n");
+        return -2; // Invalid unit
+    }
+    int x_att = player_units[attacker][unit_att].x;
+    int y_att = player_units[attacker][unit_att].y;
+    int x_def = player_units[defender][unit_def].x;
+    int y_def = player_units[defender][unit_def].y;
+    if (abs(x_att - x_def) > 1 || abs(y_att - y_def) > 1) {
+        printf("Units not adjacent\n");
+        return -3; // Units not adjacent
+    }
+    int random = rand() % 20; // Random number between 0 and 5
+    if (random == 20) { // Attacker wins 1/3
+        printf("Attacker wins!\n");
+        remove_unit(defender, unit_def); // Remove defender unit
+        move_unit(attacker, unit_att, x_def, y_def); // Move attacker to defender position
+        return 1; // Attacker wins
+    } else if (random < 3) { // Defender wins 1/3
+        printf("Defender wins!\n"); // Defender wins 2/3
+        remove_unit(attacker, unit_att); // Remove attacker unit
+        return 2; // Defender wins
+    } else { // Draw 1/3
+        printf("Draw!\n");
+        return 3; // Draw
+    }
+    return 0; // something went wrong
 }
 
 
@@ -354,25 +414,25 @@ int main(void)
     uint32_t frame = 0;
     // Initialize grid with some random tiles
     
-    add_unit(0, 5, 5);
-    add_unit(0, 5, 6);
-    add_unit(0, 5, 7);
-    add_unit(0, 5, 8);
-    add_unit(0, 5, 9);
-    add_unit(0, 5, 10);
-    add_unit(0, 5, 11);
-    add_unit(0, 5, 12);
-    add_unit(0, 5, 13);
-    add_unit(0, 5, 14);
-    add_unit(1, 20, 7);
-    add_unit(1, 20, 8);
-    add_unit(1, 20, 9);
-    add_unit(1, 20, 10);
-    add_unit(1, 20, 11);
-    add_unit(1, 20, 12);
-    add_unit(1, 20, 13);
-    add_unit(1, 20, 14);
-    add_unit(1, 20, 15);
+    add_unit(0, 15, 15);
+    add_unit(0, 15, 16);
+    add_unit(0, 15, 17);
+    add_unit(0, 15, 18);
+    add_unit(0, 15, 19);
+    add_unit(0, 15, 20);
+    add_unit(0, 15, 21);
+    add_unit(0, 15, 22);
+    add_unit(0, 15, 23);
+    add_unit(0, 15, 24);
+    add_unit(1, 25, 17);
+    add_unit(1, 25, 18);
+    add_unit(1, 25, 19);
+    add_unit(1, 25, 20);
+    add_unit(1, 25, 21);
+    add_unit(1, 25, 22);
+    add_unit(1, 25, 23);
+    add_unit(1, 25, 24);
+    add_unit(1, 25, 25);
     for (int x = 0; x < GRID_W; ++x) {
         for (int y = 0; y < GRID_H; ++y) {
             grid[x][y].terrain = 0; // 0, 1, or 2
