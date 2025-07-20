@@ -14,7 +14,6 @@
 #define GRID_H (HEIGHT / PIXEL_SIZE)
 #define UNIT_SIZE 14 // size of a unit on screen
 #define MAX_UNITS 100 // max number of units per player
-#define PLAYER_COUNT 2 // number of players
 
 #define WHITE 0xFFFFFFFF
 #define BLACK 0xFF000000
@@ -24,6 +23,19 @@
 
 #define SEA 0xFF90ccd4
 #define LAND 0xFF21480e
+
+#define GERMANY_COLOR 0xFF6a3e0d
+#define SOVIET_COLOR 0xFF6a0d33
+
+enum players {
+    GERMANY,
+    SOVIET,
+    PLAYER_COUNT
+};
+uint32_t player_colors[PLAYER_COUNT] = {
+    [GERMANY] = GERMANY_COLOR,
+    [SOVIET] = SOVIET_COLOR
+}; 
 
 struct tile {
     int terrain;
@@ -38,21 +50,19 @@ struct unit {
 struct tile grid[GRID_W][GRID_H];
 int player_unit_count[] = {0, 0}; // number of units per player
 struct unit player_units[PLAYER_COUNT][MAX_UNITS] = {0};
-//player_units[0] = {{5, 5}, {5, 6}, {5, 7}, {5, 8}, {5, 9}, {5, 10}, {5, 11}, {5, 12}, {5, 13}, {5, 14}};
-//player_units[1] = {{10, 10}, {11, 10}, {12, 10}, {13, 10}, {14, 10}, {10, 11}, {11, 11}, {12, 11}, {13, 11}, {14, 11}};
 
 struct unit player_target[PLAYER_COUNT] = {{0, 0, 0}, {0, 0, 0}};
 
-
-#include <fcntl.h>
-struct tga {
-    int            w, h;        /* pixels                    */
-    const uint8_t *pix;         /* BGR… rows (top-left 0,0)  */
-    const void    *map;         /* ptr to whole mmap         */
-    size_t         map_len;     /* exact mmap length         */
+/* 32-bit uncompressed, top-left-origin TGA */
+struct tga { 
+    int w, h;                /* dimensions                    */
+    const uint8_t *pix;       /* BGRA pixel pointer            */
+    const void *map;      /* whole mmapped file            */
+    size_t map_len;  /* length for munmap             */
 };
 
 struct tga map;
+struct tga units;
 
 static void key_input_callback(void *ud, uint32_t key, uint32_t state)
 {
@@ -76,10 +86,11 @@ void draw_grid(uint32_t *buffer)
                 // draw based on tga
                 int map_x = x / PIXEL_SIZE;
                 int map_y = y / PIXEL_SIZE;
-                uint8_t blue = map.pix[(map_y*map.w + map_x)*3+0];
-                uint8_t green= map.pix[(map_y*map.w + map_x)*3+1];
-                uint8_t red = map.pix[(map_y*map.w + map_x)*3+2];
-                uint32_t pixel = (0xFF << 24) | (red << 16) | (green << 8) | blue;
+                uint8_t blue = map.pix[(map_y*map.w + map_x)*4+0];
+                uint8_t green= map.pix[(map_y*map.w + map_x)*4+1];
+                uint8_t red = map.pix[(map_y*map.w + map_x)*4+2];
+                uint8_t alpha = map.pix[(map_y*map.w + map_x)*4+3];
+                uint32_t pixel = (alpha << 24) | (red << 16) | (green << 8) | blue;
                 if (pixel == SEA)
                     buffer[y * WIDTH + x] = BLUE;
                 else if (pixel == LAND)
@@ -99,7 +110,7 @@ void draw_unit(struct tile *t, uint32_t *buffer)
         // Draw player unit
         for (int dx = -UNIT_SIZE/2; dx <= UNIT_SIZE/2; ++dx) {
             for (int dy = -UNIT_SIZE/2; dy <= UNIT_SIZE/2; ++dy) {
-                buffer[(y + dy) * WIDTH + (x + dx)] = GREEN;
+                buffer[(y + dy) * WIDTH + (x + dx)] = player_colors[0];
             }
         }
     }
@@ -107,7 +118,7 @@ void draw_unit(struct tile *t, uint32_t *buffer)
         // Draw enemy unit
         for (int dx = -UNIT_SIZE/2; dx <= UNIT_SIZE/2; ++dx) {
             for (int dy = -UNIT_SIZE/2; dy <= UNIT_SIZE/2; ++dy) {
-                buffer[(y + dy) * WIDTH + (x + dx)] = RED;
+                buffer[(y + dy) * WIDTH + (x + dx)] = player_colors[1];
             }
         }
     }
@@ -367,34 +378,32 @@ void script(int frame) {
 
 static inline struct tga tga_load(const char *path)
 {
-    int fd = open(path, O_RDONLY | 02000000);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);                        /* 1 */
     assert(fd >= 0);
 
     uint8_t h18[18];
     assert(read(fd, h18, 18) == 18);
 
-    // Only accept type-2, 24bpp, top-left origin (bit 5)
-    if (h18[2] != 2) {printf("TGA type is not 2\n"); exit(1);}
-    if (h18[16] != 24) {printf("TGA is not 24bit but: %d\n", h18[26]); exit(1);}
-    if (h18[17] & 0x20 == 0) {printf("TGA is not top-left origin\n"); exit(1);}
+    /* ─── validate header ────────────────────────────────────────── */
+    if (h18[2]  != 2)   { fprintf(stderr,"TGA type ≠ 2\n");          exit(1); }
+    if (h18[16] != 32){ fprintf(stderr,"TGA bpp ≠ 32 (got %u)\n",h18[16]);exit(1);}
+    if ((h18[17] & 0x20) == 0){ fprintf(stderr,"TGA not top-left\n"); exit(1); }
 
-    int w = h18[12] | h18[13] << 8;
-    int h = h18[14] | h18[15] << 8;
+    int w = h18[12] | h18[13]<<8;
+    int h = h18[14] | h18[15]<<8;
 
-    size_t off   = 18 + h18[0];         /* header + ID field length */
-    size_t bytes = (size_t)w * h * 3;   /* pixel payload */
+    size_t off   = 18 + h18[0];              /* header + ID-field      */
+    size_t bytes = (size_t)w * h * 4;    /* 4 bytes per pixel      */
 
     struct stat st;
-    fstat(fd, &st);
+    fstat(fd,&st);
     assert(off + bytes <= (size_t)st.st_size);
 
-    size_t len   = (size_t)st.st_size;
-    const void *map = mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 0);
+    const void *map = mmap(0, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
     assert(map != MAP_FAILED);
     close(fd);
 
-    struct tga img = { w, h, (const uint8_t*)map + off, map, len };
-    return img;
+    return (struct tga){ w, h, (const uint8_t*)map + off, map, st.st_size };
 }
 
 static inline void tga_free(struct tga img)
@@ -408,31 +417,29 @@ int main(void)
     set_input_cb(window, key_input_callback, mouse_input_callback, NULL);
     
     map = tga_load("map.tga");
+    units = tga_load("units.tga");
 
     struct timespec ts = {0};
     int stride;
     uint32_t frame = 0;
     // Initialize grid with some random tiles
     
-    add_unit(0, 15, 15);
-    add_unit(0, 15, 16);
-    add_unit(0, 15, 17);
-    add_unit(0, 15, 18);
-    add_unit(0, 15, 19);
-    add_unit(0, 15, 20);
-    add_unit(0, 15, 21);
-    add_unit(0, 15, 22);
-    add_unit(0, 15, 23);
-    add_unit(0, 15, 24);
-    add_unit(1, 25, 17);
-    add_unit(1, 25, 18);
-    add_unit(1, 25, 19);
-    add_unit(1, 25, 20);
-    add_unit(1, 25, 21);
-    add_unit(1, 25, 22);
-    add_unit(1, 25, 23);
-    add_unit(1, 25, 24);
-    add_unit(1, 25, 25);
+    // loop over units in units tga and use the add_unit function to add them to the grid
+    for (int y = 0; y < units.h; ++y) {
+        for (int x = 0; x < units.w; ++x) {
+            uint8_t blue = units.pix[(y*units.w + x)*4+0];
+            uint8_t green= units.pix[(y*units.w + x)*4+1];
+            uint8_t red = units.pix[(y*units.w + x)*4+2];
+            uint8_t alpha = map.pix[(y*map.w + x)*4+3];
+            uint32_t pixel = (alpha << 24) | (red << 16) | (green << 8) | blue;
+            if (pixel == GERMANY_COLOR) {
+                add_unit(GERMANY, x, y);
+            } else if (pixel == SOVIET_COLOR) {
+                add_unit(SOVIET, x, y);
+            }
+        }
+    }
+
     for (int x = 0; x < GRID_W; ++x) {
         for (int y = 0; y < GRID_H; ++y) {
             grid[x][y].terrain = 0; // 0, 1, or 2
