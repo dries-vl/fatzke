@@ -23,6 +23,9 @@
 #define SEA 0xFF90ccd4
 #define LAND 0xFF21480e
 
+#define GERMANY 0xFF6a3e0d
+#define SOVIET 0xFF6a0d33
+
 struct tile {
     int terrain;
     int x, y;
@@ -44,6 +47,7 @@ struct tga {
 };
 
 struct tga map;
+struct tga units;
 
 static void key_input_callback(void *ud, uint32_t key, uint32_t state)
 {
@@ -209,6 +213,7 @@ int main(void)
     set_input_cb(window, key_input_callback, mouse_input_callback, NULL);
     
     map = tga_load("map.tga");
+    units = tga_load("units.tga");
 
     struct timespec ts = {0};
     int stride;
