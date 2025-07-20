@@ -20,6 +20,9 @@
 #define GREEN 0xFF00FF00
 #define YELLOW 0xFFFFFF00
 
+#define SEA 0xFF90ccd4
+#define LAND 0xFF21480e
+
 struct tile {
     int terrain;
     int x, y;
@@ -67,7 +70,13 @@ void draw_grid(uint32_t *buffer)
                 uint8_t blue = map.pix[(map_y*map.w + map_x)*3+0];
                 uint8_t green= map.pix[(map_y*map.w + map_x)*3+1];
                 uint8_t red = map.pix[(map_y*map.w + map_x)*3+2];
-                buffer[y * WIDTH + x] = (0xFF << 24) | (red << 16) | (green << 8) | blue;
+                uint32_t pixel = (0xFF << 24) | (red << 16) | (green << 8) | blue;
+                if (pixel == SEA)
+                    buffer[y * WIDTH + x] = BLUE;
+                else if (pixel == LAND)
+                    buffer[y * WIDTH + x] = WHITE;
+                else
+                    buffer[y * WIDTH + x] = RED;
             }
         }
     }
@@ -166,7 +175,9 @@ static inline struct tga tga_load(const char *path)
     assert(read(fd, h18, 18) == 18);
 
     // Only accept type-2, 24bpp, top-left origin (bit 5)
-    assert(h18[2] == 2 && h18[16] == 24 && (h18[17] & 0x20));
+    if (h18[2] != 2) {printf("TGA type is not 2\n"); exit(1);}
+    if (h18[16] != 24) {printf("TGA is not 24bit but: %d\n", h18[26]); exit(1);}
+    if (h18[17] & 0x20 == 0) {printf("TGA is not top-left origin\n"); exit(1);}
 
     int w = h18[12] | h18[13] << 8;
     int h = h18[14] | h18[15] << 8;
