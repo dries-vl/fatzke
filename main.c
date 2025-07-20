@@ -56,13 +56,14 @@ struct unit player_target[PLAYER_COUNT] = {{0, 0, 0}, {0, 0, 0}};
 /* 32-bit uncompressed, top-left-origin TGA */
 struct tga { 
     int w, h;                /* dimensions                    */
-    const uint8_t *pix;       /* BGRA pixel pointer            */
+    const uint32_t *pix;       /* BGRA pixel pointer            */
     const void *map;      /* whole mmapped file            */
     size_t map_len;  /* length for munmap             */
 };
 
 struct tga map;
 struct tga units;
+struct tga countries;
 
 static void key_input_callback(void *ud, uint32_t key, uint32_t state)
 {
@@ -86,11 +87,7 @@ void draw_grid(uint32_t *buffer)
                 // draw based on tga
                 int map_x = x / PIXEL_SIZE;
                 int map_y = y / PIXEL_SIZE;
-                uint8_t blue = map.pix[(map_y*map.w + map_x)*4+0];
-                uint8_t green= map.pix[(map_y*map.w + map_x)*4+1];
-                uint8_t red = map.pix[(map_y*map.w + map_x)*4+2];
-                uint8_t alpha = map.pix[(map_y*map.w + map_x)*4+3];
-                uint32_t pixel = (alpha << 24) | (red << 16) | (green << 8) | blue;
+                uint32_t pixel = map.pix[map_y * map.w + map_x];
                 if (pixel == SEA)
                     buffer[y * WIDTH + x] = BLUE;
                 else if (pixel == LAND)
@@ -318,7 +315,7 @@ void script(int frame) {
 
 static inline struct tga tga_load(const char *path)
 {
-    int fd = open(path, O_RDONLY | O_CLOEXEC);                        /* 1 */
+    int fd = open(path, O_RDONLY | 02000000);                        /* 1 */
     assert(fd >= 0);
 
     uint8_t h18[18];
@@ -343,7 +340,7 @@ static inline struct tga tga_load(const char *path)
     assert(map != MAP_FAILED);
     close(fd);
 
-    return (struct tga){ w, h, (const uint8_t*)map + off, map, st.st_size };
+    return (struct tga){ w, h, (const uint32_t*)((uint8_t *)map + off), map, st.st_size };
 }
 
 static inline void tga_free(struct tga img)
@@ -358,6 +355,7 @@ int main(void)
     
     map = tga_load("map.tga");
     units = tga_load("units.tga");
+    countries = tga_load("countries.tga");
 
     struct timespec ts = {0};
     int stride;
@@ -367,11 +365,7 @@ int main(void)
     // loop over units in units tga and use the add_unit function to add them to the grid
     for (int y = 0; y < units.h; ++y) {
         for (int x = 0; x < units.w; ++x) {
-            uint8_t blue = units.pix[(y*units.w + x)*4+0];
-            uint8_t green= units.pix[(y*units.w + x)*4+1];
-            uint8_t red = units.pix[(y*units.w + x)*4+2];
-            uint8_t alpha = map.pix[(y*map.w + x)*4+3];
-            uint32_t pixel = (alpha << 24) | (red << 16) | (green << 8) | blue;
+            uint32_t pixel = units.pix[y * units.w + x];
             if (pixel == GERMANY_COLOR) {
                 add_unit(GERMANY, x, y);
             } else if (pixel == SOVIET_COLOR) {
