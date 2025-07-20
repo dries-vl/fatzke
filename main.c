@@ -43,51 +43,6 @@ static void mouse_input_callback(void *ud, int32_t x, int32_t y, uint32_t b)
     printf("pointer at %d,%d\n", x, y);
 }
 
-int main(void)
-{
-    struct ctx *window = create_window(WIDTH, HEIGHT, "<<Fatzke>>");
-    set_input_cb(window, key_input_callback, mouse_input_callback, NULL);
-
-    struct timespec ts = {0};
-    int stride;
-    uint32_t frame = 0;
-    // Initialize grid with some random tiles
-    for (int x = 0; x < GRID_W; ++x) {
-        for (int y = 0; y < GRID_H; ++y) {
-            grid[x][y].terrain = 0; // 0, 1, or 2
-            grid[x][y].x = x;
-            grid[x][y].y = y;
-            grid[x][y].unit[0] = 0; // no player unit
-            grid[x][y].unit[1] = 0; // no enemy unit
-            grid[x][y].building = 0; // random building presence
-        }
-    }
-    for (int unit = 0; unit < player_unit_count; unit++) {
-        grid[player_units[unit][0]][player_units[unit][1]].unit[0] = 1; // player unit
-    }
-    for (int unit = 0; unit < enemy_unit_count; unit++) {
-        grid[enemy_units[unit][0]][enemy_units[unit][1]].unit[1] = 1; // enemy unit
-    }
-
-    for (;;) {
-        if (!window_poll(window)) break; // poll for events and break if compositor connection is lost
-
-        uint32_t *buffer = get_pixels(window, &stride);
-        script(frame);
-
-        // Clear the buffer
-        memset(buffer, 255, WIDTH * HEIGHT * sizeof(uint32_t));
-        draw_grid(buffer);
-        draw_units(buffer);
-        commit(window);
-        frame ++;
-
-        window_wait_vsync(window); // wait for vsync (and keep processing events) before next frame
-        commit(window); // tell compositor it can read from the buffer
-    }
-    destroy(window);
-}
-
 void draw_grid(uint32_t *buffer)
 {
     for (int x = 0; x < WIDTH; ++x) {
@@ -95,19 +50,6 @@ void draw_grid(uint32_t *buffer)
             if (x % PIXEL_SIZE == 0 || y % PIXEL_SIZE == 0)
                 buffer[y * WIDTH + x] = BLACK;
         }
-    }
-}
-
-void draw_units(uint32_t *buffer) {
-    for (int unit = 0; unit < player_unit_count; ++unit) {
-        int x = player_units[unit][0];
-        int y = player_units[unit][1];
-        draw_unit(&grid[x][y], buffer);
-    }
-    for (int unit = 0; unit < enemy_unit_count; ++unit) {
-        int x = enemy_units[unit][0];
-        int y = enemy_units[unit][1];
-        draw_unit(&grid[x][y], buffer);
     }
 }
 
@@ -130,6 +72,19 @@ void draw_unit(struct tile *t, uint32_t *buffer)
                 buffer[(y + dy) * WIDTH + (x + dx)] = RED;
             }
         }
+    }
+}
+
+void draw_units(uint32_t *buffer) {
+    for (int unit = 0; unit < player_unit_count; ++unit) {
+        int x = player_units[unit][0];
+        int y = player_units[unit][1];
+        draw_unit(&grid[x][y], buffer);
+    }
+    for (int unit = 0; unit < enemy_unit_count; ++unit) {
+        int x = enemy_units[unit][0];
+        int y = enemy_units[unit][1];
+        draw_unit(&grid[x][y], buffer);
     }
 }
 
@@ -180,4 +135,46 @@ int move_unit(int from_x, int from_y, int to_x, int to_y)
 void script(int frame) {
     if (frame == 60){move_unit(5, 5, 6, 6);}
     if (frame == 80){move_unit(10, 10, 9, 9);}
+}
+
+int main(void)
+{
+    struct ctx *window = create_window(WIDTH, HEIGHT, "<<Fatzke>>");
+    set_input_cb(window, key_input_callback, mouse_input_callback, NULL);
+
+    struct timespec ts = {0};
+    int stride;
+    uint32_t frame = 0;
+    // Initialize grid with some random tiles
+    for (int x = 0; x < GRID_W; ++x) {
+        for (int y = 0; y < GRID_H; ++y) {
+            grid[x][y].terrain = 0; // 0, 1, or 2
+            grid[x][y].x = x;
+            grid[x][y].y = y;
+            grid[x][y].unit[0] = 0; // no player unit
+            grid[x][y].unit[1] = 0; // no enemy unit
+            grid[x][y].building = 0; // random building presence
+        }
+    }
+    for (int unit = 0; unit < player_unit_count; unit++) {
+        grid[player_units[unit][0]][player_units[unit][1]].unit[0] = 1; // player unit
+    }
+    for (int unit = 0; unit < enemy_unit_count; unit++) {
+        grid[enemy_units[unit][0]][enemy_units[unit][1]].unit[1] = 1; // enemy unit
+    }
+
+    while(window_poll(window)) {// poll for events and break if compositor connection is lost
+        uint32_t *buffer = get_pixels(window, &stride);
+        script(frame);
+
+        // Clear the buffer
+        memset(buffer, 255, WIDTH * HEIGHT * sizeof(uint32_t));
+        draw_grid(buffer);
+        draw_units(buffer);
+        frame ++;
+
+        window_wait_vsync(window); // wait for vsync (and keep processing events) before next frame
+        commit(window); // tell compositor it can read from the buffer
+    }
+    destroy(window);
 }
