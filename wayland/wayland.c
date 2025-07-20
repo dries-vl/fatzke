@@ -37,6 +37,9 @@ struct ctx {
     int     buf_w, buf_h, stride;
     int     win_w, win_h;
     int     configured;
+    
+    double last_x, last_y; // keep track of mouse position
+    int vsync_ready; // set by frame_done callback
 
     /* user callbacks */
     key_cb     key_cb;
@@ -80,13 +83,25 @@ static void kb_key(void *data, struct wl_keyboard *kbd, uint32_t serial,
     if (c->key_cb) c->key_cb(c->ud, key, state);
 }
 
-static void ptr_button(void *data, struct wl_pointer *ptr, uint32_t serial,
-                       uint32_t time, uint32_t button, uint32_t state)
-{
+static void ptr_motion(void *data, struct wl_pointer *ptr, uint32_t time, wl_fixed_t sx, wl_fixed_t sy) {
     struct ctx *c = data;
-    /* we don’t have coordinates here; simplify */
-    if (c->ptr_cb) c->ptr_cb(c->ud, 0, 0, state);
+    c->last_x = wl_fixed_to_double(sx);
+    c->last_y = wl_fixed_to_double(sy);
 }
+
+static void ptr_enter(void *data, struct wl_pointer *ptr, uint32_t serial,
+                      struct wl_surface *surface, wl_fixed_t sx, wl_fixed_t sy) {
+    struct ctx *c = data;
+    c->last_x = wl_fixed_to_double(sx);
+    c->last_y = wl_fixed_to_double(sy);
+}
+
+static void ptr_button(void *data, struct wl_pointer *ptr, uint32_t serial,
+                       uint32_t time, uint32_t button, uint32_t state) {
+    struct ctx *c = data;
+    if (c->ptr_cb) c->ptr_cb(c->ud, c->last_x, c->last_y, state);
+}
+
 
 /* ---------- keyboard no-ops ---------- */
 static void kb_keymap(void *d, struct wl_keyboard *k,
@@ -111,12 +126,8 @@ static const struct wl_keyboard_listener kbd_lis = {
 };
 
 /* ---------- pointer no-ops ---------- */
-static void ptr_enter(void *d, struct wl_pointer *p, uint32_t serial,
-                      struct wl_surface *s, wl_fixed_t sx, wl_fixed_t sy) {}
 static void ptr_leave(void *d, struct wl_pointer *p, uint32_t serial,
                       struct wl_surface *s) {}
-static void ptr_motion(void *d, struct wl_pointer *p, uint32_t time,
-                       wl_fixed_t sx, wl_fixed_t sy) {}
 static void ptr_axis(void *d, struct wl_pointer *p, uint32_t time,
                      uint32_t axis, wl_fixed_t value) {}
 static void ptr_frame(void *d, struct wl_pointer *p) {}
@@ -239,12 +250,36 @@ void *get_pixels(struct ctx *c, int *stride_out)
     return c->pixels;
 }
 
+static void frame_done(void *data, struct wl_callback *cb, uint32_t time);
+
+static const struct wl_callback_listener frame_listener = {
+    .done = frame_done,
+};
+
+static void frame_done(void *data, struct wl_callback *cb, uint32_t time) {
+    wl_callback_destroy(cb);
+    struct ctx *c = data;
+    c->vsync_ready = 1;
+}
+
+void window_wait_vsync(struct ctx *c)
+{
+    c->vsync_ready = 0;
+    struct wl_callback *cb = wl_surface_frame(c->surf);
+    static const struct wl_callback_listener frame_listener = { .done = frame_done };
+    wl_callback_add_listener(cb, &frame_listener, c);
+}
+
 void commit(struct ctx *c)
 {
     wl_surface_attach(c->surf, c->buf, 0, 0);
     wl_surface_damage_buffer(c->surf, 0, 0, c->win_w, c->win_h);
     wl_surface_commit(c->surf);
     wl_display_flush(c->dpy);
+
+    // Block in dispatch until vsync_ready is set by callback
+    while (!c->vsync_ready)
+        wl_display_dispatch(c->dpy);
 }
 
 void set_input_cb(struct ctx *c, key_cb k, pointer_cb p, void *ud)
@@ -254,14 +289,27 @@ void set_input_cb(struct ctx *c, key_cb k, pointer_cb p, void *ud)
     c->ud     = ud;
 }
 
-int window_poll(struct ctx *c)
-{
-    wl_display_flush(c->dpy);
-    if (wl_display_dispatch(c->dpy) < 0) {
-        if (errno == EPIPE) return 0; /* compositor gone */
-        perror("dispatch");
+int window_poll(struct ctx *c) {
+    wl_display_flush(c->dpy); // send any pending requests
+
+    // Try to read new events (non-blocking)
+    if (wl_display_prepare_read(c->dpy) == 0) {
+        // No events waiting: poll fd for input
+        struct pollfd pfd = {
+            .fd = wl_display_get_fd(c->dpy),
+            .events = POLLIN
+        };
+        // poll with zero timeout: don't block
+        poll(&pfd, 1, 0);
+
+        // This is always non-blocking
+        wl_display_read_events(c->dpy);
+    } else {
+        wl_display_cancel_read(c->dpy); // always cancel if can't read
     }
-    return 1;
+
+    // Process any new events already in queue
+    return wl_display_dispatch_pending(c->dpy) >= 0;
 }
 
 void destroy(struct ctx *c)
