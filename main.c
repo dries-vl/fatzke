@@ -37,6 +37,8 @@ uint32_t player_colors[PLAYER_COUNT] = {
     [GERMANY] = GERMANY_COLOR,
     [SOVIET] = SOVIET_COLOR
 }; 
+uint32_t player_cities[PLAYER_COUNT] = {0};
+uint32_t player_money[PLAYER_COUNT] = {0};
 
 struct tile {
     int terrain;
@@ -49,7 +51,7 @@ struct unit {
     int type;
 };
 struct tile grid[GRID_W][GRID_H];
-int player_unit_count[] = {0, 0}; // number of units per player
+int player_unit_count[PLAYER_COUNT] = {0}; // number of units per player
 struct unit player_units[PLAYER_COUNT][MAX_UNITS] = {0};
 
 struct unit player_target[PLAYER_COUNT] = {{0, 0, 0}, {0, 0, 0}};
@@ -367,11 +369,32 @@ int find_target(int player, int unit, struct unit *target) {
     return 0; // No target found
 }
 
+void spawn_unit(enum players player) {
+    // try to spawn around a unit
+    for (int unit_id = 0; unit_id < player_unit_count[player]; unit_id++) {
+        struct unit unit = player_units[player][unit_id];
+        bool has_unit = units.pix[unit.y * units.w + unit.x] != 0;
+        bool is_sea = map.pix[unit.y * map.w + unit.x] == SEA;
+        if (!has_unit && !is_sea)
+            add_unit(player, unit.x, unit.y);
+    }
+}
+
 void player_turn(enum players player) {
+    // verify that the player exists in the player enum
     if (player < 0 || player >= PLAYER_COUNT) {
         printf("Invalid player index\n");
         return; // Invalid player
     }
+    // add 1 money for every city
+    player_money[player] += player_cities[player];
+    // buy units for every 10 money
+    int money_to_use = player_money[player] / 10;
+    player_money[player] -= money_to_use;
+    // pick a tile to put a new unit on
+    // try 
+
+    // unit movement
     struct unit front_units[MAX_UNITS];
     int count = 0;
     find_front(1 - player, 0, 0, front_units, &count); // Get front units for other player
@@ -494,6 +517,15 @@ static inline void tga_free(struct tga img)
     munmap((void*)img.map, img.map_len);
 }
 
+int get_player(int x, int y) {
+    uint32_t player_color = countries.pix[y * map.w + x];
+    for (int i = 0; i < PLAYER_COUNT; i++)
+        if (player_colors[i] == player_color)
+            return i;
+    printf("Player not found\n");
+    return -1;
+}
+
 int main(void)
 {
     struct ctx *window = create_window(WIDTH, HEIGHT, "<<Fatzke>>");
@@ -526,6 +558,9 @@ int main(void)
                 grid[x][y].terrain = 1; // water
             } else if (pixel == LAND) {
                 grid[x][y].terrain = 0; // land
+            } else if (pixel == CITY) {
+                int player_id = get_player(x, y);
+                if (player_id != -1) player_cities[player_id]++;
             } else {
                 grid[x][y].terrain = 2; // random terrain
             }
