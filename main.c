@@ -77,6 +77,18 @@ static void mouse_input_callback(void *ud, int32_t x, int32_t y, uint32_t b)
     printf("pointer at %d,%d\n", x, y);
 }
 
+static inline uint8_t clamp_mul(uint8_t ch, float factor) {
+    int v = (int)(ch * factor);
+    return v > 255 ? 255 : v;
+}
+
+#define LIGHTEN(c, f) ( \
+    (clamp_mul((c)&0xFF, f)) \
+    | (clamp_mul(((c)>>8)&0xFF, f) << 8) \
+    | (clamp_mul(((c)>>16)&0xFF, f) << 16) \
+    | ((c)&0xFF000000) \
+)
+
 void draw_grid(uint32_t *buffer)
 {
     for (int x = 0; x < WIDTH; ++x) {
@@ -90,9 +102,10 @@ void draw_grid(uint32_t *buffer)
                 uint32_t pixel = map.pix[map_y * map.w + map_x];
                 if (pixel == SEA)
                     buffer[y * WIDTH + x] = BLUE;
-                else if (pixel == LAND)
-                    buffer[y * WIDTH + x] = WHITE;
-                else
+                else if (pixel == LAND) {
+                    uint32_t country_pixel = countries.pix[map_y * countries.w + map_x];
+                    buffer[y * WIDTH + x] = country_pixel;
+                } else
                     buffer[y * WIDTH + x] = RED;
             }
         }
@@ -107,7 +120,7 @@ void draw_unit(struct tile *t, uint32_t *buffer)
         // Draw player unit
         for (int dx = -UNIT_SIZE/2; dx <= UNIT_SIZE/2; ++dx) {
             for (int dy = -UNIT_SIZE/2; dy <= UNIT_SIZE/2; ++dy) {
-                buffer[(y + dy) * WIDTH + (x + dx)] = player_colors[0];
+                buffer[(y + dy) * WIDTH + (x + dx)] = LIGHTEN(player_colors[0], 2.0f);
             }
         }
     }
@@ -115,7 +128,7 @@ void draw_unit(struct tile *t, uint32_t *buffer)
         // Draw enemy unit
         for (int dx = -UNIT_SIZE/2; dx <= UNIT_SIZE/2; ++dx) {
             for (int dy = -UNIT_SIZE/2; dy <= UNIT_SIZE/2; ++dy) {
-                buffer[(y + dy) * WIDTH + (x + dx)] = player_colors[1];
+                buffer[(y + dy) * WIDTH + (x + dx)] = LIGHTEN(player_colors[1], 2.0f);
             }
         }
     }
