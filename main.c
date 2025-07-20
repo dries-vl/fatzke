@@ -14,7 +14,6 @@
 #define GRID_H (HEIGHT / PIXEL_SIZE)
 #define UNIT_SIZE 14 // size of a unit on screen
 #define MAX_UNITS 100 // max number of units per player
-#define PLAYER_COUNT 2 // number of players
 
 #define WHITE 0xFFFFFFFF
 #define BLACK 0xFF000000
@@ -25,8 +24,18 @@
 #define SEA 0xFF90ccd4
 #define LAND 0xFF21480e
 
-#define GERMANY 0xFF6a3e0d
-#define SOVIET 0xFF6a0d33
+#define GERMANY_COLOR 0xFF6a3e0d
+#define SOVIET_COLOR 0xFF6a0d33
+
+enum players {
+    GERMANY,
+    SOVIET,
+    PLAYER_COUNT
+};
+uint32_t player_colors[PLAYER_COUNT] = {
+    [GERMANY] = GERMANY_COLOR,
+    [SOVIET] = SOVIET_COLOR
+}; 
 
 struct tile {
     int terrain;
@@ -41,11 +50,8 @@ struct unit {
 struct tile grid[GRID_W][GRID_H];
 int player_unit_count[] = {0, 0}; // number of units per player
 struct unit player_units[PLAYER_COUNT][MAX_UNITS] = {0};
-//player_units[0] = {{5, 5}, {5, 6}, {5, 7}, {5, 8}, {5, 9}, {5, 10}, {5, 11}, {5, 12}, {5, 13}, {5, 14}};
-//player_units[1] = {{10, 10}, {11, 10}, {12, 10}, {13, 10}, {14, 10}, {10, 11}, {11, 11}, {12, 11}, {13, 11}, {14, 11}};
 
 struct unit player_target[PLAYER_COUNT] = {{0, 0, 0}, {0, 0, 0}};
-
 
 /* 32-bit uncompressed, top-left-origin TGA */
 struct tga { 
@@ -104,7 +110,7 @@ void draw_unit(struct tile *t, uint32_t *buffer)
         // Draw player unit
         for (int dx = -UNIT_SIZE/2; dx <= UNIT_SIZE/2; ++dx) {
             for (int dy = -UNIT_SIZE/2; dy <= UNIT_SIZE/2; ++dy) {
-                buffer[(y + dy) * WIDTH + (x + dx)] = GREEN;
+                buffer[(y + dy) * WIDTH + (x + dx)] = player_colors[0];
             }
         }
     }
@@ -112,7 +118,7 @@ void draw_unit(struct tile *t, uint32_t *buffer)
         // Draw enemy unit
         for (int dx = -UNIT_SIZE/2; dx <= UNIT_SIZE/2; ++dx) {
             for (int dy = -UNIT_SIZE/2; dy <= UNIT_SIZE/2; ++dy) {
-                buffer[(y + dy) * WIDTH + (x + dx)] = RED;
+                buffer[(y + dy) * WIDTH + (x + dx)] = player_colors[1];
             }
         }
     }
@@ -366,10 +372,10 @@ int main(void)
             uint8_t red = units.pix[(y*units.w + x)*4+2];
             uint8_t alpha = map.pix[(y*map.w + x)*4+3];
             uint32_t pixel = (alpha << 24) | (red << 16) | (green << 8) | blue;
-            if (pixel == GERMANY) {
-                add_unit(0, x, y);
-            } else if (pixel == SOVIET) {
-                add_unit(1, x, y);
+            if (pixel == GERMANY_COLOR) {
+                add_unit(GERMANY, x, y);
+            } else if (pixel == SOVIET_COLOR) {
+                add_unit(SOVIET, x, y);
             }
         }
     }
