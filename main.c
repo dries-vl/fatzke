@@ -514,11 +514,7 @@ int main(void)
     // loop over map tga and fill the grid with terrain
     for (int y = 0; y < map.h; ++y) {
         for (int x = 0; x < map.w; ++x) {
-            uint8_t blue = map.pix[(y*map.w + x)*4+0];
-            uint8_t green= map.pix[(y*map.w + x)*4+1];
-            uint8_t red = map.pix[(y*map.w + x)*4+2];
-            uint8_t alpha = map.pix[(y*map.w + x)*4+3];
-            uint32_t pixel = (alpha << 24) | (red << 16) | (green << 8) | blue;
+            uint32_t pixel = map.pix[y * map.w + x];
             if (pixel == SEA) {
                 grid[x][y].terrain = 1; // water
             } else if (pixel == LAND) {
@@ -533,10 +529,13 @@ int main(void)
     for (int y = 0; y < units.h; ++y) {
         for (int x = 0; x < units.w; ++x) {
             uint32_t pixel = units.pix[y * units.w + x];
-            if (pixel == GERMANY_COLOR) {
-                add_unit(GERMANY, x, y);
-            } else if (pixel == SOVIET_COLOR) {
-                add_unit(SOVIET, x, y);
+            if (pixel != 0) { // unit is not empty pixel
+                uint32_t country_pixel = countries.pix[y * countries.w + x];
+                if (country_pixel == GERMANY_COLOR) {
+                    add_unit(GERMANY, x, y);
+                } else if (country_pixel == SOVIET_COLOR) {
+                    add_unit(SOVIET, x, y);
+                }
             }
         }
     }
