@@ -463,7 +463,7 @@ int find_target(int player, int unit, struct unit *target) {
     return 0; // No target found
 }
 
-void spawn_unit(enum players player) {
+int spawn_unit(enum players player) {
     // try to spawn around a unit
     for (int unit_id = 0; unit_id < player_unit_count[player]; unit_id++) {
         struct unit unit = player_units[player][unit_id];
@@ -473,15 +473,17 @@ void spawn_unit(enum players player) {
             if (spawn_y >= 0 && spawn_x >= 0 && spawn_y < units.w && spawn_x < units.w) {
                 bool has_unit = units.pix[spawn_y * units.w + spawn_x] != 0;
                 bool is_sea = map.pix[spawn_y * map.w + spawn_x] == SEA;
-                if (!has_unit && !is_sea) {
+                bool is_player_controlled = get_player(spawn_x, spawn_y) == player;
+                if (!has_unit && !is_sea && is_player_controlled) {
                     printf("Spawned a new unit!\n");
                     add_unit(player, spawn_x, spawn_y);
-                    return;
+                    return 1;
                 }
             }
         }
     }
     printf("Could not find location to spawn the unit\n");
+    return -1;
 }
 
 void player_turn(enum players player) {
@@ -493,10 +495,14 @@ void player_turn(enum players player) {
     // add 1 money for every city
     player_money[player] += player_cities[player];
     // buy units for every 10 money
-    int units_to_buy = player_money[player] / 10;
-    int money_to_use = units_to_buy * 10;
+    static const int UNIT_COST = 10;
+    int units_to_buy = player_money[player] / UNIT_COST;
+    int money_to_use = units_to_buy * UNIT_COST;
     player_money[player] -= money_to_use;
-    for (int i = 0; i<units_to_buy; i++) spawn_unit(player);
+    for (int i = 0; i<units_to_buy; i++) { 
+        if (spawn_unit(player) == -1) 
+            player_money[player] += UNIT_COST; // refund if cannot be spawned anywhere 
+    }
 
     // unit movement
     struct unit front_units[MAX_UNITS];
