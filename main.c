@@ -224,6 +224,7 @@ int battle(int attacker, int defender, int unit_att, int unit_def) {
         printf("Units not adjacent\n");
         return -3; // Units not adjacent
     }
+    return 3; // disable
     int random = rand() % 20; // Random number between 0 and 5
     if (random == 20) { // Attacker wins 1/3
         printf("Attacker wins!\n");
@@ -254,7 +255,16 @@ int move_towards(int player, int unit, int target_x, int target_y) {
     int y = player_units[player][unit].y;
     int dir_x = (target_x - x) < 0 ? -1 : (target_x - x) > 0 ? 1 : 0; // get direction x-axis
     int dir_y = (target_y - y) < 0 ? -1 : (target_y - y) > 0 ? 1 : 0; // get direction y-axis
-    return move_unit(player, unit, x + dir_x, y + dir_y);
+    int result =  move_unit(player, unit, x + dir_x, y + dir_y);
+    if (result == -3) { // Tile already occupied
+        // Try to move in the other direction
+        if (dir_x != 0) {
+            result = move_unit(player, unit, x, y + dir_y);
+        } else if (dir_y != 0) {
+            result = move_unit(player, unit, x + dir_x, y);
+        }
+    }
+    return result;
 }
 
 
@@ -387,7 +397,7 @@ void player_turn(int player) {
             }
         }
         printf("Unit %d at (%d, %d) targeting (%d, %d)\n", unit, x, y, target.x, target.y);
-        move_towards(player, unit, target.x, target.y);
+        int result = move_towards(player, unit, target.x, target.y);
     }
 }
 /*
