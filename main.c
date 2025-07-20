@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <time.h>
+#include <assert.h>
 
 // sudo apt install libwayland-dev
 #include "wayland/wayland.c"
@@ -20,6 +21,9 @@
 #define RED 0xFFFF0000
 #define GREEN 0xFF00FF00
 #define YELLOW 0xFFFFFF00
+
+#define SEA 0xFF90ccd4
+#define LAND 0xFF21480e
 
 struct tile {
     int terrain;
@@ -40,6 +44,16 @@ struct unit player_units[PLAYER_COUNT][MAX_UNITS] = {0};
 struct unit player_target[PLAYER_COUNT] = {{0, 0, 0}, {0, 0, 0}};
 
 
+#include <fcntl.h>
+struct tga {
+    int            w, h;        /* pixels                    */
+    const uint8_t *pix;         /* BGR… rows (top-left 0,0)  */
+    const void    *map;         /* ptr to whole mmap         */
+    size_t         map_len;     /* exact mmap length         */
+};
+
+struct tga map;
+
 static void key_input_callback(void *ud, uint32_t key, uint32_t state)
 {
     if (key == 1) exit(0);
@@ -56,8 +70,23 @@ void draw_grid(uint32_t *buffer)
 {
     for (int x = 0; x < WIDTH; ++x) {
         for (int y = 0; y < HEIGHT; ++y) {
-            if (x % PIXEL_SIZE == 0 || y % PIXEL_SIZE == 0)
+            if (x % PIXEL_SIZE == 0 || y % PIXEL_SIZE == 0) {
                 buffer[y * WIDTH + x] = BLACK;
+            } else {
+                // draw based on tga
+                int map_x = x / PIXEL_SIZE;
+                int map_y = y / PIXEL_SIZE;
+                uint8_t blue = map.pix[(map_y*map.w + map_x)*3+0];
+                uint8_t green= map.pix[(map_y*map.w + map_x)*3+1];
+                uint8_t red = map.pix[(map_y*map.w + map_x)*3+2];
+                uint32_t pixel = (0xFF << 24) | (red << 16) | (green << 8) | blue;
+                if (pixel == SEA)
+                    buffer[y * WIDTH + x] = BLUE;
+                else if (pixel == LAND)
+                    buffer[y * WIDTH + x] = WHITE;
+                else
+                    buffer[y * WIDTH + x] = RED;
+            }
         }
     }
 }
@@ -276,10 +305,49 @@ void script(int frame) {
     }
 }
 
+static inline struct tga tga_load(const char *path)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    assert(fd >= 0);
+
+    uint8_t h18[18];
+    assert(read(fd, h18, 18) == 18);
+
+    // Only accept type-2, 24bpp, top-left origin (bit 5)
+    if (h18[2] != 2) {printf("TGA type is not 2\n"); exit(1);}
+    if (h18[16] != 24) {printf("TGA is not 24bit but: %d\n", h18[26]); exit(1);}
+    if (h18[17] & 0x20 == 0) {printf("TGA is not top-left origin\n"); exit(1);}
+
+    int w = h18[12] | h18[13] << 8;
+    int h = h18[14] | h18[15] << 8;
+
+    size_t off   = 18 + h18[0];         /* header + ID field length */
+    size_t bytes = (size_t)w * h * 3;   /* pixel payload */
+
+    struct stat st;
+    fstat(fd, &st);
+    assert(off + bytes <= (size_t)st.st_size);
+
+    size_t len   = (size_t)st.st_size;
+    const void *map = mmap(NULL, len, PROT_READ, MAP_PRIVATE, fd, 0);
+    assert(map != MAP_FAILED);
+    close(fd);
+
+    struct tga img = { w, h, (const uint8_t*)map + off, map, len };
+    return img;
+}
+
+static inline void tga_free(struct tga img)
+{
+    munmap((void*)img.map, img.map_len);
+}
+
 int main(void)
 {
     struct ctx *window = create_window(WIDTH, HEIGHT, "<<Fatzke>>");
     set_input_cb(window, key_input_callback, mouse_input_callback, NULL);
+    
+    map = tga_load("map.tga");
 
     struct timespec ts = {0};
     int stride;

@@ -50,10 +50,12 @@ struct ctx {
 /* ========= helpers ========= */
 static int memfd(size_t len)
 {
-    #define MFD_CLOEXEC        0x0001U
-    #define MFD_ALLOW_SEALING  0x0002U
-    int fd = syscall(SYS_memfd_create, "ultrafast", MFD_CLOEXEC|MFD_ALLOW_SEALING);
-    if (fd < 0 || ftruncate(fd, (off_t)len) < 0) { perror("memfd"); exit(1); }
+    size_t pagesize = (size_t)sysconf(_SC_PAGESIZE);      /* normally 4096 */
+    size_t padded   = (len + pagesize - 1) & ~(pagesize - 1);  /* round-up  */
+    int fd = syscall(SYS_memfd_create, "ultrafast", 0);
+    if (fd < 0 || ftruncate(fd, (off_t)padded) < 0) {
+        perror("memfd");  exit(1);
+    }
     return fd;
 }
 static void alloc_buffer(struct ctx *st, int w, int h)
