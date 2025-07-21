@@ -92,6 +92,34 @@ uint32_t player_money[PLAYER_COUNT] = {0};
 
 #pragma region UNITS
 struct tga units;
+enum units {
+    INFANTRY,
+    MOTORIZED,
+    ARMOR,
+    UNIT_COUNT
+};
+uint32_t unit_colors[UNIT_COUNT] = {
+    [INFANTRY] = 0xFF000000,
+    [MOTORIZED] = 0xFF383838,
+    [ARMOR] = 0xFF6f6f6f,
+};
+uint32_t unit_cost[UNIT_COUNT] = {
+    [INFANTRY] = 100,
+    [MOTORIZED] = 200,
+    [ARMOR] = 400,
+};
+
+#define MATRIX(type, name, rows, cols, ...) \
+    static const type name##_flat[] = { __VA_ARGS__ }; \
+    _Static_assert(sizeof(name##_flat)/sizeof(type) == (rows)*(cols), #name " : need " #rows " x " #cols " entries (edit the list)"); \
+    static const type (*const name)[cols] = (const type (*)[cols])name##_flat
+
+MATRIX(uint32_t, movement_cost, UNIT_COUNT, TILE_COUNT,
+    1,   1,  2,  1,  1,  2,
+    255,  1,  4,  1,  1,  3,
+    255,  2,  4,  1,  1,  4
+);
+
 #pragma endregion
 
 typedef struct {
