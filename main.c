@@ -21,25 +21,76 @@
 #define GREEN 0xFF00FF00
 #define YELLOW 0xFFFFFF00
 
-#define SEA 0xFF90ccd4
-#define LAND 0xFF21480e
-#define CITY 0xFFff1a1a
+struct tga { 
+    int w, h; // dimensions
+    uint32_t *pix; // pointer to pixel data
+    const void *map; // handle
+    size_t map_len; // keep track of length for unmapping later
+};
 
-#define GERMANY_COLOR 0xFF6a3e0d
-#define SOVIET_COLOR 0xFF6a0d33
+#pragma region TILES
+struct tga map;
+enum tiles {
+    SEA,
+    CITY,
+    MOUNTAINS,
+    CROPLAND,
+    PLAINS,
+    FOREST,
+    TILE_COUNT    
+};
+uint32_t tile_colors[TILE_COUNT] = {
+    [SEA] = 0xFF90ccd4,
+    [CITY] = 0xFFff1a1a,
+    [MOUNTAINS] = 0xFF674616,
+    [CROPLAND] = 0xFFc79720,
+    [PLAINS] = 0xFF307118,
+    [FOREST] = 0xFF21480e
+};
+int get_tile(int x, int y) {
+    uint32_t tile_color = map.pix[y * map.w + x];
+    for (int i = 0; i < TILE_COUNT; i++)
+        if (tile_colors[i] == tile_color)
+            return i;
+    printf("Tile not found for color: 0x%08X\n", tile_color);
+    return -1;
+}; 
+uint32_t tile_income[TILE_COUNT] = {
+    [SEA] = 0,
+    [CITY] = 1,
+    [MOUNTAINS] = 0,
+    [CROPLAND] = 0,
+    [PLAINS] = 0,
+    [FOREST] = 0
+};
+#pragma endregion
 
+#pragma region PLAYERS
+struct tga players;
 enum players {
     GERMANY,
     SOVIET,
     PLAYER_COUNT
 };
 uint32_t player_colors[PLAYER_COUNT] = {
-    [GERMANY] = GERMANY_COLOR,
-    [SOVIET] = SOVIET_COLOR
+    [GERMANY] = 0xFF6a3e0d,
+    [SOVIET] = 0xFF6a0d33
 };
-
+int get_player(int x, int y) {
+    uint32_t player_color = players.pix[y * players.w + x];
+    for (int i = 0; i < PLAYER_COUNT; i++)
+        if (player_colors[i] == player_color)
+            return i;
+    printf("Player not found\n");
+    return -1;
+}; 
 uint32_t player_cities[PLAYER_COUNT] = {0};
 uint32_t player_money[PLAYER_COUNT] = {0};
+#pragma endregion
+
+#pragma region UNITS
+struct tga units;
+#pragma endregion
 
 typedef struct {
     int x, y;
@@ -76,27 +127,6 @@ struct unit player_units[PLAYER_COUNT][MAX_UNITS] = {0};
 
 struct unit player_target[PLAYER_COUNT] = {{0, 0, 0}, {0, 0, 0}};
 
-/* 32-bit uncompressed, top-left-origin TGA */
-struct tga { 
-    int w, h;                /* dimensions                    */
-    uint32_t *pix;       /* BGRA pixel pointer            */
-    const void *map;      /* whole mmapped file            */
-    size_t map_len;  /* length for munmap             */
-};
-
-struct tga map;
-struct tga units;
-struct tga countries;
-
-int get_player(int x, int y) {
-    uint32_t player_color = countries.pix[y * map.w + x];
-    for (int i = 0; i < PLAYER_COUNT; i++)
-        if (player_colors[i] == player_color)
-            return i;
-    printf("Player not found\n");
-    return -1;
-}; 
-
 static void key_input_callback(void *ud, uint32_t key, uint32_t state)
 {
     if (key == 1) exit(0);
@@ -109,17 +139,17 @@ static void mouse_input_callback(void *ud, int32_t x, int32_t y, uint32_t b)
     printf("pointer at %d,%d\n", x, y);
 }
 
-static inline uint8_t clamp_mul(uint8_t ch, float factor) {
-    int v = (int)(ch * factor);
-    return v > 255 ? 255 : v;
-}
-
-#define LIGHTEN(c, f) ( \
-    (clamp_mul((c)&0xFF, f)) \
-    | (clamp_mul(((c)>>8)&0xFF, f) << 8) \
-    | (clamp_mul(((c)>>16)&0xFF, f) << 16) \
-    | ((c)&0xFF000000) \
-)
+#define LIGHTEN_DESATURATE(c, lf, sf) ({ \
+    uint8_t r = (c)&0xFF, g = ((c)>>8)&0xFF, b = ((c)>>16)&0xFF, a = ((c)>>24)&0xFF; \
+    uint8_t gray = (r + g + b) / 3; \
+    r = (1 - sf) * gray + sf * r; \
+    g = (1 - sf) * gray + sf * g; \
+    b = (1 - sf) * gray + sf * b; \
+    r = r + (255 - r) * (lf - 1); \
+    g = g + (255 - g) * (lf - 1); \
+    b = b + (255 - b) * (lf - 1); \
+    (a << 24) | ((uint8_t)(b) << 16) | ((uint8_t)(g) << 8) | (uint8_t)(r); \
+})
 
 int battle(int attacker, int defender, int unit_att, int unit_def);
 
@@ -178,7 +208,6 @@ int pathing(int from_x, int from_y, int to_x, int to_y, pos *path, int *pathleng
     return 0; // no path found
 }
 
-
 void draw_grid(uint32_t *buffer)
 {
     for (int x = 0; x < WIDTH; ++x) {
@@ -190,13 +219,12 @@ void draw_grid(uint32_t *buffer)
                 int map_x = x / PIXEL_SIZE;
                 int map_y = y / PIXEL_SIZE;
                 uint32_t pixel = map.pix[map_y * map.w + map_x];
-                if (pixel == SEA)
-                    buffer[y * WIDTH + x] = BLUE;
-                else if (pixel == LAND) {
-                    uint32_t country_pixel = countries.pix[map_y * countries.w + map_x];
+                // todo: fix
+                if (tile_income[get_tile(map_x, map_y)] > 0) {
+                    uint32_t country_pixel = players.pix[map_y * players.w + map_x];
                     buffer[y * WIDTH + x] = country_pixel;
                 } else
-                    buffer[y * WIDTH + x] = RED;
+                    buffer[y * WIDTH + x] = LIGHTEN_DESATURATE(pixel, 1.2, 0.6);
             }
         }
     }
@@ -208,7 +236,7 @@ void draw_unit(enum players player, int unit_x, int unit_y, uint32_t *buffer)
     int y = unit_y * PIXEL_SIZE + PIXEL_SIZE / 2;
     for (int dx = -UNIT_SIZE/2; dx <= UNIT_SIZE/2; ++dx) {
         for (int dy = -UNIT_SIZE/2; dy <= UNIT_SIZE/2; ++dy) {
-            buffer[(y + dy) * WIDTH + (x + dx)] = LIGHTEN(player_colors[player], 2.0f);
+            buffer[(y + dy) * WIDTH + (x + dx)] = player_colors[player];
         }
     }
 }
@@ -252,11 +280,23 @@ int move_unit(int player, int unit, int to_x, int to_y) {
     }
     int from_x = player_units[player][unit].x;
     int from_y = player_units[player][unit].y;
+    // move unit from old location to new location
     units.pix[to_y * units.w + to_x] = units.pix[from_y * units.w + from_x];
     units.pix[from_y * units.w + from_x] = 0;
-    countries.pix[to_y * countries.w + to_x] = player_colors[player]; // Update country color
-    player_units[player][unit].x = to_x; // Update player unit position
+    // set the value of the unit in the player units array
+    player_units[player][unit].x = to_x;
     player_units[player][unit].y = to_y;
+    // change tile ownership to this player
+    enum players to_player = get_player(to_x, to_y);
+    if (to_player != player) {
+        players.pix[to_y * players.w + to_x] = player_colors[player]; // Update country color
+        uint32_t income = tile_income[get_tile(to_x, to_y)];
+        if (income > 0) {
+            printf("player %d conquered city from player %d\n", player, to_player);
+            player_cities[to_player] -= income;
+            player_cities[player] += income;
+        }
+    }
     return 0; // Move successful
 }
 
@@ -363,52 +403,6 @@ int move_towards(int player, int unit, int target_x, int target_y) {
     return result;
 }
 
-
-/*
-int move_unit(int from_x, int from_y, int to_x, int to_y)
-{
-    int moved = 0;
-    if (from_x < 0 || from_x >= GRID_W || from_y < 0 || from_y >= GRID_H ||
-        to_x < 0 || to_x >= GRID_W || to_y < 0 || to_y >= GRID_H) {
-        printf("Invalid move from (%d, %d) to (%d, %d)\n", from_x, from_y, to_x, to_y);
-        return -1; // Invalid move
-    }
-    if (grid[from_x][from_y].unit[0] == 0 && grid[from_x][from_y].unit[1] == 0) {
-        printf("No unit to move from (%d, %d)\n", from_x, from_y);
-        return -2; // No unit to move
-    }
-    if (grid[to_x][to_y].unit[0] || grid[to_x][to_y].unit[1]) {
-        printf("Target tile (%d, %d) already occupied\n", to_x, to_y);
-        return -3; // Target tile already occupied
-    }
-    for (int unit = 0; unit < player_unit_count; ++unit) {
-        if (player_units[unit][0] == from_x && player_units[unit][1] == from_y) {
-            grid[to_x][to_y].unit[0] = grid[from_x][from_y].unit[0];
-            grid[from_x][from_y].unit[0] = 0;
-            player_units[unit][0] = to_x; // Update player unit position
-            player_units[unit][1] = to_y;
-            moved = 1; // Player unit moved
-            break;
-        }
-    }
-    if (moved) return 0; // Player unit moved successfully
-    for (int unit = 0; unit < enemy_unit_count; ++unit) {
-        if (enemy_units[unit][0] == from_x && enemy_units[unit][1] == from_y) {
-            grid[to_x][to_y].unit[1] = grid[from_x][from_y].unit[1]; // Move the unit
-            grid[from_x][from_y].unit[1] = 0;
-            enemy_units[unit][0] = to_x; // Update enemy unit position
-            enemy_units[unit][1] = to_y;
-            moved = 2; // Enemy unit moved
-            break;
-        }
-    }
-    if (!moved) {
-        printf("No unit found at (%d, %d)\n", from_x, from_y);
-        return -4; // No unit found at source
-    }
-    return 0; // Move successful
-}*/
-
 void find_front(int player, int center_x, int center_y, struct unit *front_units, int *count) {
     if (player < 0 || player >= PLAYER_COUNT) {
         printf("Invalid player index\n");
@@ -470,15 +464,16 @@ int spawn_unit(enum players player) {
                 bool has_unit = units.pix[spawn_y * units.w + spawn_x] != 0;
                 bool is_sea = map.pix[spawn_y * map.w + spawn_x] == SEA;
                 if (!has_unit && !is_sea && get_player(spawn_x, spawn_y) == player) {
-                    if (add_unit(player, spawn_x, spawn_y) == 0) {
-                        printf("Spawned a new unit!\n");
+                    int result = add_unit(player, spawn_x, spawn_y);
+                    if (result == 0) {
                         return 1;
+                    } else if (result == -3) {
+                        return -1;
                     }
                 }
             }
         }
     }
-    printf("Could not find location to spawn the unit\n");
     return -1;
 }
 
@@ -489,15 +484,16 @@ void player_turn(enum players player) {
         return; // Invalid player
     }
     // add 1 money for every city
+    printf("Cities (player %d): %d\n", player, player_cities[player]);
     player_money[player] += player_cities[player];
     // buy units for every 10 money
-    static const int UNIT_COST = 10;
+    static const int UNIT_COST = 100;
     int units_to_buy = player_money[player] / UNIT_COST;
     int money_to_use = units_to_buy * UNIT_COST;
     player_money[player] -= money_to_use;
     for (int i = 0; i<units_to_buy; i++) { 
         if (spawn_unit(player) == -1) 
-            player_money[player] += UNIT_COST; // refund if cannot be spawned anywhere 
+            player_money[player] += UNIT_COST; // refund if cannot be spawned anywhere
     }
 
     // unit movement
@@ -532,51 +528,6 @@ void player_turn(enum players player) {
         int result = move_towards(player, unit, target.x, target.y);
     }
 }
-/*
-void player_turn(int player) {
-    if (player_target[player].type > 0 && player_target[player].type < 8) {
-        player_target[player].type ++; // reset target
-    }
-    else {
-        player_target[player].type = 0; // reset target
-        for (int unit = 0; unit < player_unit_count[player]; unit++) {
-            int result = find_target(player, unit, &player_target[player]);
-            if (result == 1) {break;}
-        }
-    }
-    if (player_target[player].type == 0) {
-        for (int unit = 0; unit < player_unit_count[player]; unit++) {
-            int dir = rand() % 4;
-            int x = player_units[player][unit].x;
-            int y = player_units[player][unit].y;
-            move_unit(player, unit, x + (1-dir%2*2)*(1-dir/2), y + dir/2*(dir/2 - dir%2*2));
-        }
-    }
-    else {
-        for (int unit = 0; unit < player_unit_count[player]; unit++) {
-            int x = player_units[player][unit].x;
-            int y = player_units[player][unit].y;
-            if (abs(player_target[player].x - x) > abs(player_target[player].y - y)) {
-                int dir_x = (player_target[player].x - x) < 0 ? -1 : (player_target[player].x - x) > 0 ? 1 : 0; // get direction x-axis
-                int result = move_unit(player, unit, x + dir_x, y);
-                if (result == -3) { // Tile already occupied
-                    int dir_y = (player_target[player].y - y) < 0 ? -1 : (player_target[player].y - y) > 0 ? 1 : 0; // get direction y-axis
-                    move_unit(player, unit, x, y + dir_y);
-                }
-            }
-            else {
-                int dir_y = (player_target[player].y - y) < 0 ? -1 : (player_target[player].y - y) > 0 ? 1 : 0; // get direction y-axis
-                int result = move_unit(player, unit, x, y + dir_y);
-                if (result == -3) { // Tile already occupied
-                    int dir_x = (player_target[player].x - x) < 0 ? -1 : (player_target[player].x - x) > 0 ? 1 : 0; // get direction x-axis
-                    move_unit(player, unit, x + dir_x, y);
-                }
-            }
-            //move_unit(player, unit, x + dir_x, y + dir_y);
-        }
-    }
-}
-*/
 
 void script(int frame) {
     if (frame % 2 == 1) {
@@ -589,8 +540,8 @@ void script(int frame) {
 
 static inline struct tga tga_load(const char *path)
 {
-    int fd = open(path, O_RDONLY | 02000000);                        /* 1 */
-    assert(fd >= 0);
+    int fd = open(path, O_RDONLY | 02000000);
+    if (fd < 0) {fprintf(stderr, "File not found: %s\n", path); exit(1);}
 
     uint8_t h18[18];
     assert(read(fd, h18, 18) == 18);
@@ -629,7 +580,7 @@ int main(void)
     
     map = tga_load("map.tga");
     units = tga_load("units.tga");
-    countries = tga_load("countries.tga");
+    players = tga_load("players.tga");
 
     struct timespec ts = {0};
     int stride;
@@ -638,10 +589,10 @@ int main(void)
     // find the cities on the map
     for (int y = 0; y < map.h; ++y) {
         for (int x = 0; x < map.w; ++x) {
-            uint32_t pixel = map.pix[y * map.w + x];
-            if (pixel == CITY) {
+            uint32_t income = tile_income[get_tile(x, y)];
+            if (income > 0) {
                 int player_id = get_player(x, y);
-                if (player_id != -1) player_cities[player_id]++;
+                if (player_id != -1) player_cities[player_id] += income;
             }
         }
     }
