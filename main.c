@@ -170,7 +170,7 @@ static void mouse_input_callback(void *ud, int32_t x, int32_t y, uint32_t b)
 
 int battle(int attacker, int defender, int unit_att, int unit_def);
 
-int pathing(int from_x, int from_y, int to_x, int to_y, uint8_t *path, int *pathlength, int unit_type) { // no cost yet, BITshift versie??
+int pathing(int from_x, int from_y, int to_x, int to_y, uint8_t *path, int *pathlength, int unit_type, int player) { // no cost yet, BITshift versie??
     if (!path || !pathlength) return -1; // Invalid arguments
     if (from_x < 0 || from_x >= GRID_W || from_y < 0 || from_y >= GRID_H ||
         to_x < 0 || to_x >= GRID_W || to_y < 0 || to_y >= GRID_H) {
@@ -203,7 +203,8 @@ int pathing(int from_x, int from_y, int to_x, int to_y, uint8_t *path, int *path
             //printf("Step %d: (%d, %d) ", dir, x, y);
             if (x < 0 || x >= GRID_W || y < 0 || y >= GRID_H) continue; // out of bounds
             int terrain = get_tile(x, y);
-            if (SEA == terrain || terrain == MOUNTAINS) continue; // check for impassable tile
+            if (SEA == terrain || terrain == MOUNTAINS) {continue;} // check for impassable tile
+            if (units.pix[y * units.w + x] == player_colors[player]) {continue;} // check for player unit
             if (to_x == x && to_y == y) { // found target
                 paths[paths_count][0] = paths[i][0] + 1;
                 paths[paths_count][1] = dir;
@@ -214,6 +215,7 @@ int pathing(int from_x, int from_y, int to_x, int to_y, uint8_t *path, int *path
                 memcpy(path, paths[paths_count] + 1, sizeof(uint8_t) * (*pathlength)); // copy path to output
                 return 1; // found path
             }
+            if (units.pix[y * units.w + x] != 0 && units.pix[y * units.w + x] != player_colors[1 - player]) {continue;} // if enemy on path path around
             for (int j = 0; j < paths_count; j++) {
                 if (visited[j].x == x && visited[j].y == y) {
                     pass = 1;
@@ -665,7 +667,7 @@ int ai_unit_movement(enum players player) {
         int path_length = 0;
         int result = 0;
         if (found_target) {
-            result = pathing(x, y, target.x, target.y, path, &path_length, 1); // Get path to target UNIT_TYPE
+            result = pathing(x, y, target.x, target.y, path, &path_length, 1, player); // Get path to target UNIT_TYPE
             if (result == 1) {
                 player_paths[player][unit].length = path_length;
                 for (int step = 0; step < path_length; step++) {
@@ -851,7 +853,7 @@ int main(void)
     // test pathing
     uint8_t path[GRID_W + GRID_H];
     int pathlength = 0;
-    int result = pathing(20, 0, 20, 5, path, &pathlength, 1);
+    int result = pathing(20, 0, 20, 5, path, &pathlength, 1, 1);
     pos loc = {20, 0};
     if (result == 1) {
         printf("Path found: ");
@@ -873,7 +875,7 @@ int main(void)
         //memset(buffer, 255, WIDTH * HEIGHT * sizeof(uint32_t));
         draw_grid(buffer);
         draw_units(buffer);
-        //draw_paths(buffer);
+        //draw_paths(buffer); JANK??
         draw_turn(buffer);
         frame ++;
 
