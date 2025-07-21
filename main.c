@@ -14,6 +14,8 @@
 #define GRID_H (HEIGHT / PIXEL_SIZE)
 #define UNIT_SIZE 14 // size of a unit on screen
 #define MAX_UNITS 100 // max number of units per player
+#define BUCKET_COUNT 10 // number of buckets for resolve order
+#define BUCKET_SIZE MAX_UNITS // number of steps per bucket
 
 #define WHITE 0xFFFFFFFF
 #define BLACK 0xFF000000
@@ -72,7 +74,7 @@ struct unit {
     int type;
 };
 struct path {
-    pos steps[GRID_H + GRID_W]; // array of steps
+    uint8_t steps[GRID_H + GRID_W]; // array of steps
     uint8_t length; // number of steps
     // uint8_t id; // unit id
 };
@@ -83,6 +85,8 @@ struct step {
 };
 
 struct path player_paths[PLAYER_COUNT][MAX_UNITS] = {0};
+struct step resolve_order[BUCKET_COUNT][BUCKET_SIZE] = {0};
+int bucket_size[BUCKET_COUNT] = {0}; // number of steps in each bucket
 
 int player_unit_count[PLAYER_COUNT] = {0}; // number of units per player
 struct unit player_units[PLAYER_COUNT][MAX_UNITS] = {0};
@@ -136,56 +140,70 @@ static inline uint8_t clamp_mul(uint8_t ch, float factor) {
 
 int battle(int attacker, int defender, int unit_att, int unit_def);
 
-int pathing(int from_x, int from_y, int to_x, int to_y, pos *path, int *pathlength) { // no cost yet, BITshift versie??
+int pathing(int from_x, int from_y, int to_x, int to_y, uint8_t *path, int *pathlength) { // no cost yet, BITshift versie??
     if (!path || !pathlength) return -1; // Invalid arguments
     if (from_x < 0 || from_x >= GRID_W || from_y < 0 || from_y >= GRID_H ||
         to_x < 0 || to_x >= GRID_W || to_y < 0 || to_y >= GRID_H) {
         return -1; // Invalid coordinates
     }
     int paths_count = 1;
-    pos paths[GRID_W * GRID_H][GRID_H + GRID_W] = {0}; // STACK OVERFLOW ?????
-    paths[0][0] = (pos){1, 0}; // path length
-    paths[0][1] = (pos){from_x, from_y};
+    uint8_t paths[GRID_W * GRID_H][GRID_H + GRID_W] = {0}; // STACK OVERFLOW ?????
+    paths[0][0] = 0; // path length
+    paths[0][1] = UP;
+    pos visited[GRID_W * GRID_H] = {0}; // visited tiles
+    visited[0] = (pos){from_x, from_y}; // mark starting tile as visiteds
     for (int i = 0; i < paths_count; i++) {
+        //printf("Checking path %d: (%d, %d)\n", i + 1, visited[i].x, visited[i].y);
         int pass = 0;
         if (paths_count >= GRID_W * GRID_H) {
             printf("Too many paths, aborting\n");
             return 0; // ran out of memory
         }
-        int x;
-        int y;
         for (int dir = UP; dir <= DOWN_RIGHT; dir++){
             pass = 0; // reset pass for each direction
             // Generic
-            x = paths[i][1].x + dir_offsets[dir].x;
-            y = paths[i][1].y + dir_offsets[dir].y;
+            int x = from_x;
+            int y = from_y;
+            for (int step = 0; step < paths[i][0]; step++) {
+                x += dir_offsets[paths[i][step + 1]].x;
+                y += dir_offsets[paths[i][step + 1]].y;
+            }
+            x += dir_offsets[dir].x;
+            y += dir_offsets[dir].y;
+            //printf("Step %d: (%d, %d) ", dir, x, y);
             if (x < 0 || x >= GRID_W || y < 0 || y >= GRID_H) continue; // out of bounds
             if (to_x == x && to_y == y) { // found target
-                paths[paths_count][0] = (pos){paths[i][0].x + 1, 0};
-                paths[paths_count][1] = (pos){x, y};
-                for (int j = 2; j < paths[i][0].x + 2; j++) {
+                paths[paths_count][0] = paths[i][0] + 1;
+                paths[paths_count][1] = dir;
+                for (int j = 2; j < paths[i][0] + 2; j++) {
                     paths[paths_count][j] = paths[i][j-1];
                 }
-                *pathlength = paths[paths_count][0].x; // set path length
+                *pathlength = paths[paths_count][0]; // set path length
                 memcpy(path, paths[paths_count] + 1, sizeof(pos) * (*pathlength)); // copy path to output
                 return 1; // found path
             }
             if (map.pix[y*map.w + x] != SEA) { // better terrain handling needed
                 for (int j = 0; j < paths_count; j++) {
-                    if (paths[j][1].x == x && paths[j][1].y == y) {
+                    if (visited[j].x == x && visited[j].y == y) {
                         pass = 1;
+                        //printf("Tile (%d, %d) already visited\n", x, y);
                         break;
                     }
                 }
                 if (pass == 0) {
-                    paths[paths_count][0] = (pos){paths[i][0].x + 1, 0};
-                    paths[paths_count][1] = (pos){x, y};
-                    for (int j = 2; j < paths[i][0].x + 2; j++) {
+                    paths[paths_count][0] = paths[i][0] + 1;;
+                    paths[paths_count][1] = dir;
+                    for (int j = 2; j < paths[i][0] + 2; j++) {
                         paths[paths_count][j] = paths[i][j-1];
                     }
+                    visited[paths_count] = (pos){x, y}; // mark tile as visited
                     paths_count++;
+                    //printf("Path %d: ", paths_count);
                 }
+            } else {
+                //printf("Tile (%d, %d) is water\n", x, y);
             }
+            //printf("\n");
         }
     }
     return 0; // no path found
@@ -238,11 +256,14 @@ void draw_step(enum players player, int step_x, int step_y, uint32_t *buffer)
 void draw_paths(uint32_t *buffer){
     for (int player = 0; player < PLAYER_COUNT; player++) {
         for (int unit = 0; unit < player_unit_count[player]; ++unit) {
+            pos loc = (pos){player_units[player][unit].x, player_units[player][unit].y}; // start location
             if (player_paths[player][unit].length == 0) continue; // skip empty paths
             for (int step = 0; step < player_paths[player][unit].length; ++step) {
-                int x = player_paths[player][unit].steps[step].x;
-                int y = player_paths[player][unit].steps[step].y;
+                uint8_t dir = player_paths[player][unit].steps[step]; // get direction from path
+                int x = loc.x + dir_offsets[dir].x; // calculate x position
+                int y = loc.y + dir_offsets[dir].y; // calculate y position
                 draw_step(player, x, y, buffer);
+                loc = (pos){x, y}; // update location
             }
         }
     }
@@ -367,6 +388,39 @@ int battle(int attacker, int defender, int unit_att, int unit_def) {
         return 3; // Draw
     }
     return 0; // something went wrong
+}
+
+int commit_turn(enum players player) {
+    if (player < 0 || player >= PLAYER_COUNT) {
+        printf("Invalid player index\n");
+        return -1; // Invalid player
+    }
+    // Resolve all paths for the player
+    for (int unit = 0; unit < player_unit_count[player]; ++unit) {
+        if (player_paths[player][unit].length == 0) continue; // skip empty paths
+        int cost = 0; // cost is cummulative
+        pos prev_step = {player_units[player][unit].x, player_units[player][unit].y}; // previous step position
+        for (int step = 0; step < player_paths[player][unit].length; ++step) {
+            int x = 1;
+            int y = 1;
+            // calculate cost of the step
+            cost += 100; // default cost
+            resolve_order[cost/100][bucket_size[cost/100]] = (struct step){
+                .dir = 1, // direction of the step
+                .cost = cost, // cost of the step
+                .id = (uint8_t)(unit + (player << 8)) // unit id + player id
+            };
+            prev_step = (pos){x, y}; // update previous step
+        }
+    }
+    return 0; // Turn committed successfully
+
+}
+
+
+int resolve_turn(){
+
+    return 0;
 }
 
 int move_towards(int player, int unit, int target_x, int target_y) {
@@ -527,15 +581,20 @@ int ai_unit_movement(enum players player) {
     struct unit front_units[MAX_UNITS];
     int count = 0;
     find_front(1 - player, 0, 0, front_units, &count); // Get front units for other player
+    printf("count %d\n", count);
     for (int unit = 0; unit < player_unit_count[player]; unit++) {
-        printf("AI unit %d, %d at (%d, %d)\n", unit, player, player_units[player][unit].x, player_units[player][unit].y);
+        printf("(count=%d)", count);
+        printf("AI unit %d, %d at (%d, %d)  ", unit, player, player_units[player][unit].x, player_units[player][unit].y);
         memset(player_paths[player][unit].steps, 0, sizeof(player_paths[player][unit].steps)); // clear array
+        printf("(count=%d)", count);
         int x = player_units[player][unit].x;
         int y = player_units[player][unit].y;
         int distance = 2500;
         struct unit target = {0};
         bool found_target = false;
+        printf("(count=%d)", count);
         for (int enemy = 0; enemy < count; enemy++) {
+            printf("#");
             int dis = (front_units[enemy].x - x) * (front_units[enemy].x - x) +
                         (front_units[enemy].y - y) * (front_units[enemy].y - y);
             if (dis < distance) {
@@ -544,20 +603,35 @@ int ai_unit_movement(enum players player) {
                 found_target = true;
             }
         }
-        pos path[GRID_W + GRID_H];
+        printf("(count=%d)", count);
+        uint8_t path[GRID_W + GRID_H];
         int path_length = 0;
-        int result = pathing(x, y, target.x, target.y, path, &path_length); // Get path to target
-        if (result == 1 && found_target) {
-            player_paths[player][unit].length = path_length;
-            for (int step = 0; step < path_length; step++) {
-                player_paths[player][unit].steps[step] = path[path_length - step - 1];
-                //printf("Step added %d: (%d, %d)\n", step, player_paths[player][unit].steps[step].x, player_paths[player][unit].steps[step].y);
+        int result = 0;
+        printf(" to (%d, %d) with path length %d", target.x, target.y, path_length);
+        if (found_target) {
+        printf("(count=%d)", count);
+            result = pathing(x, y, target.x, target.y, path, &path_length); // Get path to target
+        printf("(count=%d)", count);
+            if (result == 1) {
+                printf(" - Path found");
+                player_paths[player][unit].length = path_length;
+                for (int step = 0; step < path_length; step++) {
+                    player_paths[player][unit].steps[step] = path[path_length - step - 1];
+                    //printf("Step added %d: (%d, %d)\n", step, player_paths[player][unit].steps[step].x, player_paths[player][unit].steps[step].y);
+                }
+            }
+            else {
+                printf(" - No path found1");
+                player_paths[player][unit].length = 0; // No path found
+                //printf("No steps: (%d, %d)\n", player_paths[player][unit].steps[0].x, player_paths[player][unit].steps[0].y);
             }
         }
         else {
+            printf(" - No path found2");
             player_paths[player][unit].length = 0; // No path found
             //printf("No steps: (%d, %d)\n", player_paths[player][unit].steps[0].x, player_paths[player][unit].steps[0].y);
         }
+        printf("(count=%d)\n", count);
     }
     return 0; // AI movement done
 }
@@ -674,8 +748,9 @@ void script(int frame) {
             printf("Player %d:\n", player);
             for (int unit = 0; unit < player_unit_count[player]; unit++) {
                 printf("Unit %d: ", unit);
+                printf("Steps: %d ", player_paths[player][unit].length);
                 for (int step = 0; step < player_paths[player][unit].length; step++) {
-                    printf("(%d, %d) ", player_paths[player][unit].steps[step].x, player_paths[player][unit].steps[step].y);
+                    printf("(%d) ", player_paths[player][unit].steps[step]);
                 }
                 printf("\n");
             }
@@ -751,6 +826,22 @@ int main(void)
                 add_unit(get_player(x, y), x, y);
             }
         }
+    }
+    // test pathing
+    uint8_t path[GRID_W + GRID_H];
+    int pathlength = 0;
+    int result = pathing(20, 0, 20, 5, path, &pathlength);
+    pos loc = {20, 0};
+    if (result == 1) {
+        printf("Path found: ");
+        for (int i = 1; i < pathlength + 1; i++) {
+            loc.x += dir_offsets[path[pathlength - i]].x; // update x position
+            loc.y += dir_offsets[path[pathlength - i]].y; // update y position
+            printf("%d: (%d, %d) ", path[pathlength - i], loc.x, loc.y);
+        }
+        printf("\n");
+    } else {
+        printf("No path found\n");
     }
 
     while(window_poll(window)) {// poll for events and break if compositor connection is lost
