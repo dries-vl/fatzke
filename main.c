@@ -209,31 +209,26 @@ int pathing(int from_x, int from_y, int to_x, int to_y, uint8_t *path, int *path
                     paths[paths_count][j] = paths[i][j-1];
                 }
                 *pathlength = paths[paths_count][0]; // set path length
-                memcpy(path, paths[paths_count] + 1, sizeof(pos) * (*pathlength)); // copy path to output
+                memcpy(path, paths[paths_count] + 1, sizeof(uint8_t) * (*pathlength)); // copy path to output
                 return 1; // found path
             }
-            if (map.pix[y*map.w + x] != SEA) { // better terrain handling needed
-                for (int j = 0; j < paths_count; j++) {
-                    if (visited[j].x == x && visited[j].y == y) {
-                        pass = 1;
-                        //printf("Tile (%d, %d) already visited\n", x, y);
-                        break;
-                    }
+            for (int j = 0; j < paths_count; j++) {
+                if (visited[j].x == x && visited[j].y == y) {
+                    pass = 1;
+                    //printf("Tile (%d, %d) already visited\n", x, y);
+                    break;
                 }
-                if (pass == 0) {
-                    paths[paths_count][0] = paths[i][0] + 1;;
-                    paths[paths_count][1] = dir;
-                    for (int j = 2; j < paths[i][0] + 2; j++) {
-                        paths[paths_count][j] = paths[i][j-1];
-                    }
-                    visited[paths_count] = (pos){x, y}; // mark tile as visited
-                    paths_count++;
-                    //printf("Path %d: ", paths_count);
-                }
-            } else {
-                //printf("Tile (%d, %d) is water\n", x, y);
             }
-            //printf("\n");
+            if (pass == 0) {
+                paths[paths_count][0] = paths[i][0] + 1;;
+                paths[paths_count][1] = dir;
+                for (int j = 2; j < paths[i][0] + 2; j++) {
+                    paths[paths_count][j] = paths[i][j-1];
+                }
+                visited[paths_count] = (pos){x, y}; // mark tile as visited
+                paths_count++;
+                //printf("Path %d: ", paths_count);
+            }
         }
     }
     return 0; // no path found
@@ -278,31 +273,6 @@ void draw_step(enum players player, int step_x, int step_y, uint32_t *buffer)
     for (int dx = -UNIT_SIZE/2; dx <= UNIT_SIZE/2; dx+=2) {
         for (int dy = -UNIT_SIZE/2; dy <= UNIT_SIZE/2; dy+=2) {
             buffer[(y + dy) * WIDTH + (x + dx)] = player_colors[player];
-        }
-    }
-}
-void draw_paths(uint32_t *buffer){
-    for (int player = 0; player < PLAYER_COUNT; player++) {
-        for (int unit = 0; unit < player_unit_count[player]; ++unit) {
-            pos loc = (pos){player_units[player][unit].x, player_units[player][unit].y}; // start location
-            if (player_paths[player][unit].length == 0) continue; // skip empty paths
-            for (int step = 0; step < player_paths[player][unit].length; ++step) {
-                uint8_t dir = player_paths[player][unit].steps[step]; // get direction from path
-                int x = loc.x + dir_offsets[dir].x; // calculate x position
-                int y = loc.y + dir_offsets[dir].y; // calculate y position
-                draw_step(player, x, y, buffer);
-                loc = (pos){x, y}; // update location
-            }
-        }
-    }
-}
-void draw_step(enum players player, int step_x, int step_y, uint32_t *buffer)
-{
-    int x = step_x * PIXEL_SIZE + PIXEL_SIZE / 2;
-    int y = step_y * PIXEL_SIZE + PIXEL_SIZE / 2;
-    for (int dx = -UNIT_SIZE/2; dx <= UNIT_SIZE/2; dx+=2) {
-        for (int dy = -UNIT_SIZE/2; dy <= UNIT_SIZE/2; dy+=2) {
-            buffer[(y + dy) * WIDTH + (x + dx)] = LIGHTEN(player_colors[player], 2.0f);
         }
     }
 }
@@ -601,20 +571,14 @@ int ai_unit_movement(enum players player) {
     struct unit front_units[MAX_UNITS];
     int count = 0;
     find_front(1 - player, 0, 0, front_units, &count); // Get front units for other player
-    printf("count %d\n", count);
     for (int unit = 0; unit < player_unit_count[player]; unit++) {
-        printf("(count=%d)", count);
-        printf("AI unit %d, %d at (%d, %d)  ", unit, player, player_units[player][unit].x, player_units[player][unit].y);
         memset(player_paths[player][unit].steps, 0, sizeof(player_paths[player][unit].steps)); // clear array
-        printf("(count=%d)", count);
         int x = player_units[player][unit].x;
         int y = player_units[player][unit].y;
         int distance = 2500;
         struct unit target = {0};
         bool found_target = false;
-        printf("(count=%d)", count);
         for (int enemy = 0; enemy < count; enemy++) {
-            printf("#");
             int dis = (front_units[enemy].x - x) * (front_units[enemy].x - x) +
                         (front_units[enemy].y - y) * (front_units[enemy].y - y);
             if (dis < distance) {
@@ -623,17 +587,12 @@ int ai_unit_movement(enum players player) {
                 found_target = true;
             }
         }
-        printf("(count=%d)", count);
         uint8_t path[GRID_W + GRID_H];
         int path_length = 0;
         int result = 0;
-        printf(" to (%d, %d) with path length %d", target.x, target.y, path_length);
         if (found_target) {
-        printf("(count=%d)", count);
             result = pathing(x, y, target.x, target.y, path, &path_length); // Get path to target
-        printf("(count=%d)", count);
             if (result == 1) {
-                printf(" - Path found");
                 player_paths[player][unit].length = path_length;
                 for (int step = 0; step < path_length; step++) {
                     player_paths[player][unit].steps[step] = path[path_length - step - 1];
@@ -641,17 +600,14 @@ int ai_unit_movement(enum players player) {
                 }
             }
             else {
-                printf(" - No path found1");
                 player_paths[player][unit].length = 0; // No path found
                 //printf("No steps: (%d, %d)\n", player_paths[player][unit].steps[0].x, player_paths[player][unit].steps[0].y);
             }
         }
         else {
-            printf(" - No path found2");
             player_paths[player][unit].length = 0; // No path found
             //printf("No steps: (%d, %d)\n", player_paths[player][unit].steps[0].x, player_paths[player][unit].steps[0].y);
         }
-        printf("(count=%d)\n", count);
     }
     return 0; // AI movement done
 }
@@ -710,30 +666,6 @@ void player_turn(enum players player) {
     }
     */
 }
-
-void script(int frame) {
-    if (frame == 0) {
-        player_turn(0);
-    }
-    if (frame == 1) {
-        player_turn(1);
-    }
-    if (frame == 2){
-        printf("player paths:\n");
-        for (int player = 0; player < PLAYER_COUNT; player++) {
-            printf("Player %d:\n", player);
-            for (int unit = 0; unit < player_unit_count[player]; unit++) {
-                printf("Unit %d: ", unit);
-                printf("Steps: %d ", player_paths[player][unit].length);
-                for (int step = 0; step < player_paths[player][unit].length; step++) {
-                    printf("(%d) ", player_paths[player][unit].steps[step]);
-                }
-            }
-            //move_unit(player, unit, x + dir_x, y + dir_y);
-        }
-    }
-}
-*/
 
 void script(int frame) {
     if (frame == 0) {
