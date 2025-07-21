@@ -160,14 +160,14 @@ struct path {
 struct step {
     uint8_t dir;
     uint16_t cost;
-    uint8_t id; // unit id + player id
+    uint16_t id; // unit id + player id
 };
 
 struct path player_paths[PLAYER_COUNT][MAX_UNITS] = {0};
 struct step resolve_order[BUCKET_COUNT][BUCKET_SIZE] = {0};
 int bucket_size[BUCKET_COUNT] = {0}; // number of steps in each bucket
 
-int player_unit_count[PLAYER_COUNT] = {0}; // number of units per player
+int player_unit_count[PLAYER_COUNT] = {0}; // size of array NOTE NOT ALWAYS NUMBER OF UNITS
 struct unit player_units[PLAYER_COUNT][MAX_UNITS] = {0};
 
 struct unit player_target[PLAYER_COUNT] = {{0, 0, 0}, {0, 0, 0}};
@@ -198,7 +198,7 @@ static void mouse_input_callback(void *ud, int32_t x, int32_t y, uint32_t b)
 
 int battle(int attacker, int defender, int unit_att, int unit_def);
 
-int pathing(int from_x, int from_y, int to_x, int to_y, uint8_t *path, int *pathlength) { // no cost yet, BITshift versie??
+int pathing(int from_x, int from_y, int to_x, int to_y, uint8_t *path, int *pathlength, int unit_type, int player) { // no cost yet, BITshift versie??
     if (!path || !pathlength) return -1; // Invalid arguments
     if (from_x < 0 || from_x >= GRID_W || from_y < 0 || from_y >= GRID_H ||
         to_x < 0 || to_x >= GRID_W || to_y < 0 || to_y >= GRID_H) {
@@ -230,6 +230,9 @@ int pathing(int from_x, int from_y, int to_x, int to_y, uint8_t *path, int *path
             y += dir_offsets[dir].y;
             //printf("Step %d: (%d, %d) ", dir, x, y);
             if (x < 0 || x >= GRID_W || y < 0 || y >= GRID_H) continue; // out of bounds
+            int terrain = get_tile(x, y);
+            if (SEA == terrain || terrain == MOUNTAINS) {continue;} // check for impassable tile
+            if (units.pix[y * units.w + x] == player_colors[player]) {continue;} // check for player unit
             if (to_x == x && to_y == y) { // found target
                 paths[paths_count][0] = paths[i][0] + 1;
                 paths[paths_count][1] = dir;
@@ -240,6 +243,7 @@ int pathing(int from_x, int from_y, int to_x, int to_y, uint8_t *path, int *path
                 memcpy(path, paths[paths_count] + 1, sizeof(uint8_t) * (*pathlength)); // copy path to output
                 return 1; // found path
             }
+            if (units.pix[y * units.w + x] != 0 && units.pix[y * units.w + x] != player_colors[1 - player]) {continue;} // if enemy on path path around
             for (int j = 0; j < paths_count; j++) {
                 if (visited[j].x == x && visited[j].y == y) {
                     pass = 1;
@@ -298,6 +302,10 @@ void draw_step(enum players player, int step_x, int step_y, uint32_t *buffer)
 {
     int x = step_x * PIXEL_SIZE + PIXEL_SIZE / 2;
     int y = step_y * PIXEL_SIZE + PIXEL_SIZE / 2;
+    if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) {
+        printf("Step out of bounds: (%d, %d)\n", step_x, step_y);
+        return; // out of bounds
+    }
     for (int dx = -UNIT_SIZE/2; dx <= UNIT_SIZE/2; dx+=2) {
         for (int dy = -UNIT_SIZE/2; dy <= UNIT_SIZE/2; dy+=2) {
             buffer[(y + dy) * WIDTH + (x + dx)] = player_colors[player];
@@ -307,6 +315,7 @@ void draw_step(enum players player, int step_x, int step_y, uint32_t *buffer)
 void draw_paths(uint32_t *buffer){
     for (int player = 0; player < PLAYER_COUNT; player++) {
         for (int unit = 0; unit < player_unit_count[player]; ++unit) {
+            if (player_units[player][unit].type == 0) continue; // skip empty unit slots
             pos loc = (pos){player_units[player][unit].x, player_units[player][unit].y}; // start location
             if (player_paths[player][unit].length == 0) continue; // skip empty paths
             for (int step = 0; step < player_paths[player][unit].length; ++step) {
@@ -320,10 +329,63 @@ void draw_paths(uint32_t *buffer){
     }
 }
 
+void draw_turn(uint32_t *buffer){
+    pos unit_locations[PLAYER_COUNT][MAX_UNITS] = {0}; // keep track of unit locations
+    for (int bucket = 0; bucket < BUCKET_COUNT; bucket ++) {
+        if (bucket_size[bucket] == 0) {continue;} // skip empty buckets
+        for (int step = 0; step < bucket_size[bucket]; step++) {
+            enum players player = resolve_order[bucket][step].id >> 8; // get player from id
+            int unit = resolve_order[bucket][step].id % 256; // get unit from id
+            if (player_units[player][unit].type == 0) continue; // skip empty unit slots
+            pos loc;
+            if (unit_locations[player][unit].x != 0 || unit_locations[player][unit].y != 0) {
+                loc = unit_locations[player][unit]; // use cached location
+            }
+            else {
+                loc = (pos){player_units[player][unit].x, player_units[player][unit].y}; // start location
+            }
+            uint8_t dir = resolve_order[bucket][step].dir; // get direction from path
+            int x = loc.x + dir_offsets[dir].x; // calculate x position
+            int y = loc.y + dir_offsets[dir].y; // calculate y position
+            draw_step(player, x, y, buffer);
+            unit_locations[player][unit] = (pos){x, y}; // update location
+        }
+    }
+}
+
+
+int resolve_turn(){
+    printf("Resolving turn...\n");
+    int blocked_units[PLAYER_COUNT][MAX_UNITS] = {0}; // keep track of blocked units
+    for (int bucket = 0; bucket < BUCKET_COUNT; bucket++) {
+        if (bucket_size[bucket] == 0) continue; // skip empty buckets
+        // Sort the steps in the bucket by cost MAYBE NEEDED
+        // Execute the steps in the bucket
+        for (int step = 0; step < bucket_size[bucket]; step++) {
+            
+            enum players player = resolve_order[bucket][step].id >> 8; // get player from id
+            int unit = resolve_order[bucket][step].id % 256; // get unit from id
+            if (blocked_units[player][unit] || player_units[player][unit].type == 0) { continue; } // skip blocked and empty units
+            uint8_t dir = resolve_order[bucket][step].dir; // get direction from path
+            int x = player_units[player][unit].x + dir_offsets[dir].x; // calculate x position
+            int y = player_units[player][unit].y + dir_offsets[dir].y; // calculate y position
+            int result = move_unit(player, unit, x, y); // move unit
+            if (result != 0) {
+                blocked_units[player][unit] = 1; // mark unit as blocked
+            }
+        }
+        bucket_size[bucket] = 0; // reset bucket size
+        memset(resolve_order[bucket], 0, sizeof(struct step) * BUCKET_SIZE); // clear resolve order
+    }
+
+    return 0;
+}
+
 void draw_units(uint32_t *buffer) {
     for (int player = 0; player < PLAYER_COUNT; player++) {
         if (player_unit_count[player] == 0) continue; // skip empty players
         for (int unit = 0; unit < player_unit_count[player]; ++unit) {
+            if (player_units[player][unit].type == 0) continue; // skip empty unit slots
             int x = player_units[player][unit].x;
             int y = player_units[player][unit].y;
             draw_unit(player, x, y, buffer);
@@ -333,15 +395,19 @@ void draw_units(uint32_t *buffer) {
 
 int move_unit(int player, int unit, int to_x, int to_y) {
     if (!player_units[player] || unit < 0 || unit >= player_unit_count[player]) {
-        //printf("Invalid player or unit index\n");
+        printf("Invalid player or unit index\n");
         return -1; // Invalid player or unit
     }
+    if (player_units[player][unit].type == 0) {
+        printf("Unit %d of player %d is empty\n", unit, player);
+        return -5; // Unit is not active
+    }
     if (to_x < 0 || to_x >= GRID_W || to_y < 0 || to_y >= GRID_H) {
-        //printf("Invalid move to (%d, %d)\n", to_x, to_y);
+        printf("Invalid move to (%d, %d)\n", to_x, to_y);
         return -2; // Invalid move
     }
     if (map.pix[to_y * map.w + to_x] == SEA) {
-        //printf("Cannot move to water tile (%d, %d)\n", to_x, to_y);
+        printf("Cannot move to water tile (%d, %d)\n", to_x, to_y);
         return -4; // Cannot move to water tile
     }
     if (units.pix[to_y * units.w + to_x] == player_colors[player]) {
@@ -350,7 +416,7 @@ int move_unit(int player, int unit, int to_x, int to_y) {
     }
     else if (units.pix[to_y * units.w + to_x] != 0 && units.pix[to_y * units.w + to_x] != player_colors[player]) { // BATTLE!
         //printf("Tile (%d, %d) occupied by enemy\n", to_x, to_y);
-        //printf("Battle at (%d, %d)!\n", to_x, to_y);
+        printf("Battle at (%d, %d)!\n", to_x, to_y);
         for (int defender = 0; defender < player_unit_count[1 - player]; defender++) {
             if (player_units[1 - player][defender].x == to_x && player_units[1 - player][defender].y == to_y) {
                 return battle(player, 1 - player, unit, defender);
@@ -381,11 +447,11 @@ int move_unit(int player, int unit, int to_x, int to_y) {
 
 int add_unit(int player, int x, int y) {
     if (player < 0 || player >= PLAYER_COUNT) {
-        //printf("Invalid player index\n");
+        printf("Invalid player index\n");
         return -1; // Invalid player
     }
     if (x < 0 || x >= GRID_W || y < 0 || y >= GRID_H) {
-        //printf("Invalid position (%d, %d)\n", x, y);
+        printf("Invalid position (%d, %d)\n", x, y);
         return -2; // Invalid position
     }
     if (player_unit_count[player] >= MAX_UNITS) {
@@ -395,6 +461,13 @@ int add_unit(int player, int x, int y) {
     if (units.pix[y * units.w + x] != 0) {
         // printf("Tile (%d, %d) already occupied\n", x, y);
         return -4; // Tile already occupied
+    }
+    for (int unit = 0; unit < player_unit_count[player]; ++unit) { // Reuse empty slot in player_units
+        if (player_units[player][unit].type == 0) {
+            player_units[player][unit] = (struct unit){x, y, 1};
+            units.pix[y * units.w + x] = player_colors[player]; // add the unit to the map
+            return 0; // Unit added successfully
+        }
     }
     player_units[player][player_unit_count[player]] = (struct unit){x, y, 1};
     units.pix[y * units.w + x] = player_colors[player]; // add the unit to the map
@@ -407,15 +480,14 @@ int remove_unit(int player, int unit) {
         printf("Invalid player or unit index\n");
         return -1; // Invalid player or unit
     }
+    if (player_units[player][unit].type == 0) {
+        printf("Unit %d of player %d is empty\n", unit, player);
+        return -2; // Unit is not active
+    }
     int x = player_units[player][unit].x;
     int y = player_units[player][unit].y;
     units.pix[y * units.w + x] = 0; // Remove unit from grid
-    player_units[player][unit] = (struct unit){0, 0, 0}; // Clear unit data
-    for (int unit_iterator = unit; unit_iterator < player_unit_count[player] - 1; ++unit_iterator) {
-        player_units[player][unit_iterator] = player_units[player][unit_iterator + 1]; // Shift units left
-    }
-    player_units[player][player_unit_count[player] - 1] = (struct unit){0, 0, 0}; // Clear last unit
-    player_unit_count[player]--;
+    player_units[player][unit] = (struct unit){0, 0, 0}; // Clear unit data NO REORDERING
     return 0; // Unit removed successfully
 }
 
@@ -427,6 +499,10 @@ int battle(int attacker, int defender, int unit_att, int unit_def) {
     if (unit_att < 0 || unit_att >= player_unit_count[attacker] || unit_def < 0 || unit_def >= player_unit_count[defender]) {
         printf("Invalid unit index\n");
         return -2; // Invalid unit
+    }
+    if (player_units[attacker][unit_att].type == 0 || player_units[defender][unit_def].type == 0) {
+        printf("empty units\n");
+        return -2; // Unit is not active
     }
     int x_att = player_units[attacker][unit_att].x;
     int y_att = player_units[attacker][unit_att].y;
@@ -462,29 +538,25 @@ int commit_turn(enum players player) {
     for (int unit = 0; unit < player_unit_count[player]; ++unit) {
         if (player_paths[player][unit].length == 0) continue; // skip empty paths
         int cost = 0; // cost is cummulative
-        pos prev_step = {player_units[player][unit].x, player_units[player][unit].y}; // previous step position
         for (int step = 0; step < player_paths[player][unit].length; ++step) {
-            int x = 1;
-            int y = 1;
             // calculate cost of the step
             cost += 100; // default cost
-            resolve_order[cost/100][bucket_size[cost/100]] = (struct step){
-                .dir = 1, // direction of the step
+            if (cost > 400) { break; } // max cost
+            int bucket = cost / 100; // bucket for the step
+            resolve_order[bucket][bucket_size[bucket]] = (struct step){
+                .dir = player_paths[player][unit].steps[step] , // direction of the step
                 .cost = cost, // cost of the step
-                .id = (uint8_t)(unit + (player << 8)) // unit id + player id
+                .id = (uint16_t)(unit + (player << 8)) // unit id + player id
             };
-            prev_step = (pos){x, y}; // update previous step
+            bucket_size[bucket]++; // increment bucket size
         }
     }
+    printf("Player %d committed turn with %d units\n", player, player_unit_count[player]);
     return 0; // Turn committed successfully
 
 }
 
 
-int resolve_turn(){
-
-    return 0;
-}
 
 int move_towards(int player, int unit, int target_x, int target_y) {
     if (player < 0 || player >= PLAYER_COUNT || unit < 0 || unit >= player_unit_count[player]) {
@@ -521,6 +593,7 @@ void find_front(int player, int center_x, int center_y, struct unit *front_units
         return; // Invalid player
     }
     for (int unit = 0; unit < player_unit_count[player]; unit++) {
+        if (player_units[player][unit].type == 0) continue; // skip empty unit slots
         int x = player_units[player][unit].x;
         int y = player_units[player][unit].y;
         if (*count >= MAX_UNITS) {
@@ -568,6 +641,7 @@ int find_target(int player, int unit, struct unit *target) {
 int spawn_unit(enum players player) {
     // try to spawn around a unit
     for (int unit_id = 0; unit_id < player_unit_count[player]; unit_id++) {
+        if (player_units[player][unit_id].type == 0) continue; // skip empty unit slots
         struct unit unit = player_units[player][unit_id];
         for (int dir = 0; dir < DIRECTIONS_COUNT; dir++) {
             int spawn_x = unit.x + dir_offsets[dir].x;
@@ -601,6 +675,8 @@ int ai_unit_movement(enum players player) {
     find_front(1 - player, 0, 0, front_units, &count); // Get front units for other player
     for (int unit = 0; unit < player_unit_count[player]; unit++) {
         memset(player_paths[player][unit].steps, 0, sizeof(player_paths[player][unit].steps)); // clear array
+        player_paths[player][unit].length = 0;
+        if (player_units[player][unit].type == 0) continue; // skip empty unit slots
         int x = player_units[player][unit].x;
         int y = player_units[player][unit].y;
         int distance = 2500;
@@ -619,7 +695,7 @@ int ai_unit_movement(enum players player) {
         int path_length = 0;
         int result = 0;
         if (found_target) {
-            result = pathing(x, y, target.x, target.y, path, &path_length); // Get path to target
+            result = pathing(x, y, target.x, target.y, path, &path_length, 1, player); // Get path to target UNIT_TYPE
             if (result == 1) {
                 player_paths[player][unit].length = path_length;
                 for (int step = 0; step < path_length; step++) {
@@ -637,6 +713,7 @@ int ai_unit_movement(enum players player) {
             //printf("No steps: (%d, %d)\n", player_paths[player][unit].steps[0].x, player_paths[player][unit].steps[0].y);
         }
     }
+    commit_turn(player);
     return 0; // AI movement done
 }
 
@@ -696,12 +773,25 @@ void player_turn(enum players player) {
 }
 
 void script(int frame) {
-    if (frame == 0) {
+    if (frame % 20 == 0) {
         player_turn(0);
     }
-    if (frame == 1) {
+    if (frame % 20 == 5) {
         player_turn(1);
     }
+    if (frame % 20 == 15) {
+        resolve_turn();
+    }
+    //    for (int bucket = 0; bucket < BUCKET_COUNT; bucket++) {
+    //        for (int step = 0; step < bucket_size[bucket]; step++) {
+    //            printf("Bucket %d, step %d: Player %d, Unit %d, Direction %d\n",
+    //                   bucket, step, resolve_order[bucket][step].id / 256,
+    //                   resolve_order[bucket][step].id % 256,
+    //                   resolve_order[bucket][step].dir);
+    //        }
+    //   }
+    //}
+    /*
     if (frame == 2){
         printf("player paths:\n");
         for (int player = 0; player < PLAYER_COUNT; player++) {
@@ -716,6 +806,7 @@ void script(int frame) {
             }
         }
     }
+    */
 }
 
 static inline struct tga tga_load(const char *path)
@@ -790,7 +881,7 @@ int main(void)
     // test pathing
     uint8_t path[GRID_W + GRID_H];
     int pathlength = 0;
-    int result = pathing(20, 0, 20, 5, path, &pathlength);
+    int result = pathing(20, 0, 20, 5, path, &pathlength, 1, 1);
     pos loc = {20, 0};
     if (result == 1) {
         printf("Path found: ");
@@ -809,10 +900,11 @@ int main(void)
         script(frame);
 
         // Clear the buffer
-        memset(buffer, 255, WIDTH * HEIGHT * sizeof(uint32_t));
+        //memset(buffer, 255, WIDTH * HEIGHT * sizeof(uint32_t));
         draw_grid(buffer);
         draw_units(buffer);
-        draw_paths(buffer);
+        //draw_paths(buffer); JANK??
+        draw_turn(buffer);
         frame ++;
 
         window_wait_vsync(window); // wait for vsync (and keep processing events) before next frame
