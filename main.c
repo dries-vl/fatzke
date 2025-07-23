@@ -23,6 +23,11 @@
 #define GREEN 0xFF00FF00
 #define YELLOW 0xFFFFFF00
 
+#define MATRIX(name, type, rows, cols, ...) \
+    static const type name##_flat[] = { __VA_ARGS__ }; \
+    _Static_assert(sizeof(name##_flat)/sizeof(type) == (rows)*(cols), #name " : need " #rows " x " #cols " entries (edit the list)"); \
+    static const type (*const name)[cols] = (const type (*)[cols])name##_flat
+
 struct tga { 
     int w, h; // dimensions
     uint32_t *pix; // pointer to pixel data
@@ -54,7 +59,7 @@ int get_tile(int x, int y) {
     for (int i = 0; i < TILE_COUNT; i++)
         if (tile_colors[i] == tile_color)
             return i;
-    printf("Tile not found for color: 0x%08X\n", tile_color);
+    printf("Tile not found for color: 0x%08X, tile: %d, %d\n", tile_color, x, y);
     return -1;
 }; 
 uint32_t tile_income[TILE_COUNT] = {
@@ -108,16 +113,11 @@ uint32_t unit_cost[UNIT_COUNT] = {
     [MOTORIZED] = 200,
     [ARMOR] = 400,
 };
-
-#define MATRIX(type, name, rows, cols, ...) \
-    static const type name##_flat[] = { __VA_ARGS__ }; \
-    _Static_assert(sizeof(name##_flat)/sizeof(type) == (rows)*(cols), #name " : need " #rows " x " #cols " entries (edit the list)"); \
-    static const type (*const name)[cols] = (const type (*)[cols])name##_flat
-
-MATRIX(uint32_t, movement_cost, UNIT_COUNT, TILE_COUNT,
-    1,   1,  2,  1,  1,  2,
-    255,  1,  4,  1,  1,  3,
-    255,  2,  4,  1,  1,  4
+MATRIX(movement_cost, uint32_t, UNIT_COUNT, TILE_COUNT,
+/*               SEA,    CITY,  MNT,  CRO,  PLN,  FST  */
+/*INFANTRY */ UINT32_MAX,  100,   2,    1,    1,    2,
+/*MOTORIZED*/ UINT32_MAX,  200,     4,    1,    1,    3,
+/*ARMOR    */ UINT32_MAX,  200,     4,    1,    1,    4
 );
 
 #pragma endregion
@@ -183,18 +183,6 @@ static void mouse_input_callback(void *ud, int32_t x, int32_t y, uint32_t b)
     printf("button %u\n", b);
     printf("pointer at %d,%d\n", x, y);
 }
-
-#define LIGHTEN_DESATURATE(c, lf, sf) ({ \
-    uint8_t r = (c)&0xFF, g = ((c)>>8)&0xFF, b = ((c)>>16)&0xFF, a = ((c)>>24)&0xFF; \
-    uint8_t gray = (r + g + b) / 3; \
-    r = (1 - sf) * gray + sf * r; \
-    g = (1 - sf) * gray + sf * g; \
-    b = (1 - sf) * gray + sf * b; \
-    r = r + (255 - r) * (lf - 1); \
-    g = g + (255 - g) * (lf - 1); \
-    b = b + (255 - b) * (lf - 1); \
-    (a << 24) | ((uint8_t)(b) << 16) | ((uint8_t)(g) << 8) | (uint8_t)(r); \
-})
 
 int battle(int attacker, int defender, int unit_att, int unit_def);
 
@@ -266,39 +254,43 @@ int pathing(int from_x, int from_y, int to_x, int to_y, uint8_t *path, int *path
     return 0; // no path found
 }
 
-void draw_grid(uint32_t *buffer)
-{
+static inline uint32_t mix_colors(uint32_t a, uint32_t b) {
+    return (((a ^ b) & 0xFEFEFEFEU) >> 1U) + (a & b);
+}
+
+void cpy_to_buffer(uint32_t pixels[GRID_W][GRID_H], uint32_t *buffer) {
     for (int x = 0; x < WIDTH; ++x) {
         for (int y = 0; y < HEIGHT; ++y) {
-            if (x % PIXEL_SIZE == 0 || y % PIXEL_SIZE == 0) {
-                buffer[y * WIDTH + x] = BLACK;
-            } else {
-                // draw based on tga
+            if (x % PIXEL_SIZE != 0 || y % PIXEL_SIZE != 0) {
                 int map_x = x / PIXEL_SIZE;
                 int map_y = y / PIXEL_SIZE;
-                uint32_t pixel = map.pix[map_y * map.w + map_x];
-                // todo: fix
-                if (tile_income[get_tile(map_x, map_y)] > 0) {
-                    uint32_t country_pixel = players.pix[map_y * players.w + map_x];
-                    buffer[y * WIDTH + x] = country_pixel;
-                } else
-                    buffer[y * WIDTH + x] = LIGHTEN_DESATURATE(pixel, 1.2, 0.6);
+                buffer[y * WIDTH + x] = pixels[map_x][map_y];
             }
         }
     }
 }
 
-void draw_unit(enum players player, int unit_x, int unit_y, uint32_t *buffer)
-{
-    int x = unit_x * PIXEL_SIZE + PIXEL_SIZE / 2;
-    int y = unit_y * PIXEL_SIZE + PIXEL_SIZE / 2;
-    for (int dx = -UNIT_SIZE/2; dx <= UNIT_SIZE/2; ++dx) {
-        for (int dy = -UNIT_SIZE/2; dy <= UNIT_SIZE/2; ++dy) {
-            buffer[(y + dy) * WIDTH + (x + dx)] = player_colors[player];
+void draw_grid(uint32_t pixels[GRID_W][GRID_H]) {
+    for (int x = 0; x < GRID_W; x++) {
+        for (int y = 0; y < GRID_H; y++) {
+            if (tile_income[get_tile(x, y)] > 0) {
+                uint32_t country_pixel = players.pix[y * players.w + x];
+                pixels[x][y] = mix_colors(country_pixel, 0xFF444444);
+            } else {
+                uint32_t map_pixel = map.pix[y * map.w + x];
+                pixels[x][y] = mix_colors(map_pixel, 0xFFDEDEDE);
+            }
         }
     }
 }
-void draw_step(enum players player, int step_x, int step_y, uint32_t *buffer)
+
+void draw_unit(enum players player, int unit_x, int unit_y, uint32_t pixels[GRID_W][GRID_H])
+{
+    pixels[unit_x][unit_y] = player_colors[player];
+    // todo: draw zone of control
+}
+
+void draw_step(enum players player, int step_x, int step_y, uint32_t pixels[GRID_W][GRID_H])
 {
     int x = step_x * PIXEL_SIZE + PIXEL_SIZE / 2;
     int y = step_y * PIXEL_SIZE + PIXEL_SIZE / 2;
@@ -306,30 +298,10 @@ void draw_step(enum players player, int step_x, int step_y, uint32_t *buffer)
         printf("Step out of bounds: (%d, %d)\n", step_x, step_y);
         return; // out of bounds
     }
-    for (int dx = -UNIT_SIZE/2; dx <= UNIT_SIZE/2; dx+=2) {
-        for (int dy = -UNIT_SIZE/2; dy <= UNIT_SIZE/2; dy+=2) {
-            buffer[(y + dy) * WIDTH + (x + dx)] = player_colors[player];
-        }
-    }
-}
-void draw_paths(uint32_t *buffer){
-    for (int player = 0; player < PLAYER_COUNT; player++) {
-        for (int unit = 0; unit < player_unit_count[player]; ++unit) {
-            if (player_units[player][unit].type == 0) continue; // skip empty unit slots
-            pos loc = (pos){player_units[player][unit].x, player_units[player][unit].y}; // start location
-            if (player_paths[player][unit].length == 0) continue; // skip empty paths
-            for (int step = 0; step < player_paths[player][unit].length; ++step) {
-                uint8_t dir = player_paths[player][unit].steps[step]; // get direction from path
-                int x = loc.x + dir_offsets[dir].x; // calculate x position
-                int y = loc.y + dir_offsets[dir].y; // calculate y position
-                draw_step(player, x, y, buffer);
-                loc = (pos){x, y}; // update location
-            }
-        }
-    }
+    pixels[step_x][step_y] = mix_colors(player_colors[player], 0xFFFFFFFF);
 }
 
-void draw_turn(uint32_t *buffer){
+void draw_turn(uint32_t pixels[GRID_W][GRID_H]){
     pos unit_locations[PLAYER_COUNT][MAX_UNITS] = {0}; // keep track of unit locations
     for (int bucket = 0; bucket < BUCKET_COUNT; bucket ++) {
         if (bucket_size[bucket] == 0) {continue;} // skip empty buckets
@@ -347,7 +319,7 @@ void draw_turn(uint32_t *buffer){
             uint8_t dir = resolve_order[bucket][step].dir; // get direction from path
             int x = loc.x + dir_offsets[dir].x; // calculate x position
             int y = loc.y + dir_offsets[dir].y; // calculate y position
-            draw_step(player, x, y, buffer);
+            draw_step(player, x, y, pixels);
             unit_locations[player][unit] = (pos){x, y}; // update location
         }
     }
@@ -381,14 +353,14 @@ int resolve_turn(){
     return 0;
 }
 
-void draw_units(uint32_t *buffer) {
+void draw_units(uint32_t pixels[GRID_W][GRID_H]) {
     for (int player = 0; player < PLAYER_COUNT; player++) {
         if (player_unit_count[player] == 0) continue; // skip empty players
         for (int unit = 0; unit < player_unit_count[player]; ++unit) {
             if (player_units[player][unit].type == 0) continue; // skip empty unit slots
             int x = player_units[player][unit].x;
             int y = player_units[player][unit].y;
-            draw_unit(player, x, y, buffer);
+            draw_unit(player, x, y, pixels);
         }
     }
 }
@@ -735,7 +707,7 @@ void player_turn(enum players player) {
         if (spawn_unit(player) == -1) 
             player_money[player] += UNIT_COST; // refund if cannot be spawned anywhere
     }
-
+    
     ai_unit_movement(player); // BIK
     /*
     // unit movement
@@ -853,10 +825,6 @@ int main(void)
     units = tga_load("units.tga");
     players = tga_load("players.tga");
 
-    struct timespec ts = {0};
-    int stride;
-    uint32_t frame = 0;
-
     // find the cities on the map
     for (int y = 0; y < map.h; ++y) {
         for (int x = 0; x < map.w; ++x) {
@@ -878,37 +846,25 @@ int main(void)
             }
         }
     }
-    // test pathing
-    uint8_t path[GRID_W + GRID_H];
-    int pathlength = 0;
-    int result = pathing(20, 0, 20, 5, path, &pathlength, 1, 1);
-    pos loc = {20, 0};
-    if (result == 1) {
-        printf("Path found: ");
-        for (int i = 1; i < pathlength + 1; i++) {
-            loc.x += dir_offsets[path[pathlength - i]].x; // update x position
-            loc.y += dir_offsets[path[pathlength - i]].y; // update y position
-            printf("%d: (%d, %d) ", path[pathlength - i], loc.x, loc.y);
-        }
-        printf("\n");
-    } else {
-        printf("No path found\n");
-    }
+
+    int stride; // todo: use stride returned by wayland to set the buffer sizing in drawing loop (?)
 
     while(window_poll(window)) {// poll for events and break if compositor connection is lost
-        uint32_t *buffer = get_pixels(window, &stride);
+        static uint32_t frame = 0;
         script(frame);
 
-        // Clear the buffer
-        //memset(buffer, 255, WIDTH * HEIGHT * sizeof(uint32_t));
-        draw_grid(buffer);
-        draw_units(buffer);
-        //draw_paths(buffer); JANK??
-        draw_turn(buffer);
-        frame ++;
+        uint32_t pixels[GRID_W][GRID_H]; // map size
+        draw_grid(pixels);
+        draw_units(pixels);
+        draw_turn(pixels);
+        
+        // map pixels to buffer size
+        uint32_t *buffer = get_pixels(window, &stride); // window size
+        cpy_to_buffer(pixels, buffer);
 
         window_wait_vsync(window); // wait for vsync (and keep processing events) before next frame
         commit(window); // tell compositor it can read from the buffer
+        frame ++;
     }
     destroy(window);
 }

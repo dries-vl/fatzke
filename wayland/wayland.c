@@ -13,7 +13,7 @@
 #include "xdg-shell-client-protocol.h"
 #include "xdg-shell-protocol.c"
 
-#define BLUE 0xFF2E73B3u
+#define BLACK 0xFF000000u
 #define FALLBACK_W 640
 #define FALLBACK_H 480
 
@@ -74,7 +74,7 @@ static void alloc_buffer(struct ctx *st, int w, int h)
 
     /* paint once (blue) */
     for (uint32_t *p = st->pixels, *end = p + (size_t)w * h; p < end; ++p)
-        *p = BLUE;
+        *p = BLACK;
 }
 
 // INPUT CALLBACKS
