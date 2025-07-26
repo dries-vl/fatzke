@@ -18,7 +18,6 @@
 #define BUCKET_SIZE MAX_UNITS // number of steps per bucket
 
 #define WHITE 0xFFFFFFFF
-#define BLACK 0xFF000000
 #define RED 0xFFFF0000
 #define GREEN 0xFF00FF00
 #define YELLOW 0xFFFFFF00
@@ -123,9 +122,9 @@ uint32_t unit_cost[UNIT_COUNT] = {
 };
 MATRIX(movement_cost, uint32_t, UNIT_COUNT, TILE_COUNT,
 /*               SEA,    CITY,  MNT,  CRO,  PLN,  FST  */
-/*INFANTRY */ UINT32_MAX,  100,   2,    1,    1,    2,
-/*MOTORIZED*/ UINT32_MAX,  200,     4,    1,    1,    3,
-/*ARMOR    */ UINT32_MAX,  200,     4,    1,    1,    4
+/*INFANTRY */ UINT32_MAX,  100,   UINT32_MAX,    100,    100,    600,
+/*MOTORIZED*/ UINT32_MAX,  100,     UINT32_MAX,    100,    100,    600,
+/*ARMOR    */ UINT32_MAX,  100,     UINT32_MAX,    100,    100,    600
 );
 
 #pragma endregion
@@ -194,16 +193,20 @@ static void mouse_input_callback(void *ud, int32_t x, int32_t y, uint32_t b)
 
 int battle(int attacker, int defender, int unit_att, int unit_def);
 
-int pathing(int from_x, int from_y, int to_x, int to_y, uint8_t *path, int *pathlength, int unit_type, int player) { // no cost yet, BITshift versie??
+int move_unit(int player, int unit, int to_x, int to_y);
+
+int pathing(int from_x, int from_y, int to_x, int to_y, uint8_t *path, int *pathlength, int unit_type, int player) { // no cost yet, BITshift versie?? Snellere versie met geen sorting
     if (!path || !pathlength) return -1; // Invalid arguments
     if (from_x < 0 || from_x >= GRID_W || from_y < 0 || from_y >= GRID_H ||
         to_x < 0 || to_x >= GRID_W || to_y < 0 || to_y >= GRID_H) {
         return -1; // Invalid coordinates
     }
     int paths_count = 1;
-    uint8_t paths[GRID_W * GRID_H][GRID_H + GRID_W] = {0}; // STACK OVERFLOW ?????
+    uint8_t paths[GRID_W * GRID_H][GRID_H + GRID_W * 2] = {0}; // STACK OVERFLOW ?????
     paths[0][0] = 0; // path length
-    paths[0][1] = UP;
+    paths[0][1] = 0; // start direction is never used
+    int costs[GRID_W * GRID_H] = {0}; // costs of paths
+    costs[0] = 0; // start cost is 0
     pos visited[GRID_W * GRID_H] = {0}; // visited tiles
     visited[0] = (pos){from_x, from_y}; // mark starting tile as visiteds
     for (int i = 0; i < paths_count; i++) {
@@ -218,25 +221,32 @@ int pathing(int from_x, int from_y, int to_x, int to_y, uint8_t *path, int *path
             // Generic
             int x = from_x;
             int y = from_y;
-            for (int step = 0; step < paths[i][0]; step++) {
+            int total_cost = 0;
+            for (int step = paths[i][0] - 1; step >= 0; step--) {
                 x += dir_offsets[paths[i][step + 1]].x;
                 y += dir_offsets[paths[i][step + 1]].y;
+                if (movement_cost[unit_type][get_tile(x, y)] >= 10000000) {printf("step: %d", step); break;} // check for impassable tile
+                total_cost += movement_cost[unit_type][get_tile(x, y)];
             }
             x += dir_offsets[dir].x;
             y += dir_offsets[dir].y;
             //printf("Step %d: (%d, %d) ", dir, x, y);
             if (x < 0 || x >= GRID_W || y < 0 || y >= GRID_H) continue; // out of bounds
             int terrain = get_tile(x, y);
-            if (SEA == terrain || terrain == MOUNTAINS) {continue;} // check for impassable tile
+            int cost = movement_cost[unit_type][terrain];
+            if (cost == UINT32_MAX) {continue;} // check for impassable tile
+            total_cost += cost;
             if (units.pix[y * units.w + x] == player_colors[player]) {continue;} // check for player unit
             if (to_x == x && to_y == y) { // found target
-                paths[paths_count][0] = paths[i][0] + 1;
+                paths[paths_count][0] = paths[i][0] + 1; // technicly ruins path order
                 paths[paths_count][1] = dir;
-                for (int j = 2; j < paths[i][0] + 2; j++) {
+                costs[paths_count] = total_cost; // set cost of path
+                for (int j = 2; j < paths[i][0] + 2; j++) { // copy path from previous tile
                     paths[paths_count][j] = paths[i][j-1];
                 }
                 *pathlength = paths[paths_count][0]; // set path length
                 memcpy(path, paths[paths_count] + 1, sizeof(uint8_t) * (*pathlength)); // copy path to output
+                // printf("Found path to (%d, %d) with cost %d\n", x, y, total_cost);
                 return 1; // found path
             }
             if (units.pix[y * units.w + x] != 0 && units.pix[y * units.w + x] != player_colors[1 - player]) {continue;} // if enemy on path path around
@@ -248,14 +258,40 @@ int pathing(int from_x, int from_y, int to_x, int to_y, uint8_t *path, int *path
                 }
             }
             if (pass == 0) {
-                paths[paths_count][0] = paths[i][0] + 1;;
-                paths[paths_count][1] = dir;
-                for (int j = 2; j < paths[i][0] + 2; j++) {
-                    paths[paths_count][j] = paths[i][j-1];
+                bool found = false;
+                for (int tile = i; tile < paths_count; tile++) {
+                    //printf("Checking tile %d: (%d, %d)\n", tile, x, y);
+                    if (paths[tile][0] == 0) continue; // skip empty paths
+                    if (costs[tile] > total_cost) { // higher cost than existing path
+                        found = true;
+                        for (int k = paths_count - 1; k >= tile; k--) { // shift paths up AND COSTS
+                            memcpy(paths[k + 1], paths[k], sizeof(uint8_t) * 150);
+                            costs[k + 1] = costs[k];
+                        }
+                        paths[tile][0] = paths[i][0] + 1; // set path length
+                        if (paths[tile][0] == 255) {printf("too long path.");return 0;}
+                        paths[tile][1] = dir; // add tile to path
+                        costs[tile] = total_cost; // set cost of path
+                        for (int j = 2; j < paths[i][0] + 2; j++) {
+                            paths[tile][j] = paths[i][j-1];
+                        }
+                        visited[paths_count] = (pos){x, y}; // mark tile as visited
+                        paths_count++;
+                        break;
+                    }
                 }
-                visited[paths_count] = (pos){x, y}; // mark tile as visited
-                paths_count++;
-                //printf("Path %d: ", paths_count);
+                if (!found) {
+                    paths[paths_count][0] = paths[i][0] + 1; // set path length
+                    if (paths[paths_count][0] == 255) {printf("too long path.");return 0;}
+                    paths[paths_count][1] = dir; // add tile to path
+                    costs[paths_count] = total_cost; // set cost of path
+                    for (int j = 2; j < paths[i][0] + 2; j++) {
+                        paths[paths_count][j] = paths[i][j-1];
+                    }
+                    visited[paths_count] = (pos){x, y}; // mark tile as visited
+                    paths_count++;
+                    //printf("Path %d: ", paths_count);
+                }
             }
         }
     }
@@ -396,7 +432,7 @@ int move_unit(int player, int unit, int to_x, int to_y) {
     }
     else if (units.pix[to_y * units.w + to_x] != 0 && units.pix[to_y * units.w + to_x] != player_colors[player]) { // BATTLE!
         //printf("Tile (%d, %d) occupied by enemy\n", to_x, to_y);
-        printf("Battle at (%d, %d)!\n", to_x, to_y);
+        // printf("Battle at (%d, %d)!\n", to_x, to_y);
         for (int defender = 0; defender < player_unit_count[1 - player]; defender++) {
             if (player_units[1 - player][defender].x == to_x && player_units[1 - player][defender].y == to_y) {
                 return battle(player, 1 - player, unit, defender);
@@ -518,9 +554,14 @@ int commit_turn(enum players player) {
     for (int unit = 0; unit < player_unit_count[player]; ++unit) {
         if (player_paths[player][unit].length == 0) continue; // skip empty paths
         int cost = 0; // cost is cummulative
+        int x = player_units[player][unit].x;
+        int y = player_units[player][unit].y;
         for (int step = 0; step < player_paths[player][unit].length; ++step) {
             // calculate cost of the step
-            cost += 100; // default cost
+            x = x + dir_offsets[player_paths[player][unit].steps[step]].x;
+            y = y + dir_offsets[player_paths[player][unit].steps[step]].y;
+            int tile = get_tile(x, y);
+            cost += movement_cost[player_units[player][unit].type][tile]; // tile cost
             if (cost > 400) { break; } // max cost
             int bucket = cost / 100; // bucket for the step
             resolve_order[bucket][bucket_size[bucket]] = (struct step){
@@ -531,7 +572,7 @@ int commit_turn(enum players player) {
             bucket_size[bucket]++; // increment bucket size
         }
     }
-    printf("Player %d committed turn with %d units\n", player, player_unit_count[player]);
+    // printf("Player %d committed turn with %d units\n", player, player_unit_count[player]);
     return 0; // Turn committed successfully
 
 }
@@ -704,7 +745,7 @@ void player_turn(enum players player) {
         return; // Invalid player
     }
     // add 1 money for every city
-    printf("Cities (player %d): %d\n", player, player_cities[player]);
+    //printf("Cities (player %d): %d\n", player, player_cities[player]);
     player_money[player] += player_cities[player];
     // buy units for every 10 money
     static const int UNIT_COST = 100;
