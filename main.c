@@ -108,6 +108,14 @@ uint32_t unit_colors[UNIT_COUNT] = {
     [MOTORIZED] = 0xFF383838,
     [ARMOR] = 0xFF6f6f6f,
 };
+int get_unit(int x, int y) {
+    uint32_t unit_color = units.pix[y * units.w + x];
+    for (int i = 0; i < UNIT_COUNT; i++)
+        if (unit_colors[i] == unit_color)
+            return i;
+    printf("Unit not found\n");
+    return -1;
+}; 
 uint32_t unit_cost[UNIT_COUNT] = {
     [INFANTRY] = 100,
     [MOTORIZED] = 200,
