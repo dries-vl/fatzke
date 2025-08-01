@@ -13,13 +13,13 @@
 #include "xdg-shell-client-protocol.h"
 #include "xdg-shell-protocol.c"
 
-#define BLACK 0xFF000000u
 #define FALLBACK_W 640
 #define FALLBACK_H 480
 
 /* user-supplied input callbacks */
-typedef void (*key_cb)(void *ud, uint32_t key, uint32_t state);         /* wl_keyboard key */
-typedef void (*pointer_cb)(void *ud, int32_t x, int32_t y, uint32_t b); /* wl_pointer button */
+typedef void (*keyboard_cb)(void *ud, uint32_t key, uint32_t state);         /* wl_keyboard key */
+typedef void (*mouse_cb)(void *ud, int32_t x, int32_t y, uint32_t b); /* wl_pointer button */
+typedef void (*resize_cb)(void *ud, int w, int h);
 
 /* ===== internal state ===== */
 struct ctx {
@@ -40,11 +40,10 @@ struct ctx {
     
     double last_x, last_y; // keep track of mouse position
     int vsync_ready; // set by frame_done callback
-
-    /* user callbacks */
-    key_cb     key_cb;
-    pointer_cb ptr_cb;
-    void         *ud;
+    keyboard_cb     keyboard_cb; // callback for keyboard input events
+    mouse_cb mouse_cb; // callback for mouse input events
+    resize_cb  resize_window_cb; // callback for window resize events
+    void *callback_userdata;
 };
 
 /* ========= helpers ========= */
@@ -72,9 +71,9 @@ static void alloc_buffer(struct ctx *st, int w, int h)
     wl_shm_pool_destroy(pool);
     st->buf_w = w; st->buf_h = h; st->stride = (int)stride;
 
-    /* paint once (blue) */
-    for (uint32_t *p = st->pixels, *end = p + (size_t)w * h; p < end; ++p)
-        *p = BLACK;
+    /* paint once */
+    //for (uint32_t *p = st->pixels, *end = p + (size_t)w * h; p < end; ++p)
+    //    *p = BLACK;
 }
 
 // INPUT CALLBACKS
@@ -82,7 +81,7 @@ static void kb_key(void *data, struct wl_keyboard *kbd, uint32_t serial,
                    uint32_t time, uint32_t key, uint32_t state)
 {
     struct ctx *c = data;
-    if (c->key_cb) c->key_cb(c->ud, key, state);
+    if (c->keyboard_cb) c->keyboard_cb(c->callback_userdata, key, state);
 }
 
 static void ptr_motion(void *data, struct wl_pointer *ptr, uint32_t time, wl_fixed_t sx, wl_fixed_t sy) {
@@ -101,7 +100,7 @@ static void ptr_enter(void *data, struct wl_pointer *ptr, uint32_t serial,
 static void ptr_button(void *data, struct wl_pointer *ptr, uint32_t serial,
                        uint32_t time, uint32_t button, uint32_t state) {
     struct ctx *c = data;
-    if (c->ptr_cb) c->ptr_cb(c->ud, c->last_x, c->last_y, state);
+    if (c->mouse_cb) c->mouse_cb(c->callback_userdata, c->last_x, c->last_y, state);
 }
 
 
@@ -176,13 +175,15 @@ static void surf_cfg(void *d, struct xdg_surface *s, uint32_t serial)
 }
 static const struct xdg_surface_listener surf_lis = { surf_cfg };
 
-static void top_cfg(void *d, struct xdg_toplevel *t,
-                    int32_t w, int32_t h, struct wl_array *st_)
-{
+static void top_cfg(void *d, struct xdg_toplevel *t, int32_t w, int32_t h, struct wl_array *st_) {
     struct ctx *st = d;
-    if (w > 0) st->win_w = w;
-    if (h > 0) st->win_h = h;
+    int resized = 0;
+    if (w > 0 && w != st->win_w) { st->win_w = w; resized = 1; }
+    if (h > 0 && h != st->win_h) { st->win_h = h; resized = 1; }
+    if (resized && st->resize_window_cb)
+        st->resize_window_cb(st->callback_userdata, st->win_w, st->win_h);
 }
+
 static const struct xdg_toplevel_listener top_lis = { top_cfg, NULL };
 
 /* simple helper: run until *flag set */
@@ -194,47 +195,45 @@ static void run_until(struct ctx *st, int *flag)
     }
 }
 
-/* ===== public API ===== */
-struct ctx *create_window(int w, int h, const char *title)
+struct ctx *create_window(int w, int h, const char *title, keyboard_cb kcb, mouse_cb mcb, resize_cb rcb, void *ud)
 {
     struct ctx *st = calloc(1, sizeof *st);
     st->win_w = w ? w : FALLBACK_W;
     st->win_h = h ? h : FALLBACK_H;
+    
+    st->keyboard_cb = kcb;
+    st->mouse_cb = mcb;
+    st->resize_window_cb = rcb;
+    st->callback_userdata = ud;
 
     if (!(st->dpy = wl_display_connect(NULL))) { perror("connect"); goto fail; }
 
     struct wl_registry *r = wl_display_get_registry(st->dpy);
     wl_registry_add_listener(r, &reg_lis, st);
 
-    /* Pump events until we have compositor, shm & wm */
     while (!st->comp || !st->shm || !st->wm)
         wl_display_dispatch(st->dpy);
     xdg_wm_base_add_listener(st->wm, &wm_lis, NULL);
 
-    /* create surface */
     st->surf = wl_compositor_create_surface(st->comp);
     st->xs   = xdg_wm_base_get_xdg_surface(st->wm, st->surf);
     st->top  = xdg_surface_get_toplevel(st->xs);
     xdg_surface_add_listener(st->xs,  &surf_lis, st);
     xdg_toplevel_add_listener(st->top, &top_lis, st);
     if (title) xdg_toplevel_set_title(st->top, title);
-    wl_surface_commit(st->surf);           /* 1st commit: no buffer */
+
+    xdg_toplevel_set_fullscreen(st->top, NULL); // set fullscreen
+
+    wl_surface_commit(st->surf); // 1st commit: no buffer
     wl_display_flush(st->dpy);
 
-    /* prepare fallback buffer during first roundtrip */
-    alloc_buffer(st, st->win_w, st->win_h);
-
-    /* wait until we’re configured */
+    // ---- Wait for real fullscreen size ----
+    // todo: we wait for the callback here, but shouldn't we put the code below in there instead then?
     run_until(st, &st->configured);
 
-    /* compositor may have asked for larger size */
-    if (st->win_w > st->buf_w || st->win_h > st->buf_h) {
-        wl_buffer_destroy(st->buf);
-        munmap(st->pixels, (size_t)st->buf_h * st->stride);
-        alloc_buffer(st, st->win_w, st->win_h);
-    }
+    // ---- Allocate buffer with correct size ----
+    alloc_buffer(st, st->win_w, st->win_h);
 
-    /* attach once so window appears */
     wl_surface_attach(st->surf, st->buf, 0, 0);
     wl_surface_damage_buffer(st->surf, 0, 0, st->win_w, st->win_h);
     wl_surface_commit(st->surf);
@@ -246,9 +245,8 @@ fail:
     return NULL;
 }
 
-void *get_pixels(struct ctx *c, int *stride_out)
+void *get_buffer(struct ctx *c)
 {
-    if (stride_out) *stride_out = c->stride;
     return c->pixels;
 }
 
@@ -282,13 +280,6 @@ void commit(struct ctx *c)
     // Block in dispatch until vsync_ready is set by callback
     while (!c->vsync_ready)
         wl_display_dispatch(c->dpy);
-}
-
-void set_input_cb(struct ctx *c, key_cb k, pointer_cb p, void *ud)
-{
-    c->key_cb = k;
-    c->ptr_cb = p;
-    c->ud     = ud;
 }
 
 int window_poll(struct ctx *c) {

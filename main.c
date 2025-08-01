@@ -4,17 +4,17 @@
 #include <time.h>
 #include <assert.h>
 
-// sudo apt install libwayland-dev
-#include "wayland/wayland.c"
+#include "wayland/wayland.c" // sudo apt install libwayland-dev
 
-#define HEIGHT 1000
-#define WIDTH 1000
-#define PIXEL_SIZE 20
-#define GRID_W (WIDTH / PIXEL_SIZE) // now just screen size
-#define GRID_H (HEIGHT / PIXEL_SIZE)
-#define UNIT_SIZE 14 // size of a unit on screen
-#define MAX_UNITS 100 // max number of units per player
-#define BUCKET_COUNT 10 // number of buckets for resolve order
+// todo: this needs to match the data in the tga files, but needs to be in scenario/save data (and also not global in code but passed via eg. a struct)
+#define GRID_W 50
+#define GRID_H 50
+#define TILE_SIZE 32
+#define ATLAS_SIZE 8
+
+// todo: these hardcoded globals need to be configurable in data instead and not global
+#define MAX_UNITS 128 // max number of units per player
+#define BUCKET_COUNT 8 // number of buckets for resolve order
 #define BUCKET_SIZE MAX_UNITS // number of steps per bucket
 
 #define WHITE 0xFFFFFFFF
@@ -302,50 +302,60 @@ static inline uint32_t mix_colors(uint32_t a, uint32_t b) {
     return (((a ^ b) & 0xFEFEFEFEU) >> 1U) + (a & b);
 }
 
-void cpy_to_buffer(uint32_t pixels[GRID_W][GRID_H], uint32_t *buffer) {
-    for (int x = 0; x < WIDTH; ++x) {
-        for (int y = 0; y < HEIGHT; ++y) {
-            if (x % PIXEL_SIZE != 0 || y % PIXEL_SIZE != 0) {
-                int map_x = x / PIXEL_SIZE;
-                int map_y = y / PIXEL_SIZE;
-                buffer[y * WIDTH + x] = pixels[map_x][map_y];
-            }
+void inline draw_unit(enum players player, int unit_y, int unit_x, int w, int h, uint32_t buffer[h][w]) {
+    for (int y = 0; y < TILE_SIZE; ++y) {
+        for (int x = 0; x < TILE_SIZE; ++x) {
+            buffer[(unit_y * TILE_SIZE) + y][(unit_x * TILE_SIZE) + x] = player_colors[player];
         }
     }
 }
 
-void draw_grid(uint32_t pixels[GRID_W][GRID_H]) {
-    for (int x = 0; x < GRID_W; x++) {
-        for (int y = 0; y < GRID_H; y++) {
-            if (tile_income[get_tile(x, y)] > 0) {
-                uint32_t country_pixel = players.pix[y * players.w + x];
-                pixels[x][y] = mix_colors(country_pixel, 0xFF444444);
-            } else {
-                uint32_t map_pixel = map.pix[y * map.w + x];
-                pixels[x][y] = mix_colors(map_pixel, 0xFFDEDEDE);
-            }
+void draw_units(int w, int h, uint32_t buffer[h][w]) {
+    for (int player = 0; player < PLAYER_COUNT; player++) {
+        if (player_unit_count[player] == 0) continue; // skip empty players
+        for (int unit = 0; unit < player_unit_count[player]; ++unit) {
+            if (player_units[player][unit].type == 0) continue; // skip empty unit slots
+            int x = player_units[player][unit].x;
+            int y = player_units[player][unit].y;
+            if ((x+1) * TILE_SIZE > w || (y+1) * TILE_SIZE > h) continue; // don't write beyond the visible grid
+            draw_unit(player, y, x, w, h, buffer);
         }
     }
 }
 
-void draw_unit(enum players player, int unit_x, int unit_y, uint32_t pixels[GRID_W][GRID_H])
-{
-    pixels[unit_x][unit_y] = player_colors[player];
-    // todo: draw zone of control
-}
-
-void draw_step(enum players player, int step_x, int step_y, uint32_t pixels[GRID_W][GRID_H])
-{
-    int x = step_x * PIXEL_SIZE + PIXEL_SIZE / 2;
-    int y = step_y * PIXEL_SIZE + PIXEL_SIZE / 2;
-    if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) {
-        printf("Step out of bounds: (%d, %d)\n", step_x, step_y);
-        return; // out of bounds
+// todo: this is same as draw unit, we can merge the functions
+void inline draw_tile(struct tga map_atlas, int tile_y, int tile_x, int w, int h, uint32_t terrainbuffer[h][w]) {
+    enum tiles tile = get_tile(tile_x, tile_y);
+    int start_x = (tile % ATLAS_SIZE) * TILE_SIZE; // todo: hardcoded for now assumes 8 by 8 atlas
+    int start_y = (tile / ATLAS_SIZE) * TILE_SIZE;
+    for (int y = 0; y < TILE_SIZE; ++y) {
+        for (int x = 0; x < TILE_SIZE; ++x) {
+            int atlas_x = start_x + x;
+            int atlas_y = start_y + y;
+            terrainbuffer[(tile_y * TILE_SIZE) + y][(tile_x * TILE_SIZE) + x] = map_atlas.pix[atlas_y * map_atlas.w + atlas_x];
+        }
     }
-    pixels[step_x][step_y] = mix_colors(player_colors[player], 0xFFFFFFFF);
 }
 
-void draw_turn(uint32_t pixels[GRID_W][GRID_H]){
+void draw_terrain(struct tga map_atlas, int w, int h, uint32_t terrainbuffer[h][w]) {
+    for (int y = 0; y < GRID_H; y++) {
+        for (int x = 0; x < GRID_W; x++) {
+            if ((x+1) * TILE_SIZE > w || (y+1) * TILE_SIZE > h) continue; // don't write beyond visible; TODO: use per-frame visible grid size instead of 'GRID_H' etc.
+            draw_tile(map_atlas, y, x, w, h, terrainbuffer);
+        }
+    }
+}
+
+void draw_step(enum players player, int step_y, int step_x, int w, int h, uint32_t buffer[h][w])
+{
+    for (int y = 0; y < TILE_SIZE; ++y) {
+        for (int x = 0; x < TILE_SIZE; ++x) {
+            buffer[(step_y * TILE_SIZE) + y][(step_x * TILE_SIZE) + x] = mix_colors(player_colors[player], 0xFFFFFFFF);
+        }
+    }
+}
+
+void draw_turn(int w, int h, uint32_t buffer[h][w]){
     pos unit_locations[PLAYER_COUNT][MAX_UNITS] = {0}; // keep track of unit locations
     for (int bucket = 0; bucket < BUCKET_COUNT; bucket ++) {
         if (bucket_size[bucket] == 0) {continue;} // skip empty buckets
@@ -363,7 +373,8 @@ void draw_turn(uint32_t pixels[GRID_W][GRID_H]){
             uint8_t dir = resolve_order[bucket][step].dir; // get direction from path
             int x = loc.x + dir_offsets[dir].x; // calculate x position
             int y = loc.y + dir_offsets[dir].y; // calculate y position
-            draw_step(player, x, y, pixels);
+            if ((x+1) * TILE_SIZE > w || (y+1) * TILE_SIZE > h) continue; // don't draw beyond the visible grid
+            draw_step(player, y, x, w, h, buffer);
             unit_locations[player][unit] = (pos){x, y}; // update location
         }
     }
@@ -395,18 +406,6 @@ int resolve_turn(){
     }
 
     return 0;
-}
-
-void draw_units(uint32_t pixels[GRID_W][GRID_H]) {
-    for (int player = 0; player < PLAYER_COUNT; player++) {
-        if (player_unit_count[player] == 0) continue; // skip empty players
-        for (int unit = 0; unit < player_unit_count[player]; ++unit) {
-            if (player_units[player][unit].type == 0) continue; // skip empty unit slots
-            int x = player_units[player][unit].x;
-            int y = player_units[player][unit].y;
-            draw_unit(player, x, y, pixels);
-        }
-    }
 }
 
 int move_unit(int player, int unit, int to_x, int to_y) {
@@ -839,9 +838,9 @@ static inline struct tga tga_load(const char *path)
     assert(read(fd, h18, 18) == 18);
 
     /* ─── validate header ────────────────────────────────────────── */
-    if (h18[2]  != 2)   { fprintf(stderr,"TGA type ≠ 2\n");          exit(1); }
-    if (h18[16] != 32){ fprintf(stderr,"TGA bpp ≠ 32 (got %u)\n",h18[16]);exit(1);}
-    if ((h18[17] & 0x20) == 0){ fprintf(stderr,"TGA not top-left\n"); exit(1); }
+    if (h18[2]  != 2)   { fprintf(stderr,"TGA type ≠ 2 for %s\n", path);          exit(1); }
+    if (h18[16] != 32){ fprintf(stderr,"TGA bpp ≠ 32 (got %u) for %s\n",h18[16], path);exit(1);}
+    if ((h18[17] & 0x20) == 0){ fprintf(stderr,"TGA not top-left for %s\n", path); exit(1); }
 
     int w = h18[12] | h18[13]<<8;
     int h = h18[14] | h18[15]<<8;
@@ -853,11 +852,11 @@ static inline struct tga tga_load(const char *path)
     fstat(fd,&st);
     assert(off + bytes <= (size_t)st.st_size);
 
-    const void *map = mmap(0, st.st_size, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+    void *map = mmap(0, st.st_size, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
     assert(map != MAP_FAILED);
     close(fd);
 
-    return (struct tga){ w, h, (const uint32_t*)((uint8_t *)map + off), map, st.st_size };
+    return (struct tga){ w, h, (uint32_t*)((uint8_t *)map + off), map, st.st_size };
 }
 
 static inline void tga_free(struct tga img)
@@ -865,14 +864,38 @@ static inline void tga_free(struct tga img)
     munmap((void*)img.map, img.map_len);
 }
 
+#define MAX_BUFFER_WIDTH (32 * 32)
+#define MAX_BUFFER_HEIGHT (32 * 24)
+static int display_w;
+static int display_h;
+static int buffer_w;
+static int buffer_h;
+static int need_scaling;
+void resize_window_callback(void *userdata, int new_w, int new_h) {
+    display_w = new_w;
+    display_h = new_h;
+    need_scaling = new_w > MAX_BUFFER_WIDTH || new_h > MAX_BUFFER_HEIGHT;
+    buffer_w = need_scaling ? MAX_BUFFER_WIDTH : new_w;
+    buffer_h = need_scaling ? MAX_BUFFER_HEIGHT : new_h;
+    printf("Window resized to %dx%d, buffer resized to %dx%d\n", display_w, display_h, buffer_w, buffer_h);
+}
+
+void copy_centered(uint32_t *dst, int dw, int dh, const uint32_t *src, int sw, int sh) {
+    assert(sw <= dw && sh <= dh); // sanity check
+    int xoff = (dw - sw) / 2;
+    int yoff = (dh - sh) / 2;
+    for (int y = 0; y < sh; ++y) {
+        memcpy(dst + (y + yoff) * dw + xoff, src + y * sw, sw * sizeof(uint32_t));
+    }
+}
+
 int main(void)
 {
-    struct ctx *window = create_window(WIDTH, HEIGHT, "<<Fatzke>>");
-    set_input_cb(window, key_input_callback, mouse_input_callback, NULL);
-    
     map = tga_load("map.tga");
     units = tga_load("units.tga");
     players = tga_load("players.tga");
+    
+    struct tga map_atlas = tga_load("map_atlas.tga");
 
     // find the cities on the map
     for (int y = 0; y < map.h; ++y) {
@@ -896,23 +919,34 @@ int main(void)
         }
     }
 
-    int stride; // todo: use stride returned by wayland to set the buffer sizing in drawing loop (?)
+    int camera_zoom = 1;
+    int camera_x = GRID_W / 2;
+    int camera_y = GRID_H / 2;
+    uint32_t frame = 0;
+
+    struct ctx *window = create_window(0, 0, "<<Fatzke>>", key_input_callback, mouse_input_callback, resize_window_callback, NULL);
 
     while(window_poll(window)) {// poll for events and break if compositor connection is lost
-        static uint32_t frame = 0;
-        script(frame);
+        if (frame > 0) script(frame);
 
-        uint32_t pixels[GRID_W][GRID_H]; // map size
-        draw_grid(pixels);
-        draw_units(pixels);
-        draw_turn(pixels);
+        static uint32_t terrainbuffer[MAX_BUFFER_HEIGHT][MAX_BUFFER_WIDTH];
+        if (frame == 0) draw_terrain(map_atlas, buffer_w, buffer_h, terrainbuffer);
+
+        static uint32_t scalingbuffer[MAX_BUFFER_HEIGHT][MAX_BUFFER_WIDTH];
+
+        uint64_t buffer_size = buffer_w * buffer_h * sizeof(uint32_t);
+        uint32_t *buffer = need_scaling ? scalingbuffer : get_buffer(window);
+        memcpy(buffer, terrainbuffer, buffer_size);
+
+        draw_units(buffer_w, buffer_h, buffer);
+        draw_turn(buffer_w, buffer_h, buffer);
         
-        // map pixels to buffer size
-        uint32_t *buffer = get_pixels(window, &stride); // window size
-        cpy_to_buffer(pixels, buffer);
-
+        // copy the rendered buffer into the actual framebuffer if scaling was needed
+        if (need_scaling) copy_centered(get_buffer(window), display_w, display_h, scalingbuffer, buffer_w, buffer_h); 
+        
         window_wait_vsync(window); // wait for vsync (and keep processing events) before next frame
         commit(window); // tell compositor it can read from the buffer
+
         frame ++;
     }
     destroy(window);
