@@ -19,7 +19,7 @@
 /* user-supplied input callbacks */
 typedef void (*keyboard_cb)(void *ud, uint32_t key, uint32_t state);         /* wl_keyboard key */
 typedef void (*mouse_cb)(void *ud, int32_t x, int32_t y, uint32_t b); /* wl_pointer button */
-typedef void (*resize_cb)(void *ud, int w, int h);
+typedef void (*resize_cb)(void *ud, u32 w, u32 h);
 
 /* ===== internal state ===== */
 struct ctx {
@@ -198,8 +198,6 @@ static void run_until(struct ctx *st, int *flag)
 struct ctx *create_window(int w, int h, const char *title, keyboard_cb kcb, mouse_cb mcb, resize_cb rcb, void *ud)
 {
     struct ctx *st = calloc(1, sizeof *st);
-    st->win_w = w ? w : FALLBACK_W;
-    st->win_h = h ? h : FALLBACK_H;
     
     st->keyboard_cb = kcb;
     st->mouse_cb = mcb;
@@ -222,17 +220,27 @@ struct ctx *create_window(int w, int h, const char *title, keyboard_cb kcb, mous
     xdg_toplevel_add_listener(st->top, &top_lis, st);
     if (title) xdg_toplevel_set_title(st->top, title);
 
-    xdg_toplevel_set_fullscreen(st->top, NULL); // set fullscreen
+    if (w == 0 || h == 0) {
+        xdg_toplevel_set_fullscreen(st->top, NULL); // set fullscreen
+        wl_surface_commit(st->surf); // 1st commit: no buffer
+        wl_display_flush(st->dpy);
 
-    wl_surface_commit(st->surf); // 1st commit: no buffer
-    wl_display_flush(st->dpy);
-
-    // ---- Wait for real fullscreen size ----
-    // todo: we wait for the callback here, but shouldn't we put the code below in there instead then?
-    run_until(st, &st->configured);
-
-    // ---- Allocate buffer with correct size ----
-    alloc_buffer(st, st->win_w, st->win_h);
+        run_until(st, &st->configured);
+        alloc_buffer(st, st->win_w, st->win_h);
+    } else {
+        st->win_w = w;
+        st->win_h = h;
+        wl_surface_commit(st->surf); // 1st commit: no buffer
+        wl_display_flush(st->dpy);
+        alloc_buffer(st, st->win_w, st->win_h);
+        run_until(st, &st->configured);
+        if (st->win_w > st->buf_w || st->win_h > st->buf_h) {
+            wl_buffer_destroy(st->buf);
+            munmap(st->pixels, (size_t)st->buf_h * st->stride);
+            alloc_buffer(st, st->win_w, st->win_h);
+        }
+        st->resize_window_cb(NULL, w, h);
+    }
 
     wl_surface_attach(st->surf, st->buf, 0, 0);
     wl_surface_damage_buffer(st->surf, 0, 0, st->win_w, st->win_h);
