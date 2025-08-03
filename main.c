@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <time.h>
 #include <assert.h>
+#include <pthread.h>
 
 // todo: separate header for all common c stuff
 typedef uint8_t   u8;
@@ -161,9 +162,9 @@ u32 unit_cost[UNIT_COUNT] = {
 };
 MATRIX(movement_cost, u32, UNIT_COUNT, TILE_COUNT,
 /*               SEA,    CITY,  MNT,  CRO,  PLN,  FST  */
-/*INFANTRY */ UINT32_MAX,  100,   UINT32_MAX,    100,    100,    600,
-/*MOTORIZED*/ UINT32_MAX,  100,     UINT32_MAX,    100,    100,    600,
-/*ARMOR    */ UINT32_MAX,  100,     UINT32_MAX,    100,    100,    600
+/*INFANTRY */ UINT32_MAX,  100,   UINT32_MAX,    100,    100,    200,
+/*MOTORIZED*/ UINT32_MAX,  100,     UINT32_MAX,    100,    100,    200,
+/*ARMOR    */ UINT32_MAX,  100,     UINT32_MAX,    100,    100,    200
 );
 
 #pragma endregion
@@ -598,6 +599,7 @@ i32 battle(u32 attacker, u32 defender, u32 unit_att, u32 unit_def) {
         printf("Units not adjacent\n");
         return -3; // Units not adjacent
     }
+    return 3; // force draw
     i32 random = rand() % 20; // Random number between 0 and 5
     if (random == 20) { // Attacker wins 1/3
         //printf("Attacker wins!\n");
@@ -828,15 +830,25 @@ void player_turn(enum players player) {
     ai_unit_movement(player); // BIK
 }
 
-void script(u32 frame) {
-    if (frame % 20 == 1) {
-        player_turn(0);
-    }
-    if (frame % 20 == 5) {
-        player_turn(1);
-    }
-    if (frame % 20 == 15) {
-        resolve_turn();
+void *script(void *arg) {
+    u32 scrpt_frame = 0;
+    while (true) {
+        u64 ms_scrpt = time_ms();
+        if (scrpt_frame % 20 == 1) {
+            player_turn(0);
+        }
+        if (scrpt_frame % 20 == 5) {
+            player_turn(1);
+        }
+        if (scrpt_frame % 20 == 15) {
+            resolve_turn();
+        }
+        struct timespec ts = {0, 16 * 1000000};
+        if (elapsed_ms(ms_scrpt) >= 0) {
+            printf("%ld ms_scrpt\n", elapsed_ms(ms_scrpt));
+        }
+        nanosleep(&ts, NULL);
+        scrpt_frame++;
     }
 }
 
@@ -943,7 +955,11 @@ u32 main(void)
 
     while(window_poll(window)) {// poll for events and break if compositor connection is lost
         u64 ms = time_ms();
-        // if (frame > 0) script(frame);
+        if (frame == 0) {
+            pthread_t tid;
+            pthread_create(&tid, NULL, script, NULL);
+            printf("Script thread started\n");
+        }
 
         static u32 terrainbuffer[MAX_BUFFER_HEIGHT][MAX_BUFFER_WIDTH];
         static u32 scalingbuffer[MAX_BUFFER_HEIGHT][MAX_BUFFER_WIDTH];
@@ -952,8 +968,8 @@ u32 main(void)
         // todo: draw starting based on camera location instead of always same point
         u32 draw_width = buffer_w;
         u32 draw_height = buffer_h;
-        printf("camera.update: %d\n", camera.update);
-        if (camera.update == 1) {
+        if (camera.update != 0) {
+            printf("camera.update: %d\n", camera.update);
             draw_terrain(camera, map_atlas, buffer_w, buffer_h, (u32 *)terrainbuffer);
             camera.update = 0;
         }
@@ -966,7 +982,9 @@ u32 main(void)
         
         window_wait_vsync(window); // wait for vsync (and keep processing events) before next frame
         commit(window); // tell compositor it can read from the buffer
-        printf("%ld ms\n", elapsed_ms(ms));
+        if (elapsed_ms(ms) > 1) {
+            printf("%ld ms\n", elapsed_ms(ms));
+        }
 
         frame ++;
     }
