@@ -241,7 +241,7 @@ i32 pathing(u32 from_x, u32 from_y, u32 to_x, u32 to_y, u8 *path, u32 *pathlengt
     u8 paths[GRID_W * GRID_H][GRID_H + GRID_W * 2] = {0}; // STACK OVERFLOW ?????
     paths[0][0] = 0; // path length
     paths[0][1] = 0; // start direction is never used
-    int costs[GRID_W * GRID_H] = {0}; // costs of paths
+    u32 costs[GRID_W * GRID_H] = {0}; // costs of paths
     costs[0] = 0; // start cost is 0
     pos visited[GRID_W * GRID_H] = {0}; // visited tiles
     visited[0] = (pos){from_x, from_y}; // mark starting tile as visiteds
@@ -295,12 +295,12 @@ i32 pathing(u32 from_x, u32 from_y, u32 to_x, u32 to_y, u8 *path, u32 *pathlengt
             }
             if (pass == 0) {
                 bool found = false;
-                for (int tile = i; tile < paths_count; tile++) {
+                for (u32 tile = i; tile < paths_count; tile++) {
                     //printf("Checking tile %d: (%d, %d)\n", tile, x, y);
                     if (paths[tile][0] == 0) continue; // skip empty paths
                     if (costs[tile] > total_cost) { // higher cost than existing path
                         found = true;
-                        for (int k = paths_count - 1; k >= tile; k--) { // shift paths up AND COSTS
+                        for (u32 k = paths_count - 1; k >= tile; k--) { // shift paths up AND COSTS
                             memcpy(paths[k + 1], paths[k], sizeof(uint8_t) * 150);
                             costs[k + 1] = costs[k];
                         }
@@ -308,7 +308,7 @@ i32 pathing(u32 from_x, u32 from_y, u32 to_x, u32 to_y, u8 *path, u32 *pathlengt
                         if (paths[tile][0] == 255) {printf("too long path.");return 0;}
                         paths[tile][1] = dir; // add tile to path
                         costs[tile] = total_cost; // set cost of path
-                        for (int j = 2; j < paths[i][0] + 2; j++) {
+                        for (u32 j = 2; j < paths[i][0] + 2; j++) {
                             paths[tile][j] = paths[i][j-1];
                         }
                         visited[paths_count] = (pos){x, y}; // mark tile as visited
@@ -614,13 +614,13 @@ i32 commit_turn(enum players player) {
     for (u32 unit = 0; unit < player_unit_count[player]; ++unit) {
         if (player_paths[player][unit].length == 0) continue; // skip empty paths
         u32 cost = 0; // cost is cummulative
-        int x = player_units[player][unit].x;
-        int y = player_units[player][unit].y;
+        u32 x = player_units[player][unit].x;
+        u32 y = player_units[player][unit].y;
         for (u32 step = 0; step < player_paths[player][unit].length; ++step) {
             // calculate cost of the step
             x = x + dir_offsets[player_paths[player][unit].steps[step]].x;
             y = y + dir_offsets[player_paths[player][unit].steps[step]].y;
-            int tile = get_tile(x, y);
+            u32 tile = get_tile(x, y);
             cost += movement_cost[player_units[player][unit].type][tile]; // tile cost
             if (cost > 400) { break; } // max cost
             u32 bucket = cost / 100; // bucket for the step
