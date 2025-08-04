@@ -40,7 +40,7 @@ struct ctx {
     
     double last_x, last_y; // keep track of mouse position
     int vsync_ready; // set by frame_done callback
-    keyboard_cb     keyboard_cb; // callback for keyboard input events
+    keyboard_cb keyboard_cb; // callback for keyboard input events
     mouse_cb mouse_cb; // callback for mouse input events
     resize_cb  resize_window_cb; // callback for window resize events
     void *callback_userdata;
@@ -57,6 +57,7 @@ static int memfd(size_t len)
     }
     return fd;
 }
+
 static void alloc_buffer(struct ctx *st, int w, int h)
 {
     size_t stride = (size_t)w * 4, len = stride * h;
@@ -195,6 +196,67 @@ static void run_until(struct ctx *st, int *flag)
     }
 }
 
+
+void *get_buffer(struct ctx *c)
+{
+    return c->pixels;
+}
+
+static void frame_done(void *data, struct wl_callback *cb, uint32_t time);
+
+static const struct wl_callback_listener frame_listener = {
+    .done = frame_done,
+};
+
+static void frame_done(void *data, struct wl_callback *cb, uint32_t time) {
+    wl_callback_destroy(cb);
+    struct ctx *c = data;
+    c->vsync_ready = 1;
+}
+
+void commit(struct ctx *c)
+{
+    c->vsync_ready = 0;
+
+    wl_surface_attach(c->surf, c->buf, 0, 0);
+    wl_surface_damage_buffer(c->surf, 0, 0, c->win_w, c->win_h);
+    
+    struct wl_callback *cb = wl_surface_frame(c->surf);
+    static const struct wl_callback_listener frame_listener = { .done = frame_done };
+    wl_callback_add_listener(cb, &frame_listener, c);
+
+    wl_surface_commit(c->surf);
+    wl_display_flush(c->dpy);
+}
+
+int poll_events(struct ctx *c) {
+    // blocks until we receive an event
+    return wl_display_dispatch(c->dpy) >= 0; // returns -1 if connection to compositor dead
+}
+
+int window_poll(struct ctx *c) {
+    wl_display_flush(c->dpy); // send any pending requests
+
+    // Try to read new events (non-blocking)
+    if (wl_display_prepare_read(c->dpy) == 0) {
+        // No events waiting: poll fd for input
+        struct pollfd pfd = {
+            .fd = wl_display_get_fd(c->dpy),
+            .events = POLLIN
+        };
+        // poll with zero timeout: don't block
+        poll(&pfd, 1, 0);
+
+        // This is always non-blocking
+        wl_display_read_events(c->dpy);
+    } else {
+        wl_display_cancel_read(c->dpy); // always cancel if can't read
+    }
+
+    // Process any new events already in queue
+    return wl_display_dispatch_pending(c->dpy) >= 0;
+}
+
 struct ctx *create_window(int w, int h, const char *title, keyboard_cb kcb, mouse_cb mcb, resize_cb rcb, void *ud)
 {
     struct ctx *st = calloc(1, sizeof *st);
@@ -245,72 +307,17 @@ struct ctx *create_window(int w, int h, const char *title, keyboard_cb kcb, mous
     wl_surface_attach(st->surf, st->buf, 0, 0);
     wl_surface_damage_buffer(st->surf, 0, 0, st->win_w, st->win_h);
     wl_surface_commit(st->surf);
+    
+    struct wl_callback *cb = wl_surface_frame(st->surf);
+    wl_callback_add_listener(cb, &frame_listener, st);
+    st->vsync_ready = 1;
+
     wl_display_flush(st->dpy);
 
     return st;
 fail:
     free(st);
     return NULL;
-}
-
-void *get_buffer(struct ctx *c)
-{
-    return c->pixels;
-}
-
-static void frame_done(void *data, struct wl_callback *cb, uint32_t time);
-
-static const struct wl_callback_listener frame_listener = {
-    .done = frame_done,
-};
-
-static void frame_done(void *data, struct wl_callback *cb, uint32_t time) {
-    wl_callback_destroy(cb);
-    struct ctx *c = data;
-    c->vsync_ready = 1;
-}
-
-void window_wait_vsync(struct ctx *c)
-{
-    c->vsync_ready = 0;
-    struct wl_callback *cb = wl_surface_frame(c->surf);
-    static const struct wl_callback_listener frame_listener = { .done = frame_done };
-    wl_callback_add_listener(cb, &frame_listener, c);
-}
-
-void commit(struct ctx *c)
-{
-    wl_surface_attach(c->surf, c->buf, 0, 0);
-    wl_surface_damage_buffer(c->surf, 0, 0, c->win_w, c->win_h);
-    wl_surface_commit(c->surf);
-    wl_display_flush(c->dpy);
-
-    // Block in dispatch until vsync_ready is set by callback
-    while (!c->vsync_ready)
-        wl_display_dispatch(c->dpy);
-}
-
-int window_poll(struct ctx *c) {
-    wl_display_flush(c->dpy); // send any pending requests
-
-    // Try to read new events (non-blocking)
-    if (wl_display_prepare_read(c->dpy) == 0) {
-        // No events waiting: poll fd for input
-        struct pollfd pfd = {
-            .fd = wl_display_get_fd(c->dpy),
-            .events = POLLIN
-        };
-        // poll with zero timeout: don't block
-        poll(&pfd, 1, 0);
-
-        // This is always non-blocking
-        wl_display_read_events(c->dpy);
-    } else {
-        wl_display_cancel_read(c->dpy); // always cancel if can't read
-    }
-
-    // Process any new events already in queue
-    return wl_display_dispatch_pending(c->dpy) >= 0;
 }
 
 void destroy(struct ctx *c)
