@@ -36,19 +36,26 @@ enum result {
 #define ATLAS_SIZE 8
 
 struct camera {
-    i32 tile_x, tile_y; // position in pixels (on the map, ie. TILE_SIZE time the position on the grid, of more granularity)
+    i32 tile_x, tile_y; // (top left) camera position on the map
+    u32 end_x, end_y; // (down right) furthest visible tile on the map
+    u32 buffer_w, buffer_h; // the size of the frame buffer (in pixels)
+    u32 display_w, display_h; // size of the original display (in pixels), to keep track of the size we need to scale to (off by one stride means we cannot just x2)
     u32 zoom;
-    u32 update;
+    u32 update; // the camera has moved this frame
 };
 
 void move_camera(struct camera *camera, i32 delta_x, i32 delta_y) {
-    camera->tile_x = camera->tile_x + delta_x < 0 ? 0 : camera->tile_x + delta_x > (GRID_W-1) ? (GRID_W-1) : camera->tile_x + delta_x;
-    camera->tile_y = camera->tile_y + delta_y < 0 ? 0 : camera->tile_y + delta_y > (GRID_H-1) ? (GRID_H-1) : camera->tile_y + delta_y;
+    u32 legal_delta_x = camera->tile_x + delta_x < 0 ? 0 : camera->tile_x + delta_x > (GRID_W-1) ? 0 : delta_x;
+    u32 legal_delta_y = camera->tile_y + delta_y < 0 ? 0 : camera->tile_y + delta_y > (GRID_H-1) ? 0 : delta_y;
+    camera->tile_x += legal_delta_x;
+    camera->end_x += legal_delta_x;
+    camera->tile_y += legal_delta_y;
+    camera->end_y += legal_delta_y;
     camera->update = 1;
 }
 
 // todo: pass to callbacks instead of global
-struct camera camera = {0, 0, 1, 1};
+struct camera camera = {0, 0, 0, 0, 0, 0, 0, 0, 1, 1};
 
 // todo: these hardcoded globals need to be configurable in data instead and not global
 #define MAX_UNITS 128 // max number of units per player
@@ -152,6 +159,7 @@ u32 get_unit(u32 x, u32 y) {
     for (u32 i = 0; i < UNIT_COUNT; i++)
         if (unit_colors[i] == unit_color)
             return i;
+    printf("Unit not found for color: 0x%08X, unit: %d, %d\n", unit_color, x, y);
     printf("Unit not found\n");
     return UINT32_MAX;
 }; 
@@ -352,38 +360,35 @@ static inline u32 mix_colors(u32 a, u32 b) {
     return (((a ^ b) & 0xFEFEFEFEU) >> 1U) + (a & b);
 }
 
-void inline draw_unit(struct camera camera, enum players player, u32 tile_y, u32 tile_x, u32 w, u32 h, u32 *buffer) {
-    // calculate the rect in the buffer that we need to draw this tile in
-    i32 start_y = (tile_y * TILE_SIZE) - (camera.tile_y * TILE_SIZE);
-    i32 start_x = (tile_x * TILE_SIZE) - (camera.tile_x * TILE_SIZE);
-    i32 end_y = start_y + TILE_SIZE;
-    i32 end_x = start_x + TILE_SIZE;
-    assert(start_x >= 0 && start_y >= 0 && "Negative drawing position");
-    // if this tile goes out of bounds (last tile), draw only to the end of the buffer instead
-    if (end_y > h) end_y = h;
-    if (end_x > w) end_x = w;
-    // loop over the range we calculated above
-    for (u32 y = start_y; y < end_y; ++y) {
-        for (u32 x = start_x; x < end_x; ++x) {
-            buffer[y * w + x] = player_colors[player];
-        }
+static inline void draw_unit(struct camera camera, struct tga units_atlas, u32 tile_y, u32 tile_x, u32 *restrict buffer) {
+    const u32 start_y = (tile_y - camera.tile_y) * TILE_SIZE;
+    const u32 start_x = (tile_x - camera.tile_x) * TILE_SIZE;
+    const enum units unit = get_unit(tile_x, tile_y);
+    const u32 atlas_start_x = (unit % ATLAS_SIZE) * TILE_SIZE;
+    const u32 atlas_start_y = (unit / ATLAS_SIZE) * TILE_SIZE;
+
+    for (u32 i = 0; i < TILE_SIZE; ++i) {
+        u32 *buffer_location = buffer + (start_y + i) * camera.buffer_w + start_x;
+        const u32 *atlas_location = units_atlas.pix + (atlas_start_y + i) * units_atlas.w + atlas_start_x;
+        memcpy(buffer_location, atlas_location, TILE_SIZE * sizeof(u32));
     }
 }
 
-void draw_units(struct camera camera, u32 w, u32 h, u32 *buffer) {
+void draw_units(struct camera camera, struct tga units_atlas, u32 *buffer) {
     for (u32 player = 0; player < PLAYER_COUNT; player++) {
         if (player_unit_count[player] == 0) continue; // skip empty players
         for (u32 unit = 0; unit < player_unit_count[player]; ++unit) {
-            if (player_units[player][unit].type == 0) continue; // skip empty unit slots
+            if (player_units[player][unit].type == UINT32_MAX) continue; // skip empty unit slots
             u32 tile_x = player_units[player][unit].x;
             u32 tile_y = player_units[player][unit].y;
             if (tile_x < camera.tile_x || tile_y < camera.tile_y) continue;
-            draw_unit(camera, player, tile_y, tile_x, w, h, buffer);
+            if (tile_x > camera.end_x || tile_y > camera.end_y) continue;
+            draw_unit(camera, units_atlas, tile_y, tile_x, buffer);
         }
     }
 }
 
-static inline void draw_tile(struct camera camera, struct tga map_atlas, u32 tile_y, u32 tile_x, u32 w, u32 h, u32 *restrict terrainbuffer) {
+static inline void draw_tile(struct camera camera, struct tga map_atlas, u32 tile_y, u32 tile_x, u32 *restrict terrainbuffer) {
     const u32 start_y = (tile_y - camera.tile_y) * TILE_SIZE;
     const u32 start_x = (tile_x - camera.tile_x) * TILE_SIZE;
     const enum tiles tile = get_tile(tile_x, tile_y);
@@ -391,20 +396,17 @@ static inline void draw_tile(struct camera camera, struct tga map_atlas, u32 til
     const u32 atlas_start_y = (tile / ATLAS_SIZE) * TILE_SIZE;
 
     for (u32 i = 0; i < TILE_SIZE; ++i) {
-        u32 *dest = terrainbuffer + (start_y + i) * w + start_x;
+        u32 *dest = terrainbuffer + (start_y + i) * camera.buffer_w + start_x;
         const u32 *src = map_atlas.pix + (atlas_start_y + i) * map_atlas.w + atlas_start_x;
         memcpy(dest, src, TILE_SIZE * sizeof(u32));
     }
 }
 
-void draw_terrain(struct camera camera, struct tga map_atlas, u32 w, u32 h, u32 *terrainbuffer) {
-    // calculate the visible tile range
-    u32 map_end_x = camera.tile_x + (w / TILE_SIZE); // add one to also include tiles that are not fully visible
-    u32 map_end_y = camera.tile_y + (h / TILE_SIZE);
+void draw_terrain(struct camera camera, struct tga map_atlas, u32 *terrainbuffer) {
     // loop over all the visible tiles
-    for (u32 y = camera.tile_y; y < map_end_y; ++y) {
-        for (u32 x = camera.tile_x; x < map_end_x; ++x) {
-            draw_tile(camera, map_atlas, y, x, w, h, terrainbuffer);
+    for (u32 y = camera.tile_y; y <= camera.end_y; ++y) {
+        for (u32 x = camera.tile_x; x <= camera.end_x; ++x) {
+            draw_tile(camera, map_atlas, y, x, terrainbuffer);
         }
     }
 }
@@ -427,7 +429,7 @@ void draw_step(struct camera camera, enum players player, u32 tile_y, u32 tile_x
     }
 }
 
-void draw_turn(struct camera camera, u32 w, u32 h, u32 *buffer){
+void draw_turn(struct camera camera, u32 *buffer){
     pos unit_locations[PLAYER_COUNT][MAX_UNITS] = {0}; // keep track of unit locations
     for (u32 bucket = 0; bucket < BUCKET_COUNT; bucket ++) {
         if (bucket_size[bucket] == 0) {continue;} // skip empty buckets
@@ -445,9 +447,9 @@ void draw_turn(struct camera camera, u32 w, u32 h, u32 *buffer){
             u8 dir = resolve_order[bucket][step].dir; // get direction from path
             u32 x = loc.x + dir_offsets[dir].x; // calculate x position
             u32 y = loc.y + dir_offsets[dir].y; // calculate y position
-            if ((x+1) * TILE_SIZE > w || (y+1) * TILE_SIZE > h) continue; // don't draw beyond the visible grid
+            if ((x+1) * TILE_SIZE > camera.buffer_w || (y+1) * TILE_SIZE > camera.buffer_h) continue; // don't draw beyond the visible grid
             if (x < camera.tile_x || y < camera.tile_y) continue;
-            draw_step(camera, player, y, x, w, h, buffer);
+            draw_step(camera, player, y, x, camera.buffer_w, camera.buffer_h, buffer);
             unit_locations[player][unit] = (pos){x, y}; // update location
         }
     }
@@ -532,7 +534,7 @@ i32 resolve_turn(){
     return 0;
 }
 
-i32 add_unit(u32 player, u32 x, u32 y) {
+i32 add_unit(u32 player, enum units unit, u32 x, u32 y) {
     if (player >= PLAYER_COUNT) {
         printf("Invalid player index\n");
         return -1; // Invalid player
@@ -549,15 +551,15 @@ i32 add_unit(u32 player, u32 x, u32 y) {
         // printf("Tile (%d, %d) already occupied\n", x, y);
         return -4; // Tile already occupied
     }
-    for (u32 unit = 0; unit < player_unit_count[player]; ++unit) { // Reuse empty slot in player_units
-        if (player_units[player][unit].type == 0) {
-            player_units[player][unit] = (struct unit){x, y, 1};
-            units.pix[y * units.w + x] = player_colors[player]; // add the unit to the map
+    for (u32 i = 0; i < player_unit_count[player]; ++i) { // Reuse empty slot in player_units
+        if (player_units[player][i].type == UINT32_MAX) {
+            player_units[player][i] = (struct unit){x, y, unit};
+            if(!units.pix[y * units.w + x]) units.pix[y * units.w + x] = unit_colors[unit]; // add the unit to the map
             return 0; // Unit added successfully
         }
     }
-    player_units[player][player_unit_count[player]] = (struct unit){x, y, 1};
-    units.pix[y * units.w + x] = player_colors[player]; // add the unit to the map
+    player_units[player][player_unit_count[player]] = (struct unit){x, y, unit};
+    if(!units.pix[y * units.w + x]) units.pix[y * units.w + x] = unit_colors[unit]; // add the unit to the map
     player_unit_count[player]++;
     return 0; // Unit added successfully
 }
@@ -741,7 +743,7 @@ i32 spawn_unit(enum players player) {
                 bool has_unit = units.pix[spawn_y * units.w + spawn_x] != 0;
                 bool is_sea = map.pix[spawn_y * map.w + spawn_x] == SEA;
                 if (!has_unit && !is_sea && get_player(spawn_x, spawn_y) == player) {
-                    i32 result = add_unit(player, spawn_x, spawn_y);
+                    i32 result = add_unit(player, INFANTRY, spawn_x, spawn_y);
                     if (result == 0) {
                         return 1;
                     } else if (result == -3) {
@@ -887,23 +889,23 @@ static inline void tga_free(struct tga img)
     munmap((void*)img.map, img.map_len);
 }
 
-#define MAX_BUFFER_WIDTH (920)
-#define MAX_BUFFER_HEIGHT (680)
-static u32 display_w;
-static u32 display_h;
-static u32 buffer_w;
-static u32 buffer_h;
+#define MAX_BUFFER_WIDTH (1920 / 2)
+#define MAX_BUFFER_HEIGHT (1080 / 2)
 static u32 need_scaling;
 static void resize_window_callback(void *userdata, u32 new_w, u32 new_h) {
-    display_w = new_w;
-    display_h = new_h;
     need_scaling = new_w > MAX_BUFFER_WIDTH || new_h > MAX_BUFFER_HEIGHT;
-    buffer_w = need_scaling ? (new_w / 2) : new_w;
-    buffer_h = need_scaling ? (new_h / 2) : new_h;
-    printf("Window resized to %dx%d, buffer resized to %dx%d\n", display_w, display_h, buffer_w, buffer_h);
+    camera.display_w = new_w;
+    camera.display_h = new_h;
+    camera.buffer_w = need_scaling ? (new_w / 2) : new_w;
+    camera.buffer_h = need_scaling ? (new_h / 2) : new_h;
+    camera.end_x = camera.tile_x + (camera.buffer_w / TILE_SIZE) - 1;
+    camera.end_y = camera.tile_y + (camera.buffer_h / TILE_SIZE) - 1;
+    if (camera.end_x >= GRID_W) camera.end_x = GRID_W - 1;
+    if (camera.end_y >= GRID_H) camera.end_y = GRID_H - 1;
+    printf("Frame buffer resized: buffer(%d, %d), tile(%d, %d), end_tile(%d, %d)\n", camera.buffer_w, camera.buffer_h, camera.tile_x, camera.tile_y, camera.end_x, camera.end_y);
 }
 
-static inline void scale2x(u32 *src, u32 sw, u32 sh, u32 *dst, u32 dw) {
+static inline void scale2x(u32 *restrict src, u32 sw, u32 sh, u32 *restrict dst, u32 dw) {
     for (u32 y = 0; y < sh; ++y) {
         u32 *srow = src + y * sw;
         u32 *drow0 = dst + (y * 2) * dw;
@@ -926,6 +928,7 @@ u32 main(void)
     players = tga_load("players.tga");
     
     struct tga map_atlas = tga_load("map_atlas.tga");
+    struct tga units_atlas = tga_load("units_atlas.tga");
 
     // find the cities on the map
     for (u32 y = 0; y < map.h; ++y) {
@@ -943,8 +946,9 @@ u32 main(void)
         for (u32 x = 0; x < units.w; ++x) {
             u32 pixel = units.pix[y * units.w + x];
             if (pixel != 0) { // unit is not empty pixel
+                enum units unit = get_unit(x, y);
                 units.pix[y * units.w + x] = 0;
-                add_unit(get_player(x, y), x, y);
+                add_unit(get_player(x, y), unit, x, y);
             }
         }
     }
@@ -955,7 +959,7 @@ u32 main(void)
 
     while(window_poll(window)) {// poll for events and break if compositor connection is lost
         u64 ms = time_ms();
-        if (frame == 0) {
+        if (false) {
             pthread_t tid;
             pthread_create(&tid, NULL, script, NULL);
             printf("Script thread started\n");
@@ -965,20 +969,16 @@ u32 main(void)
         static u32 scalingbuffer[MAX_BUFFER_HEIGHT][MAX_BUFFER_WIDTH];
         u32 *buffer = need_scaling ? scalingbuffer : get_buffer(window);
 
-        // todo: draw starting based on camera location instead of always same point
-        u32 draw_width = buffer_w;
-        u32 draw_height = buffer_h;
-        if (camera.update != 0) {
-            printf("camera.update: %d\n", camera.update);
-            draw_terrain(camera, map_atlas, buffer_w, buffer_h, (u32 *)terrainbuffer);
+        if (camera.update == 1) {
+            draw_terrain(camera, map_atlas, (u32 *)terrainbuffer);
             camera.update = 0;
         }
-        memcpy(buffer, terrainbuffer, buffer_w * buffer_h * sizeof(u32));
-        draw_units(camera, buffer_w, buffer_h, buffer);
-        draw_turn(camera, buffer_w, buffer_h, buffer);
+        memcpy(buffer, terrainbuffer, camera.buffer_w * camera.buffer_h * sizeof(u32));
+        draw_units(camera, units_atlas, buffer);
+        draw_turn(camera, buffer);
         
         // copy the rendered buffer into the actual framebuffer if scaling was needed
-        if (need_scaling) scale2x(buffer, buffer_w, buffer_h, get_buffer(window), display_w);
+        if (need_scaling) scale2x(buffer, camera.buffer_w, camera.buffer_h, get_buffer(window), camera.display_w);
         
         window_wait_vsync(window); // wait for vsync (and keep processing events) before next frame
         commit(window); // tell compositor it can read from the buffer
