@@ -23,11 +23,12 @@ enum result {
     ERROR
 };
 
-#define time_ms() ((long)(clock() * 1000 / CLOCKS_PER_SEC))
-#define elapsed_ms(start) (time_ms() - (start))
+#define time_us() ({ struct timespec ts; clock_gettime(1, &ts); (long)(ts.tv_sec * 1000000L + ts.tv_nsec / 1000L); })
+#define elapsed_us(start) (time_us() - (start))
 
 #include "wayland/wayland.c" // sudo apt install libwayland-dev
 
+#pragma region CAMERA
 // todo: this needs to match the data in the tga files, but needs to be in scenario/save data (and also not global in code but passed via eg. a struct)
 #define GRID_W 50
 #define GRID_H 50
@@ -44,8 +45,12 @@ struct camera {
 };
 
 void move_camera(struct camera *camera, i32 delta_x, i32 delta_y) {
-    u32 legal_delta_x = camera->tile_x + delta_x < 0 ? 0 : camera->tile_x + delta_x > (GRID_W-1) ? 0 : delta_x;
-    u32 legal_delta_y = camera->tile_y + delta_y < 0 ? 0 : camera->tile_y + delta_y > (GRID_H-1) ? 0 : delta_y;
+    u32 legal_delta_x = delta_x;
+    u32 legal_delta_y = delta_y;
+    if (camera->tile_x + delta_x < 0) legal_delta_x = 0;
+    if (camera->end_x + delta_x > (GRID_W - 1)) legal_delta_x = 0;
+    if (camera->tile_y + delta_y < 0) legal_delta_y = 0;
+    if (camera->end_y + delta_y > (GRID_H - 1)) legal_delta_y = 0;
     camera->tile_x += legal_delta_x;
     camera->end_x += legal_delta_x;
     camera->tile_y += legal_delta_y;
@@ -55,6 +60,7 @@ void move_camera(struct camera *camera, i32 delta_x, i32 delta_y) {
 
 // todo: pass to callbacks instead of global
 struct camera camera = {0, 0, 0, 0, 0, 0, 0, 0, 1, 1};
+#pragma endregion
 
 // todo: these hardcoded globals need to be configurable in data instead and not global
 #define MAX_UNITS 128 // max number of units per player
@@ -225,29 +231,42 @@ struct unit player_units[PLAYER_COUNT][MAX_UNITS] = {0};
 
 struct unit player_target[PLAYER_COUNT] = {{0, 0, 0}, {0, 0, 0}};
 
-static void key_input_callback(void *ud, u32 key, u32 state)
-{
+#pragma region INPUT
+#define KEY_COUNT 256
+u32 pressed_keys[KEY_COUNT];
+static void key_input_callback(void *ud, u32 key, u32 state) {
     if (state) {
-        if (key == 1) exit(0);
-        else if (key == 36) {
-            move_camera(&camera, 0, 1);
-        }
-        else if (key == 37) {
-            move_camera(&camera, 0, -1);
-        }
-        else if (key == 35) {
-            move_camera(&camera, -1, 0);
-        }
-        else if (key == 38) {
-            move_camera(&camera, 1, 0);
-        }
+        pressed_keys[key] = 1;
+        printf("KEY PRESSED: %d\n", key);
+    } else {
+        pressed_keys[key] = 0;
+        printf("KEY RELEASED: %d\n", key);
     }
 }
-static void mouse_input_callback(void *ud, i32 x, i32 y, u32 b)
-{
+
+static void mouse_input_callback(void *ud, i32 x, i32 y, u32 b) {
     printf("button %u\n", b);
     printf("pointer at %d,%d\n", x, y);
 }
+
+void process_input() {
+    if (pressed_keys[1]) { // esc
+        exit(0);
+    }
+    else if (pressed_keys[35]) { // h
+        move_camera(&camera, -1, 0);
+    }
+    else if (pressed_keys[36]) { // j
+        move_camera(&camera, 0, 1);
+    }
+    else if (pressed_keys[37]) { // k
+        move_camera(&camera, 0, -1);
+    }
+    else if (pressed_keys[38]) { // l
+        move_camera(&camera, 1, 0);
+    }
+}
+#pragma endregion
 
 i32 battle(u32 attacker, u32 defender, u32 unit_att, u32 unit_def);
 
@@ -878,8 +897,8 @@ static inline void tga_free(struct tga img)
 
 #define MAX_BUFFER_WIDTH (1920 / 2)
 #define MAX_BUFFER_HEIGHT (1080 / 2)
-static u32 need_scaling;
-static void resize_window_callback(void *userdata, u32 new_w, u32 new_h) {
+u32 need_scaling;
+void resize_window_callback(void *userdata, u32 new_w, u32 new_h) {
     need_scaling = new_w > MAX_BUFFER_WIDTH || new_h > MAX_BUFFER_HEIGHT;
     camera.display_w = new_w;
     camera.display_h = new_h;
@@ -892,7 +911,7 @@ static void resize_window_callback(void *userdata, u32 new_w, u32 new_h) {
     printf("Frame buffer resized: buffer(%d, %d), tile(%d, %d), end_tile(%d, %d)\n", camera.buffer_w, camera.buffer_h, camera.tile_x, camera.tile_y, camera.end_x, camera.end_y);
 }
 
-static inline void scale2x(u32 *restrict src, u32 sw, u32 sh, u32 *restrict dst, u32 dw) {
+inline void scale2x(u32 *restrict src, u32 sw, u32 sh, u32 *restrict dst, u32 dw) {
     for (u32 y = 0; y < sh; ++y) {
         u32 *srow = src + y * sw;
         u32 *drow0 = dst + (y * 2) * dw;
@@ -944,30 +963,53 @@ u32 main(void)
 
     struct ctx *window = create_window(0, 0, "<<Fatzke>>", key_input_callback, mouse_input_callback, resize_window_callback, NULL);
 
-    while(window_poll(window)) {// poll for events and break if compositor connection is lost
-        u64 ms = time_ms();
+    u64 start_us = time_us();
+    while(poll_events(window)) {// poll for events
+        if (!window->vsync_ready) continue; // wait for next event until vsync is not done
+
+        u64 frame_us = time_us();
         // if (frame > 0) script(frame);
 
         static u32 terrainbuffer[MAX_BUFFER_HEIGHT][MAX_BUFFER_WIDTH];
         static u32 scalingbuffer[MAX_BUFFER_HEIGHT][MAX_BUFFER_WIDTH];
         u32 *buffer = need_scaling ? scalingbuffer : get_buffer(window);
+        u64 us_get_buffer = elapsed_us(frame_us);
+        
+        process_input();
 
         if (camera.update == 1) {
             draw_terrain(camera, map_atlas, (u32 *)terrainbuffer);
             camera.update = 0;
         }
+        u64 us_draw_terrain = elapsed_us(frame_us);
         memcpy(buffer, terrainbuffer, camera.buffer_w * camera.buffer_h * sizeof(u32));
+        u64 us_cpy_terrain = elapsed_us(frame_us);
         draw_units(camera, units_atlas, buffer);
+        u64 us_draw_units = elapsed_us(frame_us);
         draw_turn(camera, buffer);
+        u64 us_draw_steps = elapsed_us(frame_us);
         
         // copy the rendered buffer into the actual framebuffer if scaling was needed
         if (need_scaling) scale2x(buffer, camera.buffer_w, camera.buffer_h, get_buffer(window), camera.display_w);
+        u64 us_scale_2x = elapsed_us(frame_us);
         
-        window_wait_vsync(window); // wait for vsync (and keep processing events) before next frame
+        u64 us_vsync = elapsed_us(frame_us);
         commit(window); // tell compositor it can read from the buffer
-        printf("%ld ms\n", elapsed_ms(ms));
 
         frame ++;
+        u64 us_per_frame = elapsed_us(start_us) / frame;
+        #define _DEBUG_FPS
+        #ifdef _DEBUG_FPS
+        printf("total: %ld us\n", elapsed_us(frame_us));
+        printf("get buffer: %ld us\n", us_get_buffer);
+        printf("draw terrain: %ld us\n", us_draw_terrain);
+        printf("cpy terrain: %ld us\n", us_cpy_terrain);
+        printf("draw units: %ld us\n", us_draw_units);
+        printf("draw steps: %ld us\n", us_draw_steps);
+        printf("scale 2x: %ld us\n", us_scale_2x);
+        printf("vsync: %ld us\n", us_vsync);
+        printf("TIME: %ld, FRAME: %d, US PER FRAME: %ld\n", elapsed_us(start_us), frame, us_per_frame);
+        #endif
     }
     destroy(window);
 }
