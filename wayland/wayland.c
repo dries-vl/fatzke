@@ -10,33 +10,48 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <wayland-client.h>
+
 #include "xdg-shell-client-protocol.h"
 #include "xdg-shell-protocol.c"
 
 #define FALLBACK_W 640
 #define FALLBACK_H 480
 
+// todo: separate header for all common c stuff
+typedef uint8_t   u8;
+typedef uint16_t  u16;
+typedef uint32_t  u32;
+typedef uint64_t  u64;
+typedef int8_t    i8;
+typedef int16_t   i16;
+typedef int32_t   i32;
+typedef int64_t   i64;
+typedef float     f32;
+typedef double    f64;
+typedef intptr_t  isize;
+typedef uintptr_t usize;
+
 /* user-supplied input callbacks */
-typedef void (*keyboard_cb)(void *ud, uint32_t key, uint32_t state);         /* wl_keyboard key */
-typedef void (*mouse_cb)(void *ud, int32_t x, int32_t y, uint32_t b); /* wl_pointer button */
+typedef void (*keyboard_cb)(void *ud, uint32_t key, uint32_t state);
+typedef void (*mouse_cb)(void *ud, int32_t x, int32_t y, uint32_t b);
 typedef void (*resize_cb)(void *ud, u32 w, u32 h);
 
 /* ===== internal state ===== */
 struct ctx {
-    struct wl_display    *dpy;
+    struct wl_display *dpy;
     struct wl_compositor *comp;
-    struct wl_shm        *shm;
-    struct xdg_wm_base   *wm;
+    struct wl_shm *shm;
+    struct xdg_wm_base *wm;
 
-    struct wl_surface    *surf;
-    struct xdg_surface   *xs;
-    struct xdg_toplevel  *top;
+    struct wl_surface *surf;
+    struct xdg_surface *xs;
+    struct xdg_toplevel *top;
 
-    struct wl_buffer     *buf;
-    void   *pixels;
-    int     buf_w, buf_h, stride;
-    int     win_w, win_h;
-    int     configured;
+    struct wl_buffer *buf;
+    void *pixels;
+    int buf_w, buf_h, stride;
+    int win_w, win_h;
+    int configured;
     
     double last_x, last_y; // keep track of mouse position
     int vsync_ready; // set by frame_done callback

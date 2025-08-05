@@ -1,4 +1,4 @@
-// tcc main.c -lwayland-client -run
+// cc main.c -lwayland-client
 #include <stdio.h>
 #include <stdint.h>
 #include <time.h>
@@ -509,6 +509,7 @@ i32 move_unit(u32 player, u32 unit, u32 to_x, u32 to_y) {
     // move unit from old location to new location
     units.pix[to_y * units.w + to_x] = units.pix[from_y * units.w + from_x];
     units.pix[from_y * units.w + from_x] = 0;
+    assert(units.pix[to_y * units.w + to_x] != 0 && "unit moved but map not correctly updated, did unit move to current position?");
     // set the value of the unit in the player units array
     player_units[player][unit].x = to_x;
     player_units[player][unit].y = to_y;
@@ -570,15 +571,16 @@ i32 add_unit(u32 player, enum units unit, u32 x, u32 y) {
         // printf("Tile (%d, %d) already occupied\n", x, y);
         return -4; // Tile already occupied
     }
+    assert(unit_colors[unit] != 0 && "Unit is invalid, has color & alpha both set to zero");
     for (u32 i = 0; i < player_unit_count[player]; ++i) { // Reuse empty slot in player_units
         if (player_units[player][i].type == UINT32_MAX) {
             player_units[player][i] = (struct unit){x, y, unit};
-            if(!units.pix[y * units.w + x]) units.pix[y * units.w + x] = unit_colors[unit]; // add the unit to the map
+            units.pix[y * units.w + x] = unit_colors[unit]; // add the unit to the map
             return 0; // Unit added successfully
         }
     }
     player_units[player][player_unit_count[player]] = (struct unit){x, y, unit};
-    if(!units.pix[y * units.w + x]) units.pix[y * units.w + x] = unit_colors[unit]; // add the unit to the map
+    units.pix[y * units.w + x] = unit_colors[unit]; // add the unit to the map
     player_unit_count[player]++;
     return 0; // Unit added successfully
 }
@@ -924,7 +926,7 @@ void resize_window_callback(void *userdata, u32 new_w, u32 new_h) {
     printf("Frame buffer resized: buffer(%d, %d), tile(%d, %d), end_tile(%d, %d)\n", camera.buffer_w, camera.buffer_h, camera.tile_x, camera.tile_y, camera.end_x, camera.end_y);
 }
 
-inline void scale2x(u32 *restrict src, u32 sw, u32 sh, u32 *restrict dst, u32 dw) {
+void scale2x(u32 *restrict src, u32 sw, u32 sh, u32 *restrict dst, u32 dw) {
     for (u32 y = 0; y < sh; ++y) {
         u32 *srow = src + y * sw;
         u32 *drow0 = dst + (y * 2) * dw;
@@ -940,8 +942,7 @@ inline void scale2x(u32 *restrict src, u32 sw, u32 sh, u32 *restrict dst, u32 dw
     }
 }
 
-u32 main(void)
-{
+u32 main(void) {
     map = tga_load("map.tga");
     units = tga_load("units.tga");
     players = tga_load("players.tga");
@@ -967,7 +968,8 @@ u32 main(void)
             if (pixel != 0) { // unit is not empty pixel
                 enum units unit = get_unit(x, y);
                 units.pix[y * units.w + x] = 0;
-                add_unit(get_player(x, y), unit, x, y);
+                i32 result = add_unit(get_player(x, y), unit, x, y);
+                assert(result == 0 && "Init unit map went wrong\n");
             }
         }
     }
@@ -981,11 +983,12 @@ u32 main(void)
         if (!window->vsync_ready) continue; // wait for next event until vsync is not done
 
         u64 frame_us = time_us();
-        if (false) {
+        if (frame == 0) {
             pthread_t tid;
             pthread_create(&tid, NULL, script, NULL);
             printf("Script thread started\n");
         }
+        u64 us_thread = elapsed_us(frame_us);
 
         static u32 terrainbuffer[MAX_BUFFER_HEIGHT][MAX_BUFFER_WIDTH];
         static u32 scalingbuffer[MAX_BUFFER_HEIGHT][MAX_BUFFER_WIDTH];
@@ -993,6 +996,7 @@ u32 main(void)
         u64 us_get_buffer = elapsed_us(frame_us);
         
         process_input();
+        u64 us_process_inputs = elapsed_us(frame_us);
 
         if (camera.update == 1) {
             draw_terrain(camera, map_atlas, (u32 *)terrainbuffer);
@@ -1018,6 +1022,8 @@ u32 main(void)
         #define _DEBUG_FPS
         #ifdef _DEBUG_FPS
         printf("total: %ld us\n", elapsed_us(frame_us));
+        printf("get thread: %ld us\n", us_thread);
+        printf("process inputs: %ld us\n", us_process_inputs);
         printf("get buffer: %ld us\n", us_get_buffer);
         printf("draw terrain: %ld us\n", us_draw_terrain);
         printf("cpy terrain: %ld us\n", us_cpy_terrain);
