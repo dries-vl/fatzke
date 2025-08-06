@@ -5,6 +5,8 @@
 #include <assert.h>
 #include <pthread.h>
 
+#define _DEBUG_FPS 1
+
 // todo: separate header for all common c stuff
 typedef uint8_t   u8;
 typedef uint16_t  u16;
@@ -255,16 +257,16 @@ void process_input() {
     if (pressed_keys[1]) { // esc
         exit(0);
     }
-    else if (pressed_keys[35]) { // h
+    if (pressed_keys[35]) { // h
         move_camera(&camera, -1, 0);
     }
-    else if (pressed_keys[36]) { // j
+    if (pressed_keys[36]) { // j
         move_camera(&camera, 0, 1);
     }
-    else if (pressed_keys[37]) { // k
+    if (pressed_keys[37]) { // k
         move_camera(&camera, 0, -1);
     }
-    else if (pressed_keys[38]) { // l
+    if (pressed_keys[38]) { // l
         move_camera(&camera, 1, 0);
     }
 }
@@ -380,16 +382,16 @@ static inline u32 mix_colors(u32 a, u32 b) {
 }
 
 static inline void draw_unit(struct camera camera, struct tga units_atlas, u32 tile_y, u32 tile_x, u32 *restrict buffer) {
-    const u32 start_y = (tile_y - camera.tile_y) * TILE_SIZE;
-    const u32 start_x = (tile_x - camera.tile_x) * TILE_SIZE;
+    const u32 start_y = (tile_y - camera.tile_y) * TILE_SIZE + 5;
+    const u32 start_x = (tile_x - camera.tile_x) * TILE_SIZE + 5;
     const enum units unit = get_unit(tile_x, tile_y);
     const u32 atlas_start_x = (unit % ATLAS_SIZE) * TILE_SIZE;
     const u32 atlas_start_y = (unit / ATLAS_SIZE) * TILE_SIZE;
 
-    for (u32 i = 0; i < TILE_SIZE; ++i) {
+    for (u32 i = 0; i < TILE_SIZE-6; ++i) {
         u32 *buffer_location = buffer + (start_y + i) * camera.buffer_w + start_x;
         const u32 *atlas_location = units_atlas.pix + (atlas_start_y + i) * units_atlas.w + atlas_start_x;
-        memcpy(buffer_location, atlas_location, TILE_SIZE * sizeof(u32));
+        memcpy(buffer_location, atlas_location, (TILE_SIZE-6) * sizeof(u32));
     }
 }
 
@@ -430,7 +432,7 @@ void draw_terrain(struct camera camera, struct tga map_atlas, u32 *terrainbuffer
     }
 }
 
-void draw_step(struct camera camera, enum players player, u32 tile_y, u32 tile_x, u32 w, u32 h, u32 *buffer) {
+void draw_step(struct camera camera, enum directions direction, u32 tile_y, u32 tile_x, u32 w, u32 h, u32 *buffer) {
     // calculate the rect in the buffer that we need to draw this tile in
     i32 start_y = (tile_y * TILE_SIZE) - (camera.tile_y * TILE_SIZE);
     i32 start_x = (tile_x * TILE_SIZE) - (camera.tile_x * TILE_SIZE);
@@ -443,7 +445,7 @@ void draw_step(struct camera camera, enum players player, u32 tile_y, u32 tile_x
     // loop over the range we calculated above
     for (u32 y = start_y; y < end_y; ++y) {
         for (u32 x = start_x; x < end_x; ++x) {
-            buffer[y * w + x] = mix_colors(0xFFFFFFFF, player_colors[player]);
+            buffer[y * w + x] = mix_colors(0xFFFFFFFF, player_colors[direction]);
         }
     }
 }
@@ -468,7 +470,7 @@ void draw_turn(struct camera camera, u32 *buffer){
             u32 y = loc.y + dir_offsets[dir].y; // calculate y position
             if ((x+1) * TILE_SIZE > camera.buffer_w || (y+1) * TILE_SIZE > camera.buffer_h) continue; // don't draw beyond the visible grid
             if (x < camera.tile_x || y < camera.tile_y) continue;
-            draw_step(camera, player, y, x, camera.buffer_w, camera.buffer_h, buffer);
+            draw_step(camera, dir, y, x, camera.buffer_w, camera.buffer_h, buffer);
             unit_locations[player][unit] = (pos){x, y}; // update location
         }
     }
@@ -491,7 +493,7 @@ i32 move_unit(u32 player, u32 unit, u32 to_x, u32 to_y) {
         printf("Cannot move to water tile (%d, %d)\n", to_x, to_y);
         return -4; // Cannot move to water tile
     }
-    if (units.pix[to_y * units.w + to_x] == player_colors[player]) {
+    if (units.pix[to_y * units.w + to_x] == unit_colors[unit]) {
         //printf("Tile (%d, %d) already occupied\n", to_x, to_y);
         return -3; // Tile already occupied
     }
@@ -509,7 +511,7 @@ i32 move_unit(u32 player, u32 unit, u32 to_x, u32 to_y) {
     // move unit from old location to new location
     units.pix[to_y * units.w + to_x] = units.pix[from_y * units.w + from_x];
     units.pix[from_y * units.w + from_x] = 0;
-    assert(units.pix[to_y * units.w + to_x] != 0 && "unit moved but map not correctly updated, did unit move to current position?");
+    assert(units.pix[to_y * units.w + to_x] != 0 && "Unit moved to same location as before, and created inconsistency\n");
     // set the value of the unit in the player units array
     player_units[player][unit].x = to_x;
     player_units[player][unit].y = to_y;
@@ -910,11 +912,10 @@ static inline void tga_free(struct tga img)
     munmap((void*)img.map, img.map_len);
 }
 
-#define MAX_BUFFER_WIDTH (1920 / 2)
-#define MAX_BUFFER_HEIGHT (1080 / 2)
-u32 need_scaling;
+#define MAX_BUFFER_WIDTH (1920)
+#define MAX_BUFFER_HEIGHT (1200)
 void resize_window_callback(void *userdata, u32 new_w, u32 new_h) {
-    need_scaling = new_w > MAX_BUFFER_WIDTH || new_h > MAX_BUFFER_HEIGHT;
+    u32 need_scaling = new_w > MAX_BUFFER_WIDTH || new_h > MAX_BUFFER_HEIGHT;
     camera.display_w = new_w;
     camera.display_h = new_h;
     camera.buffer_w = need_scaling ? (new_w / 2) : new_w;
@@ -924,22 +925,6 @@ void resize_window_callback(void *userdata, u32 new_w, u32 new_h) {
     if (camera.end_x >= GRID_W) camera.end_x = GRID_W - 1;
     if (camera.end_y >= GRID_H) camera.end_y = GRID_H - 1;
     printf("Frame buffer resized: buffer(%d, %d), tile(%d, %d), end_tile(%d, %d)\n", camera.buffer_w, camera.buffer_h, camera.tile_x, camera.tile_y, camera.end_x, camera.end_y);
-}
-
-void scale2x(u32 *restrict src, u32 sw, u32 sh, u32 *restrict dst, u32 dw) {
-    for (u32 y = 0; y < sh; ++y) {
-        u32 *srow = src + y * sw;
-        u32 *drow0 = dst + (y * 2) * dw;
-        u32 *drow1 = drow0 + dw;
-        for (u32 x = 0; x < sw; ++x) {
-            u32 px = srow[x];
-            u32 dx = x * 2;
-            drow0[dx]     = px;
-            drow0[dx + 1] = px;
-            drow1[dx]     = px;
-            drow1[dx + 1] = px;
-        }
-    }
 }
 
 u32 main(void) {
@@ -976,7 +961,7 @@ u32 main(void) {
 
     u32 frame = 0;
 
-    struct ctx *window = create_window(0, 0, "<<Fatzke>>", key_input_callback, mouse_input_callback, resize_window_callback, NULL);
+    struct ctx *window = create_window(MAX_BUFFER_WIDTH, MAX_BUFFER_HEIGHT, "<<Fatzke>>", key_input_callback, mouse_input_callback, resize_window_callback, NULL);
 
     u64 start_us = time_us();
     while(poll_events(window)) {// poll for events
@@ -991,8 +976,7 @@ u32 main(void) {
         u64 us_thread = elapsed_us(frame_us);
 
         static u32 terrainbuffer[MAX_BUFFER_HEIGHT][MAX_BUFFER_WIDTH];
-        static u32 scalingbuffer[MAX_BUFFER_HEIGHT][MAX_BUFFER_WIDTH];
-        u32 *buffer = need_scaling ? scalingbuffer : get_buffer(window);
+        u32 *buffer = get_buffer(window);
         u64 us_get_buffer = elapsed_us(frame_us);
         
         process_input();
@@ -1010,17 +994,9 @@ u32 main(void) {
         draw_turn(camera, buffer);
         u64 us_draw_steps = elapsed_us(frame_us);
         
-        // copy the rendered buffer into the actual framebuffer if scaling was needed
-        if (need_scaling) scale2x(buffer, camera.buffer_w, camera.buffer_h, get_buffer(window), camera.display_w);
-        u64 us_scale_2x = elapsed_us(frame_us);
-        
-        u64 us_vsync = elapsed_us(frame_us);
         commit(window); // tell compositor it can read from the buffer
 
-        frame ++;
-        u64 us_per_frame = elapsed_us(start_us) / frame;
-        #define _DEBUG_FPS
-        #ifdef _DEBUG_FPS
+        #if _DEBUG_FPS
         printf("total: %ld us\n", elapsed_us(frame_us));
         printf("get thread: %ld us\n", us_thread);
         printf("process inputs: %ld us\n", us_process_inputs);
@@ -1029,8 +1005,8 @@ u32 main(void) {
         printf("cpy terrain: %ld us\n", us_cpy_terrain);
         printf("draw units: %ld us\n", us_draw_units);
         printf("draw steps: %ld us\n", us_draw_steps);
-        printf("scale 2x: %ld us\n", us_scale_2x);
-        printf("vsync: %ld us\n", us_vsync);
+        frame ++;
+        u64 us_per_frame = elapsed_us(start_us) / frame;
         printf("TIME: %ld, FRAME: %d, US PER FRAME: %ld\n", elapsed_us(start_us), frame, us_per_frame);
         #endif
     }
