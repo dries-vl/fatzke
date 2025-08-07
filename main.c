@@ -912,8 +912,8 @@ static inline void tga_free(struct tga img)
     munmap((void*)img.map, img.map_len);
 }
 
-#define MAX_BUFFER_WIDTH (1920)
-#define MAX_BUFFER_HEIGHT (1200)
+#define MAX_BUFFER_WIDTH (1920 / 2)
+#define MAX_BUFFER_HEIGHT (1080 / 2)
 void resize_window_callback(void *userdata, u32 new_w, u32 new_h) {
     u32 need_scaling = new_w > MAX_BUFFER_WIDTH || new_h > MAX_BUFFER_HEIGHT;
     camera.display_w = new_w;
@@ -1012,3 +1012,4 @@ u32 main(void) {
     }
     destroy(window);
 }
+
