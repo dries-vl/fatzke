@@ -236,6 +236,9 @@ struct thread_args {
     struct unit_list player_units[PLAYER_COUNT];
     struct resolve_bucket resolve_order[BUCKET_COUNT];
     struct path player_paths[PLAYER_COUNT][MAX_UNITS];
+    struct unit_list *player_units_ptr; // pointer to player units for thread safety
+    struct resolve_bucket *resolve_order_ptr; // pointer to resolve order for thread safety
+    struct path (*player_paths_ptr)[PLAYER_COUNT][MAX_UNITS]; // pointer to player paths for thread safety
 };
 
 struct unit player_target[PLAYER_COUNT] = {{0, 0, 0}, {0, 0, 0}}; // random shit temporary
@@ -481,10 +484,11 @@ void draw_turn(struct camera camera, u32 *buffer, struct unit_list player_units[
             u8 dir = resolve_order[bucket].steps[step].dir; // get direction from path
             u32 x = loc.x + dir_offsets[dir].x; // calculate x position
             u32 y = loc.y + dir_offsets[dir].y; // calculate y position
-            if ((x+1) * TILE_SIZE > camera.buffer_w || (y+1) * TILE_SIZE > camera.buffer_h) continue; // don't draw beyond the visible grid
-            if (x < camera.tile_x || y < camera.tile_y) {printf("skip\n");continue;}
-            draw_step(camera, dir, y, x, camera.buffer_w, camera.buffer_h, buffer);
             unit_locations[player][unit] = (pos){x, y}; // update location
+            if ((x+1) > camera.end_x || (y+1) > camera.end_y) continue; // don't draw beyond the visible grid
+            if (x < camera.tile_x || y < camera.tile_y) {printf("skip\n");continue;}
+            printf("\n\nCAMERA: %d, %d\n\n", camera.tile_x, camera.tile_y);
+            draw_step(camera, dir, y, x, camera.buffer_w, camera.buffer_h, buffer);
         }
     }
 }
@@ -544,19 +548,19 @@ i32 move_unit(u32 player, u32 unit, u32 to_x, u32 to_y, struct unit_list player_
     return 0; // Move successful
 }
 
-i32 resolve_turn(struct unit_list player_units[PLAYER_COUNT], struct resolve_bucket resolve_order[BUCKET_COUNT]){
+i32 resolve_turn(struct unit_list player_units[PLAYER_COUNT], struct resolve_bucket (*resolve_order)[BUCKET_COUNT]){
     printf("Resolving turn...\n");
     u32 blocked_units[PLAYER_COUNT][MAX_UNITS] = {0}; // keep track of blocked units
     for (u32 bucket = 0; bucket < BUCKET_COUNT; bucket++) {
-        if (resolve_order[bucket].count == 0) continue; // skip empty buckets
+        if ((*resolve_order)[bucket].count == 0) continue; // skip empty buckets
         // Sort the steps in the bucket by cost MAYBE NEEDED
         // Execute the steps in the bucket
-        for (u32 step = 0; step < resolve_order[bucket].count; step++) {
+        for (u32 step = 0; step < (*resolve_order)[bucket].count; step++) {
             
-            enum players player = resolve_order[bucket].steps[step].id >> 8; // get player from id
-            u32 unit = resolve_order[bucket].steps[step].id % 256; // get unit from id
+            enum players player = (*resolve_order)[bucket].steps[step].id >> 8; // get player from id
+            u32 unit = (*resolve_order)[bucket].steps[step].id % 256; // get unit from id
             if (blocked_units[player][unit] || player_units[player].units[unit].type == UINT32_MAX) { continue; } // skip blocked and empty units
-            u8 dir = resolve_order[bucket].steps[step].dir; // get direction from path
+            u8 dir = (*resolve_order)[bucket].steps[step].dir; // get direction from path
             u32 x = player_units[player].units[unit].x + dir_offsets[dir].x; // calculate x position
             u32 y = player_units[player].units[unit].y + dir_offsets[dir].y; // calculate y position
             i32 result = move_unit(player, unit, x, y, player_units); // move unit
@@ -564,9 +568,9 @@ i32 resolve_turn(struct unit_list player_units[PLAYER_COUNT], struct resolve_buc
                 blocked_units[player][unit] = 1; // mark unit as blocked
             }
         }
-        resolve_order[bucket].count = 0; // reset bucket size
-        memset(resolve_order[bucket].steps, 0, sizeof(struct step) * BUCKET_SIZE); // clear resolve order
-        resolve_order[bucket].count = 0; // reset count
+        (*resolve_order)[bucket].count = 0; // reset bucket size
+        memset((*resolve_order)[bucket].steps, 0, sizeof(struct step) * BUCKET_SIZE); // clear resolve order
+        (*resolve_order)[bucket].count = 0; // reset count
     }
 
     return 0;
@@ -658,14 +662,14 @@ i32 battle(u32 attacker, u32 defender, u32 unit_att, u32 unit_def, struct unit_l
     return 0; // something went wrong
 }
 
-i32 commit_turn(enum players player, struct unit_list player_units[PLAYER_COUNT], struct resolve_bucket resolve_order[BUCKET_COUNT], struct path (*player_paths)[PLAYER_COUNT][MAX_UNITS]) {
+i32 commit_turn(enum players player, struct unit_list player_units[PLAYER_COUNT], struct resolve_bucket (*resolve_order)[BUCKET_COUNT], struct path (*player_paths)[PLAYER_COUNT][MAX_UNITS]) {
     if (player < 0 || player >= PLAYER_COUNT) {
         printf("Invalid player index\n");
         return -1; // Invalid player
     }
     // Resolve all paths for the player
     for (u32 unit = 0; unit < player_units[player].count; ++unit) {
-        if ((*player_paths)[player][unit].length == 0) continue; // skip empty paths
+        if ((*player_paths)[player][unit].length == 0) {printf("no moves found for unit: %d", unit); continue;} // skip empty paths
         u32 cost = 0; // cost is cummulative
         u32 x = player_units[player].units[unit].x;
         u32 y = player_units[player].units[unit].y;
@@ -677,12 +681,12 @@ i32 commit_turn(enum players player, struct unit_list player_units[PLAYER_COUNT]
             cost += movement_cost[player_units[player].units[unit].type][tile]; // tile cost
             if (cost > 400) { break; } // max cost
             u32 bucket = cost / 100; // bucket for the step
-            resolve_order[bucket].steps[resolve_order[bucket].count] = (struct step){
+            (*resolve_order)[bucket].steps[(*resolve_order)[bucket].count] = (struct step){
                 .dir = (*player_paths)[player][unit].steps[step] , // direction of the step
                 .cost = cost, // cost of the step
                 .id = (u16)(unit + (player << 8)) // unit id + player id
             };
-            resolve_order[bucket].count ++; // increment bucket size
+            (*resolve_order)[bucket].count ++; // increment bucket size
         }
     }
     // printf("Player %d committed turn with %d units\n", player, player_unit_count[player]);
@@ -797,7 +801,7 @@ i32 spawn_unit(enum players player, struct unit_list player_units[PLAYER_COUNT])
     return -1;
 }
 
-i32 ai_unit_movement(enum players player, struct unit_list player_units[PLAYER_COUNT], struct path (*player_paths)[PLAYER_COUNT][MAX_UNITS], struct resolve_bucket resolve_order[BUCKET_COUNT]) {
+i32 ai_unit_movement(enum players player, struct unit_list player_units[PLAYER_COUNT], struct path (*player_paths)[PLAYER_COUNT][MAX_UNITS], struct resolve_bucket (*resolve_order)[BUCKET_COUNT]) {
     // AI logic to move units towards enemy units
     if (player < 0 || player >= PLAYER_COUNT) {
         printf("Invalid player index\n");
@@ -852,7 +856,7 @@ i32 ai_unit_movement(enum players player, struct unit_list player_units[PLAYER_C
     return 0; // AI movement done
 }
 
-void player_turn(enum players player, struct unit_list player_units[PLAYER_COUNT], struct path (*player_paths)[PLAYER_COUNT][MAX_UNITS], struct resolve_bucket resolve_order[BUCKET_COUNT]) {
+void player_turn(enum players player, struct unit_list player_units[PLAYER_COUNT], struct path (*player_paths)[PLAYER_COUNT][MAX_UNITS], struct resolve_bucket (*resolve_order)[BUCKET_COUNT]) {
     // verify that the player exists in the player enum
     if (player < 0 || player >= PLAYER_COUNT) {
         printf("Invalid player index\n");
@@ -878,6 +882,10 @@ void *script(void *arg) {
     struct thread_args *src = (struct thread_args *)arg;
     struct unit_list player_units[PLAYER_COUNT];
     struct path player_paths[PLAYER_COUNT][MAX_UNITS] = {0};
+    struct resolve_bucket resolve_order[BUCKET_COUNT] = {0};
+    memcpy(player_paths, src->player_paths, sizeof(struct path) * PLAYER_COUNT * MAX_UNITS);
+    memcpy(resolve_order, src->resolve_order, sizeof(struct resolve_bucket) * BUCKET_COUNT);
+    memcpy(player_units, src->player_units, sizeof(struct unit_list) * PLAYER_COUNT);
     for (u32 player = 0; player < PLAYER_COUNT; player ++) {
         for (u32 unit = 0; unit < MAX_UNITS; unit++) {
             if (player_paths[player][unit].steps == NULL) {
@@ -885,19 +893,20 @@ void *script(void *arg) {
             }
         }
     }
-    struct resolve_bucket resolve_order[BUCKET_COUNT] = {0};
-    memcpy(player_units, src->player_units, sizeof(struct unit_list) * PLAYER_COUNT);
     u32 scrpt_frame = 0;
     while (true) {
         u64 us_scrpt = time_us();
         if (scrpt_frame % 20 == 1) {
-            player_turn(0, player_units, &(player_paths), resolve_order);
+            player_turn(0, player_units, &(player_paths), &(resolve_order));
+            memcpy(src->resolve_order_ptr, resolve_order, sizeof(struct resolve_bucket) * BUCKET_COUNT);
         }
-        if (scrpt_frame % 20 == 5) {
-            player_turn(1, player_units, &(player_paths), resolve_order);
+        if (scrpt_frame % 20 == 2) {
+            player_turn(1, player_units, &(player_paths), &(resolve_order));
+            memcpy(src->resolve_order_ptr, resolve_order, sizeof(struct resolve_bucket) * BUCKET_COUNT);
         }
         if (scrpt_frame % 20 == 15) {
-            resolve_turn(player_units, resolve_order);
+            resolve_turn(player_units, &(resolve_order));
+            memcpy(src->resolve_order_ptr, resolve_order, sizeof(struct resolve_bucket) * BUCKET_COUNT);
         }
         struct timespec ts = {0, 16 * 1000000};
         if (elapsed_us(us_scrpt) >= 16) {
@@ -1000,7 +1009,7 @@ u32 main(void) {
 
     u32 frame = 0;
 
-    struct camera camera = {0, 0, 0, 0, 0, 0, 0, 0, 1, 1};
+    struct camera camera = {5, 5, 0, 0, 0, 0, 0, 0, 1, 1};
     struct ctx *window = create_window(MAX_BUFFER_WIDTH, MAX_BUFFER_HEIGHT, "<<Fatzke>>", key_input_callback, mouse_input_callback, resize_window_callback, &camera);
 
     u64 start_us = time_us();
@@ -1009,6 +1018,9 @@ u32 main(void) {
     struct thread_args args = { .player_units = {0} 
                                 , .resolve_order = {0}
                                 , .player_paths = {0}
+                                , .player_units_ptr = &player_units
+                                , .resolve_order_ptr = &resolve_order
+                                , .player_paths_ptr = &player_paths
                                 };
     
     while(poll_events(window)) {// poll for events
@@ -1021,7 +1033,7 @@ u32 main(void) {
             memcpy(args.player_units, player_units, sizeof(struct unit_list) * PLAYER_COUNT);
             memcpy(args.resolve_order, resolve_order, sizeof(struct resolve_bucket) * BUCKET_COUNT);
             memcpy(args.player_paths, player_paths, sizeof(struct path) * PLAYER_COUNT * MAX_UNITS);
-            pthread_create(&tid, NULL, script, &player_units);
+            pthread_create(&tid, NULL, script, &args);
             printf("Script thread started\n");
         }
         u64 us_thread = elapsed_us(frame_us);
