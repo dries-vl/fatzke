@@ -273,6 +273,7 @@ void process_input(struct camera *camera) {
 
 i32 battle(u32 attacker, u32 defender, u32 unit_att, u32 unit_def);
 
+u8 paths[GRID_W * GRID_H][GRID_H + GRID_W * 2];
 i32 pathing(u32 from_x, u32 from_y, u32 to_x, u32 to_y, u8 *path, u32 *pathlength, u32 unit_type, u32 player) { // no cost yet, BITshift versie??
     if (!path || !pathlength) return -1; // Invalid arguments
     if (from_x < 0 || from_x >= GRID_W || from_y < 0 || from_y >= GRID_H ||
@@ -280,7 +281,7 @@ i32 pathing(u32 from_x, u32 from_y, u32 to_x, u32 to_y, u8 *path, u32 *pathlengt
         return -1; // Invalid coordinates
     }
     u32 paths_count = 1;
-    u8 paths[GRID_W * GRID_H][GRID_H + GRID_W * 2] = {0}; // STACK OVERFLOW ?????
+    memset(paths, 0, sizeof(u8) * (GRID_W * GRID_H) * (GRID_H + GRID_W * 2));
     paths[0][0] = 0; // path length
     paths[0][1] = 0; // start direction is never used
     u32 costs[GRID_W * GRID_H] = {0}; // costs of paths
@@ -911,8 +912,8 @@ static inline void tga_free(struct tga img)
     munmap((void*)img.map, img.map_len);
 }
 
-#define MAX_BUFFER_WIDTH (1920)
-#define MAX_BUFFER_HEIGHT (1200)
+#define MAX_BUFFER_WIDTH (1920 / 2)
+#define MAX_BUFFER_HEIGHT (1080 / 2)
 void resize_window_callback(void *userdata, u32 new_w, u32 new_h) {
     struct camera *camera = (struct camera *)userdata;
     u32 need_scaling = new_w > MAX_BUFFER_WIDTH || new_h > MAX_BUFFER_HEIGHT;
@@ -1013,3 +1014,5 @@ u32 main(void) {
     }
     destroy(window);
 }
+
+
