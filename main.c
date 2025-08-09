@@ -5,7 +5,7 @@
 #include <assert.h>
 #include <pthread.h>
 
-#define _DEBUG_FPS 0
+#define _DEBUG_FPS 1
 
 // todo: separate header for all common c stuff
 typedef uint8_t   u8;
@@ -30,6 +30,7 @@ enum result {
 #define elapsed_us(start) (time_us() - (start))
 
 #include "wayland/wayland.c" // sudo apt install libwayland-dev
+#include "scale.c"
 
 #pragma region CAMERA
 // todo: this needs to match the data in the tga files, but needs to be in scenario/save data (and also not global in code but passed via eg. a struct)
@@ -44,6 +45,7 @@ struct camera {
     u32 buffer_w, buffer_h; // the size of the frame buffer (in pixels)
     u32 display_w, display_h; // size of the original display (in pixels), to keep track of the size we need to scale to (off by one stride means we cannot just x2)
     u32 zoom;
+    u32 need_scaling;
     u32 update; // the camera has moved this frame
 };
 
@@ -105,7 +107,7 @@ u32 tile_colors[TILE_COUNT] = {
     [PLAINS] = 0xFF307118,
     [FOREST] = 0xFF21480e
 };
-u32 get_tile(u32 x, u32 y) {
+enum tiles get_tile(u32 x, u32 y) {
     assert(x >= 0 && x < GRID_W && "x is out of bounds");
     assert(y >= 0 && y < GRID_H && "y is out of bounds");
     u32 tile_color = map.pix[y * map.w + x];
@@ -136,7 +138,7 @@ u32 player_colors[PLAYER_COUNT] = {
     [GERMANY] = 0xFF6a3e0d,
     [SOVIET] = 0xFF6a0d33
 };
-u32 get_player(u32 x, u32 y) {
+enum players get_player(u32 x, u32 y) {
     u32 player_color = players.pix[y * players.w + x];
     for (u32 i = 0; i < PLAYER_COUNT; i++)
         if (player_colors[i] == player_color)
@@ -161,7 +163,7 @@ u32 unit_colors[UNIT_COUNT] = {
     [MOTORIZED] = 0xFF383838,
     [ARMOR] = 0xFF6f6f6f,
 };
-u32 get_unit(u32 x, u32 y) {
+enum units get_unit(u32 x, u32 y) {
     u32 unit_color = units.pix[y * units.w + x];
     for (u32 i = 0; i < UNIT_COUNT; i++)
         if (unit_colors[i] == unit_color)
@@ -252,22 +254,27 @@ static void mouse_input_callback(void *ud, i32 x, i32 y, u32 b) {
     printf("pointer at %d,%d\n", x, y);
 }
 
-void process_input(struct camera *camera) {
+u32 process_input(struct camera *camera) {
     if (pressed_keys[1]) { // esc
-        exit(0);
+        return 1;
     }
     if (pressed_keys[35]) { // h
-        move_camera(&camera, -1, 0);
+        move_camera(camera, -5, 0);
+        pressed_keys[35] = 0;
     }
     if (pressed_keys[36]) { // j
-        move_camera(&camera, 0, 1);
+        move_camera(camera, 0, 5);
+        pressed_keys[36] = 0;
     }
     if (pressed_keys[37]) { // k
-        move_camera(&camera, 0, -1);
+        move_camera(camera, 0, -5);
+        pressed_keys[37] = 0;
     }
     if (pressed_keys[38]) { // l
-        move_camera(&camera, 1, 0);
+        move_camera(camera, 5, 0);
+        pressed_keys[38] = 0;
     }
+    return 0;
 }
 #pragma endregion
 
@@ -766,7 +773,7 @@ i32 spawn_unit(enum players player) {
                 bool has_unit = units.pix[spawn_y * units.w + spawn_x] != 0;
                 bool is_sea = map.pix[spawn_y * map.w + spawn_x] == SEA;
                 if (!has_unit && !is_sea && get_player(spawn_x, spawn_y) == player) {
-                    i32 result = add_unit(player, INFANTRY, spawn_x, spawn_y);
+                    i32 result = add_unit(player, MOTORIZED, spawn_x, spawn_y);
                     if (result == 0) {
                         return 1;
                     } else if (result == -3) {
@@ -869,7 +876,7 @@ void *script(void *arg) {
             resolve_turn();
         }
         struct timespec ts = {0, 16 * 1000000};
-        if (elapsed_us(us_scrpt) >= 0) {
+        if (elapsed_us(us_scrpt) >= 1000) {
             printf("%ld ms_scrpt\n", elapsed_us(us_scrpt));
         }
         nanosleep(&ts, NULL);
@@ -912,23 +919,31 @@ static inline void tga_free(struct tga img)
     munmap((void*)img.map, img.map_len);
 }
 
-#define MAX_BUFFER_WIDTH (1920 / 2)
-#define MAX_BUFFER_HEIGHT (1080 / 2)
+#define MAX_BUFFER_WIDTH (1280 / 2)
+#define MAX_BUFFER_HEIGHT (800 / 2)
+
 void resize_window_callback(void *userdata, u32 new_w, u32 new_h) {
     struct camera *camera = (struct camera *)userdata;
-    u32 need_scaling = new_w > MAX_BUFFER_WIDTH || new_h > MAX_BUFFER_HEIGHT;
+    u32 need_2x = new_w > MAX_BUFFER_WIDTH || new_h > MAX_BUFFER_HEIGHT;
+    u32 need_4x = new_w > MAX_BUFFER_WIDTH * 2 || new_h > MAX_BUFFER_HEIGHT * 2;
+    if (need_4x) { printf("resolution is too big for 2x scaling, need to implement 4x\n"); exit(0); }
+    camera->need_scaling = need_2x;
     camera->display_w = new_w;
     camera->display_h = new_h;
-    camera->buffer_w = need_scaling ? (new_w / 2) : new_w;
-    camera->buffer_h = need_scaling ? (new_h / 2) : new_h;
+    camera->buffer_w = need_2x ? (new_w / 2) : new_w;
+    camera->buffer_h = need_2x ? (new_h / 2) : new_h;
     camera->end_x = camera->tile_x + (camera->buffer_w / TILE_SIZE) - 1;
     camera->end_y = camera->tile_y + (camera->buffer_h / TILE_SIZE) - 1;
     if (camera->end_x >= GRID_W) camera->end_x = GRID_W - 1;
     if (camera->end_y >= GRID_H) camera->end_y = GRID_H - 1;
-    printf("Frame buffer resized: buffer(%d, %d), tile(%d, %d), end_tile(%d, %d)\n", camera->buffer_w, camera->buffer_h, camera->tile_x, camera->tile_y, camera->end_x, camera->end_y);
+    printf("Display and buffer: %dx%d and %dx%d\n", camera->display_w, camera->display_h, camera->buffer_w, camera->buffer_h);
 }
 
 u32 main(void) {
+    struct camera camera = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+    struct ctx *window = create_window("<<Fatzke>>", key_input_callback, mouse_input_callback, resize_window_callback, &camera);
+    struct scaler scaler; create_scaler(&scaler, 8);
+
     map = tga_load("map.tga");
     units = tga_load("units.tga");
     players = tga_load("players.tga");
@@ -961,11 +976,8 @@ u32 main(void) {
     }
 
     u32 frame = 0;
-
-    struct camera camera = {0, 0, 0, 0, 0, 0, 0, 0, 1, 1};
-    struct ctx *window = create_window(MAX_BUFFER_WIDTH, MAX_BUFFER_HEIGHT, "<<Fatzke>>", key_input_callback, mouse_input_callback, resize_window_callback, &camera);
-
     u64 start_us = time_us();
+
     while(poll_events(window)) {// poll for events
         if (!window->vsync_ready) continue; // wait for next event until vsync is not done
 
@@ -977,25 +989,24 @@ u32 main(void) {
         }
         u64 us_thread = elapsed_us(frame_us);
 
-        static u32 terrainbuffer[MAX_BUFFER_HEIGHT][MAX_BUFFER_WIDTH];
-        u32 *buffer = get_buffer(window);
+        static u32 scalingbuffer[MAX_BUFFER_HEIGHT][MAX_BUFFER_WIDTH];
+        u32 *buffer = camera.need_scaling ? (u32 *)scalingbuffer : get_buffer(window);
         u64 us_get_buffer = elapsed_us(frame_us);
         
-        process_input(&camera);
+        if (process_input(&camera)) _exit(0); 
         u64 us_process_inputs = elapsed_us(frame_us);
 
-        if (camera.update == 1) {
-            draw_terrain(camera, map_atlas, (u32 *)terrainbuffer);
-            camera.update = 0;
-        }
+        draw_terrain(camera, map_atlas, buffer);
         u64 us_draw_terrain = elapsed_us(frame_us);
-        memcpy(buffer, terrainbuffer, camera.buffer_w * camera.buffer_h * sizeof(u32));
-        u64 us_cpy_terrain = elapsed_us(frame_us);
         draw_units(camera, units_atlas, buffer);
         u64 us_draw_units = elapsed_us(frame_us);
         draw_turn(camera, buffer);
         u64 us_draw_steps = elapsed_us(frame_us);
         
+        if (camera.need_scaling) {
+            scale(&scaler, buffer, camera.buffer_w, camera.buffer_h, get_buffer(window), camera.display_w);
+        }
+        u64 us_scale_buffer = elapsed_us(frame_us);
         commit(window); // tell compositor it can read from the buffer
         frame ++;
 
@@ -1005,14 +1016,12 @@ u32 main(void) {
         printf("process inputs: %ld us\n", us_process_inputs);
         printf("get buffer: %ld us\n", us_get_buffer);
         printf("draw terrain: %ld us\n", us_draw_terrain);
-        printf("cpy terrain: %ld us\n", us_cpy_terrain);
         printf("draw units: %ld us\n", us_draw_units);
         printf("draw steps: %ld us\n", us_draw_steps);
+        printf("scale buffer: %ld us\n", us_scale_buffer);
         u64 us_per_frame = elapsed_us(start_us) / frame;
         printf("TIME: %ld, FRAME: %d, US PER FRAME: %ld\n", elapsed_us(start_us), frame, us_per_frame);
         #endif
     }
-    destroy(window);
+    _exit(0);
 }
-
-

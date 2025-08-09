@@ -14,9 +14,6 @@
 #include "xdg-shell-client-protocol.h"
 #include "xdg-shell-protocol.c"
 
-#define FALLBACK_W 640
-#define FALLBACK_H 480
-
 // todo: separate header for all common c stuff
 typedef uint8_t   u8;
 typedef uint16_t  u16;
@@ -31,12 +28,10 @@ typedef double    f64;
 typedef intptr_t  isize;
 typedef uintptr_t usize;
 
-/* user-supplied input callbacks */
 typedef void (*keyboard_cb)(void *ud, uint32_t key, uint32_t state);
 typedef void (*mouse_cb)(void *ud, int32_t x, int32_t y, uint32_t b);
 typedef void (*resize_cb)(void *ud, u32 w, u32 h);
 
-/* ===== internal state ===== */
 struct ctx {
     struct wl_display *dpy;
     struct wl_compositor *comp;
@@ -48,7 +43,7 @@ struct ctx {
     struct xdg_toplevel *top;
 
     struct wl_buffer *buf;
-    void *pixels;
+    u32 *pixels;
     int buf_w, buf_h, stride;
     int win_w, win_h;
     int configured;
@@ -61,7 +56,6 @@ struct ctx {
     void *callback_userdata;
 };
 
-/* ========= helpers ========= */
 static int memfd(size_t len) {
     size_t pagesize = (size_t)sysconf(_SC_PAGESIZE);      /* normally 4096 */
     size_t padded   = (len + pagesize - 1) & ~(pagesize - 1);  /* round-up  */
@@ -109,14 +103,12 @@ static void ptr_button(void *data, struct wl_pointer *ptr, uint32_t serial, uint
     if (c->mouse_cb) c->mouse_cb(c->callback_userdata, c->last_x, c->last_y, state);
 }
 
-/* ---------- keyboard no-ops ---------- */
 static void kb_keymap(void *d, struct wl_keyboard *k, uint32_t format, int32_t fd, uint32_t size) {}
 static void kb_enter(void *d, struct wl_keyboard *k, uint32_t serial, struct wl_surface *s, struct wl_array *keys) {}
 static void kb_leave(void *d, struct wl_keyboard *k, uint32_t serial, struct wl_surface *s) {}
 static void kb_modifiers(void *d, struct wl_keyboard *k, uint32_t serial, uint32_t dep, uint32_t lat, uint32_t lock, uint32_t grp) {}
 static void kb_repeat_info(void *d, struct wl_keyboard *k, int32_t rate, int32_t delay) {}
 
-/* every slot filled → no aborts */
 static const struct wl_keyboard_listener kbd_lis = {
     .keymap       = kb_keymap,
     .enter        = kb_enter,
@@ -126,7 +118,6 @@ static const struct wl_keyboard_listener kbd_lis = {
     .repeat_info  = kb_repeat_info
 };
 
-/* ---------- pointer no-ops ---------- */
 static void ptr_leave(void *d, struct wl_pointer *p, uint32_t serial, struct wl_surface *s) {}
 static void ptr_axis(void *d, struct wl_pointer *p, uint32_t time, uint32_t axis, wl_fixed_t value) {}
 static void ptr_frame(void *d, struct wl_pointer *p) {}
@@ -148,13 +139,7 @@ struct output_info {
 static void output_geometry(void *data, struct wl_output *output, int32_t x, int32_t y, int32_t phys_width, int32_t phys_height, int32_t subpixel, const char *make, const char *model, int32_t transform) {}
 static void output_done(void *data, struct wl_output *output) {}
 static void output_scale(void *data, struct wl_output *output, int32_t factor) {}
-static void output_mode(void *data, struct wl_output *output, uint32_t flags, int32_t width, int32_t height, int32_t refresh) {
-    struct ctx *c = data;
-    if (flags & WL_OUTPUT_MODE_CURRENT) {
-        c->win_w  = width;
-        c->win_h = height;
-    }
-}
+static void output_mode(void *data, struct wl_output *output, uint32_t flags, int32_t width, int32_t height, int32_t refresh) {}
 
 static const struct wl_output_listener output_listener = {
     .geometry = output_geometry,
@@ -163,7 +148,6 @@ static const struct wl_output_listener output_listener = {
     .scale    = output_scale
 };
 
-/* ===== Wayland listeners ===== */
 static void reg_add(void *data, struct wl_registry *reg, uint32_t id, const char *iface, uint32_t ver) {
     struct ctx *st = data;
     if (!strcmp(iface, "wl_compositor"))
@@ -203,20 +187,22 @@ static const struct xdg_surface_listener surf_lis = {
     surf_cfg
 };
 
-static void top_cfg(void *d, struct xdg_toplevel *t, int32_t w, int32_t h, struct wl_array *st_) {
+void top_cfg(void *d, struct xdg_toplevel *t, int32_t w, int32_t h, struct wl_array *st_) {
     struct ctx *st = d;
-    int resized = 0;
-    if (w > 0 && w != st->win_w) { st->win_w = w; resized = 1; }
-    if (h > 0 && h != st->win_h) { st->win_h = h; resized = 1; }
-    if (resized && st->resize_window_cb)
-        st->resize_window_cb(st->callback_userdata, st->win_w, st->win_h);
+
+    int resized = (w != st->win_w) || (h != st->win_h);
+    if (!resized) return;
+
+    st->win_w = w;
+    st->win_h = h;
+
+    if (st->resize_window_cb) st->resize_window_cb(st->callback_userdata, st->win_w, st->win_h);
 }
 
 static const struct xdg_toplevel_listener top_lis = {
     top_cfg, NULL
 };
 
-/* simple helper: run until *flag set */
 static void run_until(struct ctx *st, int *flag) {
     while (!*flag) {
         wl_display_flush(st->dpy);
@@ -224,7 +210,7 @@ static void run_until(struct ctx *st, int *flag) {
     }
 }
 
-void *get_buffer(struct ctx *c) {
+u32 *get_buffer(struct ctx *c) {
     return c->pixels;
 }
 
@@ -283,7 +269,7 @@ int window_poll(struct ctx *c) {
     return wl_display_dispatch_pending(c->dpy) >= 0;
 }
 
-struct ctx *create_window(int max_w, int max_h, const char *title, keyboard_cb kcb, mouse_cb mcb, resize_cb rcb, void *ud) {
+struct ctx *create_window(const char *title, keyboard_cb kcb, mouse_cb mcb, resize_cb rcb, void *ud) {
     struct ctx *st = calloc(1, sizeof *st);
     
     st->keyboard_cb = kcb;
@@ -296,7 +282,7 @@ struct ctx *create_window(int max_w, int max_h, const char *title, keyboard_cb k
     struct wl_registry *r = wl_display_get_registry(st->dpy);
     wl_registry_add_listener(r, &reg_lis, st);
 
-    while (!st->comp || !st->shm || !st->wm || !st->win_w)
+    while (!st->comp || !st->shm || !st->wm)
         wl_display_dispatch(st->dpy);
     xdg_wm_base_add_listener(st->wm, &wm_lis, NULL);
 
@@ -307,27 +293,12 @@ struct ctx *create_window(int max_w, int max_h, const char *title, keyboard_cb k
     xdg_toplevel_add_listener(st->top, &top_lis, st);
     if (title) xdg_toplevel_set_title(st->top, title);
 
-    if (st->win_w <= max_w && st->win_h <= max_h) {
-        xdg_toplevel_set_fullscreen(st->top, NULL); // set fullscreen
-        wl_surface_commit(st->surf); // 1st commit: no buffer
-        wl_display_flush(st->dpy);
+    xdg_toplevel_set_fullscreen(st->top, NULL); // set fullscreen
+    wl_surface_commit(st->surf); // 1st commit: no buffer
+    wl_display_flush(st->dpy);
 
-        run_until(st, &st->configured);
-        alloc_buffer(st, st->win_w, st->win_h);
-    } else {
-        st->win_w = max_w;
-        st->win_h = max_h;
-        wl_surface_commit(st->surf); // 1st commit: no buffer
-        wl_display_flush(st->dpy);
-        alloc_buffer(st, st->win_w, st->win_h);
-        run_until(st, &st->configured);
-        if (st->win_w > st->buf_w || st->win_h > st->buf_h) {
-            wl_buffer_destroy(st->buf);
-            munmap(st->pixels, (size_t)st->buf_h * st->stride);
-            alloc_buffer(st, st->win_w, st->win_h);
-        }
-        st->resize_window_cb(NULL, max_w, max_h);
-    }
+    run_until(st, &st->configured);
+    alloc_buffer(st, st->win_w, st->win_h);
 
     wl_surface_attach(st->surf, st->buf, 0, 0);
     wl_surface_damage_buffer(st->surf, 0, 0, st->win_w, st->win_h);
@@ -343,13 +314,4 @@ struct ctx *create_window(int max_w, int max_h, const char *title, keyboard_cb k
 fail:
     free(st);
     return NULL;
-}
-
-void destroy(struct ctx *c) {
-    if (!c) return;
-    wl_buffer_destroy(c->buf);
-    munmap(c->pixels, (size_t)c->buf_h * c->stride);
-    wl_surface_destroy(c->surf);
-    wl_display_disconnect(c->dpy);
-    free(c);
 }
