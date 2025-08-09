@@ -257,16 +257,16 @@ void process_input(struct camera *camera) {
         exit(0);
     }
     if (pressed_keys[35]) { // h
-        move_camera(&camera, -1, 0);
+        move_camera(camera, -1, 0);
     }
     if (pressed_keys[36]) { // j
-        move_camera(&camera, 0, 1);
+        move_camera(camera, 0, 1);
     }
     if (pressed_keys[37]) { // k
-        move_camera(&camera, 0, -1);
+        move_camera(camera, 0, -1);
     }
     if (pressed_keys[38]) { // l
-        move_camera(&camera, 1, 0);
+        move_camera(camera, 1, 0);
     }
 }
 #pragma endregion
@@ -481,7 +481,7 @@ i32 move_unit(u32 player, u32 unit, u32 to_x, u32 to_y) {
         printf("Invalid player or unit index\n");
         return -1; // Invalid player or unit
     }
-    if (player_units[player][unit].type == 0) {
+    if (player_units[player][unit].type == UINT32_MAX) {
         printf("Unit %d of player %d is empty\n", unit, player);
         return -5; // Unit is not active
     }
@@ -540,7 +540,7 @@ i32 resolve_turn(){
             
             enum players player = resolve_order[bucket][step].id >> 8; // get player from id
             u32 unit = resolve_order[bucket][step].id % 256; // get unit from id
-            if (blocked_units[player][unit] || player_units[player][unit].type == 0) { continue; } // skip blocked and empty units
+            if (blocked_units[player][unit] || player_units[player][unit].type == UINT32_MAX) { continue; } // skip blocked and empty units
             u8 dir = resolve_order[bucket][step].dir; // get direction from path
             u32 x = player_units[player][unit].x + dir_offsets[dir].x; // calculate x position
             u32 y = player_units[player][unit].y + dir_offsets[dir].y; // calculate y position
@@ -592,7 +592,7 @@ i32 remove_unit(u32 player, u32 unit) {
         printf("Invalid player or unit index\n");
         return -1; // Invalid player or unit
     }
-    if (player_units[player][unit].type == 0) {
+    if (player_units[player][unit].type == UINT32_MAX) {
         printf("Unit %d of player %d is empty\n", unit, player);
         return -2; // Unit is not active
     }
@@ -612,7 +612,7 @@ i32 battle(u32 attacker, u32 defender, u32 unit_att, u32 unit_def) {
         printf("Invalid unit index\n");
         return -2; // Invalid unit
     }
-    if (player_units[attacker][unit_att].type == 0 || player_units[defender][unit_def].type == 0) {
+    if (player_units[attacker][unit_att].type == UINT32_MAX || player_units[defender][unit_def].type == UINT32_MAX) {
         printf("empty units\n");
         return -2; // Unit is not active
     }
@@ -709,7 +709,7 @@ void find_front(u32 player, u32 center_x, u32 center_y, struct unit *front_units
         return; // Invalid player
     }
     for (u32 unit = 0; unit < player_unit_count[player]; unit++) {
-        if (player_units[player][unit].type == 0) continue; // skip empty unit slots
+        if (player_units[player][unit].type == UINT32_MAX) continue; // skip empty unit slots
         u32 x = player_units[player][unit].x;
         u32 y = player_units[player][unit].y;
         if (*count >= MAX_UNITS) {
@@ -792,7 +792,7 @@ i32 ai_unit_movement(enum players player) {
     for (u32 unit = 0; unit < player_unit_count[player]; unit++) {
         memset(player_paths[player][unit].steps, 0, sizeof(player_paths[player][unit].steps)); // clear array
         player_paths[player][unit].length = 0;
-        if (player_units[player][unit].type == 0) continue; // skip empty unit slots
+        if (player_units[player][unit].type == UINT32_MAX) continue; // skip empty unit slots
         u32 x = player_units[player][unit].x;
         u32 y = player_units[player][unit].y;
         u32 distance = 2500;
@@ -869,8 +869,8 @@ void *script(void *arg) {
             resolve_turn();
         }
         struct timespec ts = {0, 16 * 1000000};
-        if (elapsed_us(us_scrpt) >= 0) {
-            printf("%ld ms_scrpt\n", elapsed_us(us_scrpt));
+        if (elapsed_us(us_scrpt) >= 16) {
+            printf("%ld us_scrpt\n", elapsed_us(us_scrpt));
         }
         nanosleep(&ts, NULL);
         scrpt_frame++;

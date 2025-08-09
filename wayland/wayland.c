@@ -326,7 +326,7 @@ struct ctx *create_window(int max_w, int max_h, const char *title, keyboard_cb k
             munmap(st->pixels, (size_t)st->buf_h * st->stride);
             alloc_buffer(st, st->win_w, st->win_h);
         }
-        st->resize_window_cb(NULL, max_w, max_h);
+        st->resize_window_cb(ud, max_w, max_h);
     }
 
     wl_surface_attach(st->surf, st->buf, 0, 0);
