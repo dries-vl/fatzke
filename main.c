@@ -441,7 +441,7 @@ void draw_terrain(struct camera camera, struct tga map_atlas, u32 *terrainbuffer
     }
 }
 
-void draw_step(struct camera camera, enum directions direction, u32 tile_y, u32 tile_x, u32 w, u32 h, u32 *buffer) {
+void draw_step(struct camera camera, u32 player, u32 tile_y, u32 tile_x, u32 w, u32 h, u32 *buffer) {
     // calculate the rect in the buffer that we need to draw this tile in
     i32 start_y = (tile_y * TILE_SIZE) - (camera.tile_y * TILE_SIZE);
     i32 start_x = (tile_x * TILE_SIZE) - (camera.tile_x * TILE_SIZE);
@@ -454,7 +454,7 @@ void draw_step(struct camera camera, enum directions direction, u32 tile_y, u32 
     // loop over the range we calculated above
     for (u32 y = start_y; y < end_y; ++y) {
         for (u32 x = start_x; x < end_x; ++x) {
-            buffer[y * w + x] = mix_colors(0xFFFFFFFF, player_colors[direction]);
+            buffer[y * w + x] = mix_colors(0xFFFFFFFF, player_colors[player]);
         }
     }
 }
@@ -485,10 +485,9 @@ void draw_turn(struct camera camera, u32 *buffer, struct unit_list player_units[
             u32 x = loc.x + dir_offsets[dir].x; // calculate x position
             u32 y = loc.y + dir_offsets[dir].y; // calculate y position
             unit_locations[player][unit] = (pos){x, y}; // update location
-            if ((x+1) > camera.end_x || (y+1) > camera.end_y) continue; // don't draw beyond the visible grid
+            if ((x) > camera.end_x || (y) > camera.end_y) continue; // don't draw beyond the visible grid
             if (x < camera.tile_x || y < camera.tile_y) {printf("skip\n");continue;}
-            printf("\n\nCAMERA: %d, %d\n\n", camera.tile_x, camera.tile_y);
-            draw_step(camera, dir, y, x, camera.buffer_w, camera.buffer_h, buffer);
+            draw_step(camera, player, y, x, camera.buffer_w, camera.buffer_h, buffer);
         }
     }
 }
@@ -1029,7 +1028,7 @@ u32 main(void) {
 
         u64 frame_us = time_us();
         
-        if (frame == 0) {
+        if (frame == -1) {
             memcpy(args.player_units, player_units, sizeof(struct unit_list) * PLAYER_COUNT);
             memcpy(args.resolve_order, resolve_order, sizeof(struct resolve_bucket) * BUCKET_COUNT);
             memcpy(args.player_paths, player_paths, sizeof(struct path) * PLAYER_COUNT * MAX_UNITS);
