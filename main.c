@@ -5,7 +5,7 @@
 #include <assert.h>
 #include <pthread.h>
 
-#define _DEBUG_FPS 1
+#define _DEBUG_FPS 0
 
 // todo: separate header for all common c stuff
 typedef uint8_t   u8;
@@ -62,7 +62,6 @@ void move_camera(struct camera *camera, i32 delta_x, i32 delta_y) {
 }
 
 // todo: pass to callbacks instead of global
-struct camera camera = {0, 0, 0, 0, 0, 0, 0, 0, 1, 1};
 #pragma endregion
 
 // todo: these hardcoded globals need to be configurable in data instead and not global
@@ -253,7 +252,7 @@ static void mouse_input_callback(void *ud, i32 x, i32 y, u32 b) {
     printf("pointer at %d,%d\n", x, y);
 }
 
-void process_input() {
+void process_input(struct camera *camera) {
     if (pressed_keys[1]) { // esc
         exit(0);
     }
@@ -493,11 +492,7 @@ i32 move_unit(u32 player, u32 unit, u32 to_x, u32 to_y) {
         printf("Cannot move to water tile (%d, %d)\n", to_x, to_y);
         return -4; // Cannot move to water tile
     }
-    if (units.pix[to_y * units.w + to_x] == unit_colors[unit]) {
-        //printf("Tile (%d, %d) already occupied\n", to_x, to_y);
-        return -3; // Tile already occupied
-    }
-    else if (units.pix[to_y * units.w + to_x] != 0 && units.pix[to_y * units.w + to_x] != player_colors[player]) { // BATTLE!
+    if (units.pix[to_y * units.w + to_x] != 0 && units.pix[to_y * units.w + to_x] != player_colors[player]) { // BATTLE!
         //printf("Tile (%d, %d) occupied by enemy\n", to_x, to_y);
         // printf("Battle at (%d, %d)!\n", to_x, to_y);
         for (u32 defender = 0; defender < player_unit_count[1 - player]; defender++) {
@@ -505,6 +500,10 @@ i32 move_unit(u32 player, u32 unit, u32 to_x, u32 to_y) {
                 return battle(player, 1 - player, unit, defender);
             }
         }
+    }
+    if (units.pix[to_y * units.w + to_x] != 0) {
+        //printf("Tile (%d, %d) already occupied\n", to_x, to_y);
+        return -3; // Tile already occupied
     }
     u32 from_x = player_units[player][unit].x;
     u32 from_y = player_units[player][unit].y;
@@ -915,16 +914,17 @@ static inline void tga_free(struct tga img)
 #define MAX_BUFFER_WIDTH (1920)
 #define MAX_BUFFER_HEIGHT (1200)
 void resize_window_callback(void *userdata, u32 new_w, u32 new_h) {
+    struct camera *camera = (struct camera *)userdata;
     u32 need_scaling = new_w > MAX_BUFFER_WIDTH || new_h > MAX_BUFFER_HEIGHT;
-    camera.display_w = new_w;
-    camera.display_h = new_h;
-    camera.buffer_w = need_scaling ? (new_w / 2) : new_w;
-    camera.buffer_h = need_scaling ? (new_h / 2) : new_h;
-    camera.end_x = camera.tile_x + (camera.buffer_w / TILE_SIZE) - 1;
-    camera.end_y = camera.tile_y + (camera.buffer_h / TILE_SIZE) - 1;
-    if (camera.end_x >= GRID_W) camera.end_x = GRID_W - 1;
-    if (camera.end_y >= GRID_H) camera.end_y = GRID_H - 1;
-    printf("Frame buffer resized: buffer(%d, %d), tile(%d, %d), end_tile(%d, %d)\n", camera.buffer_w, camera.buffer_h, camera.tile_x, camera.tile_y, camera.end_x, camera.end_y);
+    camera->display_w = new_w;
+    camera->display_h = new_h;
+    camera->buffer_w = need_scaling ? (new_w / 2) : new_w;
+    camera->buffer_h = need_scaling ? (new_h / 2) : new_h;
+    camera->end_x = camera->tile_x + (camera->buffer_w / TILE_SIZE) - 1;
+    camera->end_y = camera->tile_y + (camera->buffer_h / TILE_SIZE) - 1;
+    if (camera->end_x >= GRID_W) camera->end_x = GRID_W - 1;
+    if (camera->end_y >= GRID_H) camera->end_y = GRID_H - 1;
+    printf("Frame buffer resized: buffer(%d, %d), tile(%d, %d), end_tile(%d, %d)\n", camera->buffer_w, camera->buffer_h, camera->tile_x, camera->tile_y, camera->end_x, camera->end_y);
 }
 
 u32 main(void) {
@@ -961,7 +961,8 @@ u32 main(void) {
 
     u32 frame = 0;
 
-    struct ctx *window = create_window(MAX_BUFFER_WIDTH, MAX_BUFFER_HEIGHT, "<<Fatzke>>", key_input_callback, mouse_input_callback, resize_window_callback, NULL);
+    struct camera camera = {0, 0, 0, 0, 0, 0, 0, 0, 1, 1};
+    struct ctx *window = create_window(MAX_BUFFER_WIDTH, MAX_BUFFER_HEIGHT, "<<Fatzke>>", key_input_callback, mouse_input_callback, resize_window_callback, &camera);
 
     u64 start_us = time_us();
     while(poll_events(window)) {// poll for events
@@ -979,7 +980,7 @@ u32 main(void) {
         u32 *buffer = get_buffer(window);
         u64 us_get_buffer = elapsed_us(frame_us);
         
-        process_input();
+        process_input(&camera);
         u64 us_process_inputs = elapsed_us(frame_us);
 
         if (camera.update == 1) {
@@ -995,6 +996,7 @@ u32 main(void) {
         u64 us_draw_steps = elapsed_us(frame_us);
         
         commit(window); // tell compositor it can read from the buffer
+        frame ++;
 
         #if _DEBUG_FPS
         printf("total: %ld us\n", elapsed_us(frame_us));
@@ -1005,7 +1007,6 @@ u32 main(void) {
         printf("cpy terrain: %ld us\n", us_cpy_terrain);
         printf("draw units: %ld us\n", us_draw_units);
         printf("draw steps: %ld us\n", us_draw_steps);
-        frame ++;
         u64 us_per_frame = elapsed_us(start_us) / frame;
         printf("TIME: %ld, FRAME: %d, US PER FRAME: %ld\n", elapsed_us(start_us), frame, us_per_frame);
         #endif
