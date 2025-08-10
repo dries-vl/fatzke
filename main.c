@@ -5,7 +5,7 @@
 #include <assert.h>
 #include <pthread.h>
 
-#define _DEBUG_FPS 1
+#define _DEBUG_FPS 0
 
 // todo: separate header for all common c stuff
 typedef uint8_t   u8;
@@ -467,7 +467,7 @@ static inline void draw_tile(struct camera camera, struct tga map_atlas, u32 til
 void draw_units(struct camera camera, struct tga units_atlas, struct unit_list player_units[PLAYER_COUNT]) {
     for (u32 player = 0; player < PLAYER_COUNT; player++) {
         if (player_units[player].count == 0) continue; // skip empty players
-        for (u32 unit = 0; unit < player_units->count; ++unit) {
+        for (u32 unit = 0; unit < player_units[player].count; ++unit) {
             if (player_units[player].units[unit].type == UINT32_MAX) continue; // skip empty unit slots
             u32 tile_x = player_units[player].units[unit].x;
             u32 tile_y = player_units[player].units[unit].y;
@@ -551,7 +551,6 @@ void draw_steps(struct camera camera, struct tga directions_atlas, struct unit_l
 }
 
 i32 move_unit(u32 player, u32 unit, u32 to_x, u32 to_y, struct unit_list player_units[PLAYER_COUNT]) {
-    return -3;
     if (!player_units[player].units || unit < 0 || unit >= player_units[player].count) {
         printf("Invalid player or unit index\n");
         return -1; // Invalid player or unit
@@ -726,7 +725,7 @@ i32 commit_turn(enum players player, struct unit_list player_units[PLAYER_COUNT]
     }
     // Resolve all paths for the player
     for (u32 unit = 0; unit < player_units[player].count; ++unit) {
-        if ((*player_paths)[player][unit].length == 0) {printf("no moves found for unit: %d", unit); continue;} // skip empty paths
+        if ((*player_paths)[player][unit].length == 0) {continue;} // skip empty paths
         u32 cost = 0; // cost is cummulative
         u32 x = player_units[player].units[unit].x;
         u32 y = player_units[player].units[unit].y;
@@ -959,14 +958,17 @@ void *script(void *arg) {
         if (scrpt_frame % 20 == 1) {
             player_turn(0, player_units, &(player_paths), &(resolve_order));
             memcpy(src->resolve_order_ptr, resolve_order, sizeof(struct resolve_bucket) * BUCKET_COUNT);
+            memcpy(src->player_units_ptr, player_units, sizeof(struct unit_list) * PLAYER_COUNT);
         }
         if (scrpt_frame % 20 == 2) {
             player_turn(1, player_units, &(player_paths), &(resolve_order));
             memcpy(src->resolve_order_ptr, resolve_order, sizeof(struct resolve_bucket) * BUCKET_COUNT);
+            memcpy(src->player_units_ptr, player_units, sizeof(struct unit_list) * PLAYER_COUNT);
         }
         if (scrpt_frame % 20 == 15) {
             resolve_turn(player_units, &(resolve_order));
             memcpy(src->resolve_order_ptr, resolve_order, sizeof(struct resolve_bucket) * BUCKET_COUNT);
+            memcpy(src->player_units_ptr, player_units, sizeof(struct unit_list) * PLAYER_COUNT);
         }
         struct timespec ts = {0, 16 * 1000000};
         if (elapsed_us(us_scrpt) >= 1000) {
@@ -1095,6 +1097,7 @@ u32 main(void) {
 
         u64 frame_us = time_us();
         
+        if (frame == 0) {
         if (frame == 0) {
             memcpy(args.player_units, player_units, sizeof(struct unit_list) * PLAYER_COUNT);
             memcpy(args.resolve_order, resolve_order, sizeof(struct resolve_bucket) * BUCKET_COUNT);
