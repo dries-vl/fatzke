@@ -52,10 +52,10 @@ struct camera {
 void move_camera(struct camera *camera, i32 delta_x, i32 delta_y) {
     u32 legal_delta_x = delta_x;
     u32 legal_delta_y = delta_y;
-    if (camera->tile_x + delta_x < 0) legal_delta_x = 0;
-    if (camera->end_x + delta_x > (GRID_W - 1)) legal_delta_x = 0;
-    if (camera->tile_y + delta_y < 0) legal_delta_y = 0;
-    if (camera->end_y + delta_y > (GRID_H - 1)) legal_delta_y = 0;
+    if (camera->tile_x + delta_x < 0) legal_delta_x -= (camera->tile_x + delta_x);
+    if (camera->end_x + delta_x > (GRID_W - 1)) legal_delta_x -= (camera->end_x + delta_x - (GRID_W - 1));
+    if (camera->tile_y + delta_y < 0) legal_delta_y -= (camera->tile_y + delta_y);
+    if (camera->end_y + delta_y > (GRID_H - 1)) legal_delta_y -= (camera->end_y + delta_y - (GRID_H - 1));
     camera->tile_x += legal_delta_x;
     camera->end_x += legal_delta_x;
     camera->tile_y += legal_delta_y;
