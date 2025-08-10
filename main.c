@@ -36,12 +36,13 @@ enum result {
 // todo: this needs to match the data in the tga files, but needs to be in scenario/save data (and also not global in code but passed via eg. a struct)
 #define GRID_W 50
 #define GRID_H 50
-#define TILE_SIZE 32
+#define TILE_SIZE 64
 #define ATLAS_SIZE 8
 
 struct camera {
     i32 tile_x, tile_y; // (top left) camera position on the map
     u32 end_x, end_y; // (down right) furthest visible tile on the map
+    u32 *restrict buffer;
     u32 buffer_w, buffer_h; // the size of the frame buffer (in pixels)
     u32 display_w, display_h; // size of the original display (in pixels), to keep track of the size we need to scale to (off by one stride means we cannot just x2)
     u32 zoom;
@@ -226,7 +227,7 @@ struct path {
     // u8 id; // unit id
 };
 struct step {
-    u8  dir;
+    u8 dir;
     u16 cost;
     u16 id; // unit id + player id
 };
@@ -397,21 +398,73 @@ static inline u32 mix_colors(u32 a, u32 b) {
     return (((a ^ b) & 0xFEFEFEFEU) >> 1U) + (a & b);
 }
 
-static inline void draw_unit(struct camera camera, struct tga units_atlas, u32 tile_y, u32 tile_x, u32 *restrict buffer) {
-    const u32 start_y = (tile_y - camera.tile_y) * TILE_SIZE + 5;
-    const u32 start_x = (tile_x - camera.tile_x) * TILE_SIZE + 5;
-    const enum units unit = get_unit(tile_x, tile_y);
-    const u32 atlas_start_x = (unit % ATLAS_SIZE) * TILE_SIZE;
-    const u32 atlas_start_y = (unit / ATLAS_SIZE) * TILE_SIZE;
+void blit(struct camera camera, struct tga atlas, u32 buffer_x, u32 buffer_y, u32 atlas_x, u32 atlas_y, u32 width, u32 height) {
+    if (buffer_x + width > camera.buffer_w) { width = camera.buffer_w - buffer_x; }
+    if (buffer_y + height > camera.buffer_h) { height = camera.buffer_h - buffer_y; }
 
-    for (u32 i = 0; i < TILE_SIZE-6; ++i) {
-        u32 *buffer_location = buffer + (start_y + i) * camera.buffer_w + start_x;
-        const u32 *atlas_location = units_atlas.pix + (atlas_start_y + i) * units_atlas.w + atlas_start_x;
-        memcpy(buffer_location, atlas_location, (TILE_SIZE-6) * sizeof(u32));
+    u32 *restrict buffer_row_pointer = camera.buffer + buffer_y * camera.buffer_w + buffer_x;
+    const u32 *restrict atlas_row_pointer = atlas.pix + atlas_y * atlas.w + atlas_x;
+
+    const u32 buffer_stride_pixels = camera.buffer_w;
+    const u32 atlas_stride_pixels = atlas.w;
+    const usize row_byte_count = (usize) width * sizeof(u32);
+
+    for (u32 y = 0; y < height; ++y) {
+        memcpy(buffer_row_pointer, atlas_row_pointer, row_byte_count);
+        buffer_row_pointer += buffer_stride_pixels;
+        atlas_row_pointer += atlas_stride_pixels;
     }
 }
 
-void draw_units(struct camera camera, struct tga units_atlas, u32 *buffer, struct unit_list player_units[PLAYER_COUNT]) {
+void blit_masked(struct camera camera, struct tga atlas, u32 buffer_x, u32 buffer_y, u32 atlas_x, u32 atlas_y, u32 width, u32 height) {
+    if (buffer_x + width > camera.buffer_w) { width = camera.buffer_w - buffer_x; }
+    if (buffer_y + height > camera.buffer_h) { height = camera.buffer_h - buffer_y; }
+
+    u32 *restrict buffer_location = camera.buffer + buffer_y * camera.buffer_w + buffer_x;
+    const u32 *restrict atlas_location = atlas.pix + atlas_y * atlas.w + atlas_x;
+
+    for (int y = 0; y < (int)height; ++y) {
+        for (int x = 0; x < (int)width; ++x) {
+            u32 source_pixel = atlas_location[x];
+            u32 alpha_bits = source_pixel & 0xFF000000u;
+            u32 all_or_nothing_mask = 0u - (alpha_bits != 0u); // UINT32_MAX ie. all ones if alpha is not 0, otherwise 0
+            buffer_location[x] = (buffer_location[x] & ~all_or_nothing_mask) | (source_pixel & all_or_nothing_mask);
+        }
+        atlas_location += atlas.w;
+        buffer_location += camera.buffer_w;
+    }
+}
+
+static inline void draw_unit(struct camera camera, struct tga units_atlas, u32 tile_y, u32 tile_x) {
+    const u32 buffer_y = (tile_y - camera.tile_y) * TILE_SIZE;
+    const u32 buffer_x = (tile_x - camera.tile_x) * TILE_SIZE;
+    const enum units unit = get_unit(tile_x, tile_y);
+    const u32 atlas_x = (unit % ATLAS_SIZE) * TILE_SIZE;
+    const u32 atlas_y = (unit / ATLAS_SIZE) * TILE_SIZE;
+    
+    blit_masked(camera, units_atlas, buffer_x, buffer_y, atlas_x, atlas_y, TILE_SIZE, TILE_SIZE);
+}
+
+void draw_step(struct camera camera, struct tga directions_atlas, enum directions direction, u32 tile_y, u32 tile_x) {
+    const u32 buffer_y = (tile_y - camera.tile_y) * TILE_SIZE;
+    const u32 buffer_x = (tile_x - camera.tile_x) * TILE_SIZE;
+    const u32 atlas_x = (direction % ATLAS_SIZE) * TILE_SIZE;
+    const u32 atlas_y = (direction / ATLAS_SIZE) * TILE_SIZE;
+    
+    blit_masked(camera, directions_atlas, buffer_x, buffer_y, atlas_x, atlas_y, TILE_SIZE, TILE_SIZE);
+}
+
+static inline void draw_tile(struct camera camera, struct tga map_atlas, u32 tile_y, u32 tile_x) {
+    const u32 start_y = (tile_y - camera.tile_y) * TILE_SIZE;
+    const u32 start_x = (tile_x - camera.tile_x) * TILE_SIZE;
+    const enum tiles tile = get_tile(tile_x, tile_y);
+    const u32 atlas_start_x = (tile % ATLAS_SIZE) * TILE_SIZE;
+    const u32 atlas_start_y = (tile / ATLAS_SIZE) * TILE_SIZE;
+    
+    blit(camera, map_atlas, start_x, start_y, atlas_start_x, atlas_start_y, TILE_SIZE, TILE_SIZE);
+}
+
+void draw_units(struct camera camera, struct tga units_atlas, struct unit_list player_units[PLAYER_COUNT]) {
     for (u32 player = 0; player < PLAYER_COUNT; player++) {
         if (player_units[player].count == 0) continue; // skip empty players
         for (u32 unit = 0; unit < player_units->count; ++unit) {
@@ -420,81 +473,79 @@ void draw_units(struct camera camera, struct tga units_atlas, u32 *buffer, struc
             u32 tile_y = player_units[player].units[unit].y;
             if (tile_x < camera.tile_x || tile_y < camera.tile_y) continue;
             if (tile_x > camera.end_x || tile_y > camera.end_y) continue;
-            draw_unit(camera, units_atlas, tile_y, tile_x, buffer);
+            draw_unit(camera, units_atlas, tile_y, tile_x);
         }
     }
 }
 
-static inline void draw_tile(struct camera camera, struct tga map_atlas, u32 tile_y, u32 tile_x, u32 *restrict terrainbuffer) {
-    const u32 start_y = (tile_y - camera.tile_y) * TILE_SIZE;
-    const u32 start_x = (tile_x - camera.tile_x) * TILE_SIZE;
-    const enum tiles tile = get_tile(tile_x, tile_y);
-    const u32 atlas_start_x = (tile % ATLAS_SIZE) * TILE_SIZE;
-    const u32 atlas_start_y = (tile / ATLAS_SIZE) * TILE_SIZE;
-
-    for (u32 i = 0; i < TILE_SIZE; ++i) {
-        u32 *dest = terrainbuffer + (start_y + i) * camera.buffer_w + start_x;
-        const u32 *src = map_atlas.pix + (atlas_start_y + i) * map_atlas.w + atlas_start_x;
-        memcpy(dest, src, TILE_SIZE * sizeof(u32));
-    }
-}
-
-void draw_terrain(struct camera camera, struct tga map_atlas, u32 *terrainbuffer) {
+void draw_terrain(struct camera camera, struct tga map_atlas) {
     // loop over all the visible tiles
     for (u32 y = camera.tile_y; y <= camera.end_y; ++y) {
         for (u32 x = camera.tile_x; x <= camera.end_x; ++x) {
-            draw_tile(camera, map_atlas, y, x, terrainbuffer);
+            draw_tile(camera, map_atlas, y, x);
         }
     }
 }
 
-void draw_step(struct camera camera, u32 player, u32 tile_y, u32 tile_x, u32 w, u32 h, u32 *buffer) {
-    // calculate the rect in the buffer that we need to draw this tile in
-    i32 start_y = (tile_y * TILE_SIZE) - (camera.tile_y * TILE_SIZE);
-    i32 start_x = (tile_x * TILE_SIZE) - (camera.tile_x * TILE_SIZE);
-    i32 end_y = start_y + TILE_SIZE;
-    i32 end_x = start_x + TILE_SIZE;
-    assert(start_x >= 0 && start_y >= 0 && ("Negative drawing position"));
-    // if this tile goes out of bounds (last tile), draw only to the end of the buffer instead
-    if (end_y > h) end_y = h;
-    if (end_x > w) end_x = w;
-    // loop over the range we calculated above
-    for (u32 y = start_y; y < end_y; ++y) {
-        for (u32 x = start_x; x < end_x; ++x) {
-            buffer[y * w + x] = mix_colors(0xFFFFFFFF, player_colors[player]);
-        }
-    }
-}
+#define MAX_ARROW_LENGTH 16
+struct unit_path {u8 length; u8 path[MAX_ARROW_LENGTH];};
+struct unit_path unit_paths[PLAYER_COUNT][MAX_UNITS];
 
-void draw_turn(struct camera camera, u32 *buffer, struct unit_list player_units[PLAYER_COUNT], struct resolve_bucket resolve_order[BUCKET_COUNT]) { // needs checking
-    pos unit_locations[PLAYER_COUNT][MAX_UNITS] = {0}; // keep track of unit locations
-    for (u32 bucket = 0; bucket < BUCKET_COUNT; bucket ++) {
-        if (resolve_order[bucket].count == 0) {continue;} // skip empty buckets
+void draw_steps(struct camera camera, struct tga directions_atlas, struct unit_list player_units[PLAYER_COUNT], struct resolve_bucket resolve_order[BUCKET_COUNT]) {
+    memset(unit_paths, 0, sizeof(unit_paths));
+
+    for (u32 bucket = 0; bucket < BUCKET_COUNT; bucket++) {
+        if (resolve_order[bucket].count == 0) continue;
         for (u32 step = 0; step < resolve_order[bucket].count; step++) {
-            enum players player = resolve_order[bucket].steps[step].id >> 8; // get player from id // UNIT CAP
-            u32 unit = resolve_order[bucket].steps[step].id % 256; // get unit from id
-            if (unit >= player_units[player].count) {
-                printf("Invalid unit index %d for player %d\n", unit, player);
-                continue; // skip invalid unit index zou ni moeten gebeuren temp fix voor globals op te lossen
-            }
-            if (player_units[player].units[unit].type == UINT32_MAX) continue; // skip empty unit slots
-            pos loc;
-            if (unit_locations[player][unit].x != 0 || unit_locations[player][unit].y != 0) {
-                loc = unit_locations[player][unit]; // use cached location
-            }
-            else {
-                loc = (pos){player_units[player].units[unit].x, player_units[player].units[unit].y}; // start location
-                if (loc.x == 0 && loc.y == 0) {
-                    printf("Invalid unit location for player %d, unit %d: (%d, %d)\n", player, unit, loc.x, loc.y);
+            enum players player = resolve_order[bucket].steps[step].id >> 8;
+            u32 unit = resolve_order[bucket].steps[step].id & 255u;
+            if (unit >= MAX_UNITS) continue;
+            if (player_units[player].units[unit].type == UINT32_MAX) continue;
+            if (unit_paths[player][unit].length >= MAX_ARROW_LENGTH) continue;
+            unit_paths[player][unit].path[unit_paths[player][unit].length++] = resolve_order[bucket].steps[step].dir & 7u;
+        }
+    }
+
+    for (u32 player = 0; player < PLAYER_COUNT; player++) {
+        for (u32 unit = 0; unit < player_units[player].count; unit++) {
+            if (player_units[player].units[unit].type == UINT32_MAX) continue;
+
+            u32 tile_x = player_units[player].units[unit].x;
+            u32 tile_y = player_units[player].units[unit].y;
+            u8 length = unit_paths[player][unit].length;
+
+            for (u8 step_index = 0; step_index < length; ++step_index) {
+                enum directions current_direction = unit_paths[player][unit].path[step_index];
+                u32 row_index = 0;
+
+                if (step_index + 1 < length) {
+                    enum directions next_direction = unit_paths[player][unit].path[step_index + 1];
+
+                    int current_dx = dir_offsets[current_direction].x;
+                    int current_dy = dir_offsets[current_direction].y;
+                    int next_dx = dir_offsets[next_direction].x;
+                    int next_dy = dir_offsets[next_direction].y;
+
+                    int dot_product = current_dx * next_dx + current_dy * next_dy;
+                    int cross_product = current_dx * next_dy - current_dy * next_dx;
+
+                    if (dot_product == 1) {
+                        if (cross_product > 0) row_index = 1;
+                        else if (cross_product < 0) row_index = 2;
+                    } else if (dot_product == 0) {
+                        if (cross_product > 0) row_index = 3;
+                        else if (cross_product < 0) row_index = 4;
+                    }
+                }
+
+                pos delta = dir_offsets[current_direction];
+                tile_x += delta.x;
+                tile_y += delta.y;
+                if (!(tile_x < camera.tile_x || tile_y < camera.tile_y || tile_x > camera.end_x || tile_y > camera.end_y)) {
+                    enum directions atlas_index = (enum directions)(current_direction + row_index * ATLAS_SIZE);
+                    draw_step(camera, directions_atlas, atlas_index, tile_y, tile_x);
                 }
             }
-            u8 dir = resolve_order[bucket].steps[step].dir; // get direction from path
-            u32 x = loc.x + dir_offsets[dir].x; // calculate x position
-            u32 y = loc.y + dir_offsets[dir].y; // calculate y position
-            unit_locations[player][unit] = (pos){x, y}; // update location
-            if ((x) > camera.end_x || (y) > camera.end_y) continue; // don't draw beyond the visible grid
-            if (x < camera.tile_x || y < camera.tile_y) {printf("skip\n");continue;}
-            draw_step(camera, player, y, x, camera.buffer_w, camera.buffer_h, buffer);
         }
     }
 }
@@ -899,7 +950,11 @@ void *script(void *arg) {
         }
     }
     u32 scrpt_frame = 0;
-    while (true) {
+    player_turn(0, player_units, &(player_paths), &(resolve_order));
+    memcpy(src->resolve_order_ptr, resolve_order, sizeof(struct resolve_bucket) * BUCKET_COUNT);
+    player_turn(1, player_units, &(player_paths), &(resolve_order));
+    memcpy(src->resolve_order_ptr, resolve_order, sizeof(struct resolve_bucket) * BUCKET_COUNT);
+    while (false) {
         u64 us_scrpt = time_us();
         if (scrpt_frame % 20 == 1) {
             player_turn(0, player_units, &(player_paths), &(resolve_order));
@@ -957,8 +1012,8 @@ static inline void tga_free(struct tga img)
     munmap((void*)img.map, img.map_len);
 }
 
-#define MAX_BUFFER_WIDTH (1280)
-#define MAX_BUFFER_HEIGHT (800)
+#define MAX_BUFFER_WIDTH (1920)
+#define MAX_BUFFER_HEIGHT (1200)
 
 void resize_window_callback(void *userdata, u32 new_w, u32 new_h) {
     struct camera *camera = (struct camera *)userdata;
@@ -978,7 +1033,7 @@ void resize_window_callback(void *userdata, u32 new_w, u32 new_h) {
 }
 
 u32 main(void) {
-    struct camera camera = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+    struct camera camera = {0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 1};
     struct ctx *window = create_window("<<Fatzke>>", key_input_callback, mouse_input_callback, resize_window_callback, &camera);
     struct scaler scaler; create_scaler(&scaler, 8);
 
@@ -988,6 +1043,7 @@ u32 main(void) {
     
     struct tga map_atlas = tga_load("map_atlas.tga");
     struct tga units_atlas = tga_load("units_atlas.tga");
+    struct tga directions_atlas = tga_load("directions_atlas.tga");
 
     // Player unit movement structs
     struct unit_list player_units[PLAYER_COUNT] = {0};
@@ -1027,8 +1083,8 @@ u32 main(void) {
     struct thread_args args = { .player_units = {0} 
                                 , .resolve_order = {0}
                                 , .player_paths = {0}
-                                , .player_units_ptr = &player_units
-                                , .resolve_order_ptr = &resolve_order
+                                , .player_units_ptr = player_units
+                                , .resolve_order_ptr = resolve_order
                                 , .player_paths_ptr = &player_paths
                                 };
     
@@ -1039,7 +1095,7 @@ u32 main(void) {
 
         u64 frame_us = time_us();
         
-        if (frame == -1) {
+        if (frame == 0) {
             memcpy(args.player_units, player_units, sizeof(struct unit_list) * PLAYER_COUNT);
             memcpy(args.resolve_order, resolve_order, sizeof(struct resolve_bucket) * BUCKET_COUNT);
             memcpy(args.player_paths, player_paths, sizeof(struct path) * PLAYER_COUNT * MAX_UNITS);
@@ -1049,21 +1105,21 @@ u32 main(void) {
         u64 us_thread = elapsed_us(frame_us);
 
         static u32 scalingbuffer[MAX_BUFFER_HEIGHT][MAX_BUFFER_WIDTH];
-        u32 *buffer = camera.need_scaling ? (u32 *)scalingbuffer : get_buffer(window);
+        camera.buffer = camera.need_scaling ? (u32 *)scalingbuffer : get_buffer(window);
         u64 us_get_buffer = elapsed_us(frame_us);
         
         if (process_input(&camera)) _exit(0); 
         u64 us_process_inputs = elapsed_us(frame_us);
 
-        draw_terrain(camera, map_atlas, buffer);
+        draw_terrain(camera, map_atlas);
         u64 us_draw_terrain = elapsed_us(frame_us);
-        draw_units(camera, units_atlas, buffer, player_units);
+        draw_units(camera, units_atlas, player_units);
         u64 us_draw_units = elapsed_us(frame_us);
-        draw_turn(camera, buffer, player_units, resolve_order);
+        draw_steps(camera, directions_atlas, player_units, resolve_order);
         u64 us_draw_steps = elapsed_us(frame_us);
         
         if (camera.need_scaling) {
-            scale(&scaler, buffer, camera.buffer_w, camera.buffer_h, get_buffer(window), camera.display_w);
+            scale(&scaler, camera.buffer, camera.buffer_w, camera.buffer_h, get_buffer(window), camera.display_w);
         }
         u64 us_scale_buffer = elapsed_us(frame_us);
         commit(window); // tell compositor it can read from the buffer
