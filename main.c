@@ -180,9 +180,9 @@ u32 unit_cost[UNIT_COUNT] = {
 };
 MATRIX(movement_cost, u32, UNIT_COUNT, TILE_COUNT,
 /*               SEA,    CITY,  MNT,  CRO,  PLN,  FST  */
-/*INFANTRY */ UINT32_MAX,  100,   UINT32_MAX,    100,    100,    200,
-/*MOTORIZED*/ UINT32_MAX,  100,     UINT32_MAX,    100,    100,    200,
-/*ARMOR    */ UINT32_MAX,  100,     UINT32_MAX,    100,    100,    200
+/*INFANTRY */ UINT32_MAX,  100,     UINT32_MAX,    100,    100,    200,
+/*MOTORIZED*/ UINT32_MAX,  100,     UINT32_MAX,    50,    50,     200,
+/*ARMOR    */ UINT32_MAX,  100,     UINT32_MAX,    60,    60,     200
 );
 
 #pragma endregion
