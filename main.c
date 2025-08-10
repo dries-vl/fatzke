@@ -1094,10 +1094,8 @@ u32 main(void) {
     while(poll_events(window)) {// poll for events
         if (!window->vsync_ready) continue; // wait for next event until vsync is not done
 
-
         u64 frame_us = time_us();
         
-        if (frame == 0) {
         if (frame == 0) {
             memcpy(args.player_units, player_units, sizeof(struct unit_list) * PLAYER_COUNT);
             memcpy(args.resolve_order, resolve_order, sizeof(struct resolve_bucket) * BUCKET_COUNT);
