@@ -5,7 +5,7 @@
 #include <assert.h>
 #include <pthread.h>
 
-#define _DEBUG_FPS 1
+#define _DEBUG_FPS 0
 
 // todo: separate header for all common c stuff
 typedef uint8_t   u8;
@@ -397,11 +397,11 @@ static inline u32 mix_colors(u32 a, u32 b) {
     return (((a ^ b) & 0xFEFEFEFEU) >> 1U) + (a & b);
 }
 
-static inline void draw_unit(struct camera camera, struct tga units_atlas, u32 tile_y, u32 tile_x, u32 *restrict buffer) {
-    const u32 start_y = (tile_y - camera.tile_y) * TILE_SIZE + 5;
-    const u32 start_x = (tile_x - camera.tile_x) * TILE_SIZE + 5;
+static inline void draw_unit(struct camera camera, struct tga units_atlas, u32 tile_y, u32 tile_x, u32 *restrict buffer, u32 player) {
+    const u32 start_y = (tile_y - camera.tile_y) * TILE_SIZE + 1;
+    const u32 start_x = (tile_x - camera.tile_x) * TILE_SIZE + 3;
     const enum units unit = get_unit(tile_x, tile_y);
-    const u32 atlas_start_x = (unit % ATLAS_SIZE) * TILE_SIZE;
+    const u32 atlas_start_x = (unit % ATLAS_SIZE) * TILE_SIZE + player * 3 * TILE_SIZE; // offset for player IS YANK AND TEMP
     const u32 atlas_start_y = (unit / ATLAS_SIZE) * TILE_SIZE;
 
     for (u32 i = 0; i < TILE_SIZE-6; ++i) {
@@ -414,13 +414,13 @@ static inline void draw_unit(struct camera camera, struct tga units_atlas, u32 t
 void draw_units(struct camera camera, struct tga units_atlas, u32 *buffer, struct unit_list player_units[PLAYER_COUNT]) {
     for (u32 player = 0; player < PLAYER_COUNT; player++) {
         if (player_units[player].count == 0) continue; // skip empty players
-        for (u32 unit = 0; unit < player_units->count; ++unit) {
+        for (u32 unit = 0; unit < player_units[player].count; ++unit) {
             if (player_units[player].units[unit].type == UINT32_MAX) continue; // skip empty unit slots
             u32 tile_x = player_units[player].units[unit].x;
             u32 tile_y = player_units[player].units[unit].y;
             if (tile_x < camera.tile_x || tile_y < camera.tile_y) continue;
             if (tile_x > camera.end_x || tile_y > camera.end_y) continue;
-            draw_unit(camera, units_atlas, tile_y, tile_x, buffer);
+            draw_unit(camera, units_atlas, tile_y, tile_x, buffer, player);
         }
     }
 }
@@ -493,14 +493,13 @@ void draw_turn(struct camera camera, u32 *buffer, struct unit_list player_units[
             u32 y = loc.y + dir_offsets[dir].y; // calculate y position
             unit_locations[player][unit] = (pos){x, y}; // update location
             if ((x) > camera.end_x || (y) > camera.end_y) continue; // don't draw beyond the visible grid
-            if (x < camera.tile_x || y < camera.tile_y) {printf("skip\n");continue;}
+            if (x < camera.tile_x || y < camera.tile_y) {continue;}
             draw_step(camera, player, y, x, camera.buffer_w, camera.buffer_h, buffer);
         }
     }
 }
 
 i32 move_unit(u32 player, u32 unit, u32 to_x, u32 to_y, struct unit_list player_units[PLAYER_COUNT]) {
-    return -3;
     if (!player_units[player].units || unit < 0 || unit >= player_units[player].count) {
         printf("Invalid player or unit index\n");
         return -1; // Invalid player or unit
@@ -675,7 +674,7 @@ i32 commit_turn(enum players player, struct unit_list player_units[PLAYER_COUNT]
     }
     // Resolve all paths for the player
     for (u32 unit = 0; unit < player_units[player].count; ++unit) {
-        if ((*player_paths)[player][unit].length == 0) {printf("no moves found for unit: %d", unit); continue;} // skip empty paths
+        if ((*player_paths)[player][unit].length == 0) {continue;} // skip empty paths
         u32 cost = 0; // cost is cummulative
         u32 x = player_units[player].units[unit].x;
         u32 y = player_units[player].units[unit].y;
@@ -904,14 +903,17 @@ void *script(void *arg) {
         if (scrpt_frame % 20 == 1) {
             player_turn(0, player_units, &(player_paths), &(resolve_order));
             memcpy(src->resolve_order_ptr, resolve_order, sizeof(struct resolve_bucket) * BUCKET_COUNT);
+            memcpy(src->player_units_ptr, player_units, sizeof(struct unit_list) * PLAYER_COUNT);
         }
         if (scrpt_frame % 20 == 2) {
             player_turn(1, player_units, &(player_paths), &(resolve_order));
             memcpy(src->resolve_order_ptr, resolve_order, sizeof(struct resolve_bucket) * BUCKET_COUNT);
+            memcpy(src->player_units_ptr, player_units, sizeof(struct unit_list) * PLAYER_COUNT);
         }
         if (scrpt_frame % 20 == 15) {
             resolve_turn(player_units, &(resolve_order));
             memcpy(src->resolve_order_ptr, resolve_order, sizeof(struct resolve_bucket) * BUCKET_COUNT);
+            memcpy(src->player_units_ptr, player_units, sizeof(struct unit_list) * PLAYER_COUNT);
         }
         struct timespec ts = {0, 16 * 1000000};
         if (elapsed_us(us_scrpt) >= 1000) {
@@ -1039,7 +1041,7 @@ u32 main(void) {
 
         u64 frame_us = time_us();
         
-        if (frame == -1) {
+        if (frame == 0) {
             memcpy(args.player_units, player_units, sizeof(struct unit_list) * PLAYER_COUNT);
             memcpy(args.resolve_order, resolve_order, sizeof(struct resolve_bucket) * BUCKET_COUNT);
             memcpy(args.player_paths, player_paths, sizeof(struct path) * PLAYER_COUNT * MAX_UNITS);
