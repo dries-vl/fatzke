@@ -10,3 +10,7 @@ include_directories(wayland)
 endif()
 
 add_executable(fatzke main.c)
+
+set_target_properties(fatzke PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}"
+)

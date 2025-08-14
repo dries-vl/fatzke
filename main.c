@@ -1137,8 +1137,39 @@ void *script(void *arg) {
 }
 
 #if defined(_WIN32)
+static inline int get_exe_dir(char* out, size_t n)
+{
+    char buf[MAX_PATH];
+    DWORD k = GetModuleFileNameA(NULL, buf, MAX_PATH);
+    if (!k || k >= MAX_PATH) return 0;
+    for (char* p = buf + k; p != buf; --p) if (p[-1] == '\\' || p[-1] == '/')
+    {
+        p[-1] = 0;
+        break;
+    }
+    if (!buf[0]) return 0;
+    strncpy(out, buf, n);
+    out[n - 1] = 0;
+    return 1;
+}
+
+static inline int is_abs(const char* p)
+{
+    return p && (p[0] == '/' || p[0] == '\\' || (p[1] == ':' && (p[2] == '\\' || p[2] == '/')));
+}
+
+static inline FILE* fopen_exedir(const char* path, const char* mode)
+{
+    FILE* f = fopen(path, mode);
+    if (f || is_abs(path)) return f;
+    char dir[1024];
+    if (!get_exe_dir(dir, sizeof dir)) return NULL;
+    char full[2048];
+    snprintf(full, sizeof full, "%s\\%s", dir, path);
+    return fopen(full, mode);
+}
 static inline struct tga tga_load(const char *path) {
-    FILE *f = fopen(path, "rb"); if (!f) { fprintf(stderr, "File not found: %s\n", path); exit(1); }
+    FILE *f = fopen_exedir(path, "rb"); if (!f) { fprintf(stderr,"File not found: %s\n", path); exit(1); }
     u8 h18[18]; if (fread(h18,1,18,f)!=18) { fprintf(stderr,"Bad TGA: %s\n", path); exit(1); }
     if (h18[2]!=2 || h18[16]!=32 || (h18[17]&0x20)==0) { fprintf(stderr,"Unsupported TGA: %s\n", path); exit(1); }
     u32 w = h18[12] | h18[13]<<8, h = h18[14] | h18[15]<<8;
@@ -1152,40 +1183,26 @@ static inline struct tga tga_load(const char *path) {
 }
 static inline void tga_free(struct tga img) { free((void*)img.map); }
 #else
-static inline struct tga tga_load(const char *path)
-{
-    u32 fd = open(path, O_RDONLY | 02000000);
-    if (fd < 0) {fprintf(stderr, "File not found: %s\n", path); exit(1);}
-
-    u8 h18[18];
-    assert(read(fd, h18, 18) == 18);
-
-    /* ─── validate header ────────────────────────────────────────── */
-    if (h18[2]  != 2)   { fprintf(stderr,"TGA type ≠ 2 for %s\n", path);          exit(1); }
-    if (h18[16] != 32){ fprintf(stderr,"TGA bpp ≠ 32 (got %u) for %s\n",h18[16], path);exit(1);}
-    if ((h18[17] & 0x20) == 0){ fprintf(stderr,"TGA not top-left for %s\n", path); exit(1); }
-
-    u32 w = h18[12] | h18[13]<<8;
-    u32 h = h18[14] | h18[15]<<8;
-
-    size_t off   = 18 + h18[0];              /* header + ID-field      */
-    size_t bytes = (size_t)w * h * 4;    /* 4 bytes per pixel      */
-
-    struct stat st;
-    fstat(fd,&st);
+static inline int get_exe_dir(char *out, size_t n) { char buf[4096]; ssize_t k=readlink("/proc/self/exe",buf,sizeof buf-1); if (k<=0) return 0; buf[k]=0; for (char *p=buf+k; p!=buf; --p) if (p[-1]=='/'||p[-1]=='\\') { p[-1]=0; break; } if (!buf[0]) return 0; strncpy(out, buf, n); out[n-1]=0; return 1; }
+static inline int is_abs(const char *p) { return p && (p[0]=='/'||p[0]=='\\'); }
+static inline int open_exedir(const char *path, int flags) { int fd=open(path,flags); if (fd>=0||is_abs(path)) return fd; char dir[1024]; if(!get_exe_dir(dir,sizeof dir)) return -1; char full[2048]; snprintf(full,sizeof full,"%s/%s",dir,path); return open(full,flags); }
+static inline struct tga tga_load(const char *path) {
+    u32 fd = open_exedir(path, O_RDONLY | 02000000);
+    if ((int)fd < 0) { fprintf(stderr,"File not found: %s\n", path); exit(1); }
+    u8 h18[18]; assert(read(fd, h18, 18) == 18);
+    if (h18[2]!=2) { fprintf(stderr,"TGA type ≠ 2 for %s\n", path); exit(1); }
+    if (h18[16]!=32){ fprintf(stderr,"TGA bpp ≠ 32 (got %u) for %s\n",h18[16], path); exit(1); }
+    if ((h18[17]&0x20)==0){ fprintf(stderr,"TGA not top-left for %s\n", path); exit(1); }
+    u32 w = h18[12] | h18[13]<<8, h = h18[14] | h18[15]<<8;
+    size_t off = 18 + h18[0], bytes = (size_t)w*h*4;
+    struct stat st; fstat(fd,&st);
     assert(off + bytes <= (size_t)st.st_size);
-
     void *map = mmap(0, st.st_size, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
     assert(map != MAP_FAILED);
     close(fd);
-
-    return (struct tga){ w, h, (u32*)((u8 *)map + off), map, st.st_size };
+    return (struct tga){ w, h, (u32*)((u8*)map + off), map, st.st_size };
 }
-
-static inline void tga_free(struct tga img)
-{
-    munmap((void*)img.map, img.map_len);
-}
+static inline void tga_free(struct tga img) { munmap((void*)img.map, img.map_len); }
 #endif
 
 #define MAX_BUFFER_WIDTH (1920)
@@ -1208,7 +1225,7 @@ void resize_window_callback(void *userdata, u32 new_w, u32 new_h) {
     printf("Display and buffer: %dx%d and %dx%d\n", camera->display_w, camera->display_h, camera->buffer_w, camera->buffer_h);
 }
 
-u32 main(void) {
+i32 main(void) {
     struct camera camera = {0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 1};
     struct ctx *window = create_window("<<Fatzke>>", key_input_callback, mouse_input_callback, resize_window_callback, &camera);
     struct scaler scaler; create_scaler(&scaler, 8);
