@@ -1,20 +1,21 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
-#include <wayland-client.h>
 
+#include <wayland-client.h>
 #include "xdg-shell-client-protocol.h"
 #include "xdg-shell-protocol.c"
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
 // todo: separate header for all common c stuff
+#include <stdint.h>
 typedef uint8_t   u8;
 typedef uint16_t  u16;
 typedef uint32_t  u32;

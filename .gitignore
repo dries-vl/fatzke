@@ -2,3 +2,5 @@
 main
 a.out
 fatzke
+*.exe
+.idea/*

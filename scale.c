@@ -1,8 +1,11 @@
+#ifdef _WIN32
+#include "windows/pthread.h"
+#else
 #include <pthread.h>
-#include <stdint.h>
-#include <stddef.h>
+#endif
 
 // todo: separate header for all common c stuff
+#include <stdint.h>
 typedef uint8_t   u8;
 typedef uint16_t  u16;
 typedef uint32_t  u32;
@@ -43,7 +46,7 @@ struct scaler {
 void *thread_loop(void *thread_args) {
     struct thread_data *context = (struct thread_data *)thread_args;
     struct scaler *scaler = context->scaler;
-    int worker_index = context->index;
+    const int worker_index = context->index;
 
     for (;;) {
         pthread_barrier_wait(&scaler->barrier); // wait until main calls scale()

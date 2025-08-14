@@ -1,13 +1,14 @@
 // cc main.c -lwayland-client
+// cc main.c -luser32 -lgdi32
 #include <stdio.h>
-#include <stdint.h>
 #include <time.h>
 #include <assert.h>
-#include <pthread.h>
+#include <stdbool.h>
 
-#define _DEBUG_FPS 0
+#define DEBUG_FPS 0
 
 // todo: separate header for all common c stuff
+#include <stdint.h>
 typedef uint8_t   u8;
 typedef uint16_t  u16;
 typedef uint32_t  u32;
@@ -21,16 +22,38 @@ typedef double    f64;
 typedef intptr_t  isize;
 typedef uintptr_t usize;
 
-enum result {
-    OK,
-    ERROR
-};
-
-#define time_us() ({ struct timespec ts; clock_gettime(1, &ts); (long)(ts.tv_sec * 1000000L + ts.tv_nsec / 1000L); })
-#define elapsed_us(start) (time_us() - (start))
-
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include "windows.h"
+#include "windows/windows.c"
+#include "windows/pthread.h"
+#else
+#include <pthread.h>
 #include "wayland/wayland.c" // sudo apt install libwayland-dev
+#endif
+
 #include "scale.c"
+
+#if defined(_WIN32)
+static inline long time_us(void) {
+    static LARGE_INTEGER f = {0};
+    LARGE_INTEGER t;
+    if (!f.QuadPart) QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&t);
+    return (long)(t.QuadPart * 1000000 / f.QuadPart);
+}
+#if !defined(__MINGW32__)
+static inline int nanosleep(const struct timespec *req, struct timespec *rem) {
+    (void)rem;
+    DWORD ms = (DWORD)(req->tv_sec * 1000 + req->tv_nsec / 1000000);
+    Sleep(ms);
+    return 0;
+}
+#endif
+#else
+#define time_us() ({ struct timespec ts; clock_gettime(1, &ts); (long)(ts.tv_sec * 1000000L + ts.tv_nsec / 1000L); })
+#endif
+#define elapsed_us(start) (time_us() - (start))
 
 #pragma region CAMERA
 // todo: this needs to match the data in the tga files, but needs to be in scenario/save data (and also not global in code but passed via eg. a struct)
@@ -77,10 +100,25 @@ void move_camera(struct camera *camera, i32 delta_x, i32 delta_y) {
 #define GREEN 0xFF00FF00
 #define YELLOW 0xFFFFFF00
 
-#define MATRIX(name, type, rows, cols, ...) \
-    static const type name##_flat[] = { __VA_ARGS__ }; \
-    _Static_assert(sizeof(name##_flat)/sizeof(type) == (rows)*(cols), #name " : need " #rows " x " #cols " entries (edit the list)"); \
-    static const type (*const name)[cols] = (const type (*)[cols])name##_flat
+#if defined(_WIN32)
+#define MATRIX(name, type, rows, cols, ...)                                \
+    static const type name##_flat[] = { __VA_ARGS__ };                      \
+    enum { name##_count = (int)(sizeof(name##_flat) / sizeof(type)) };      \
+    typedef char name##_static_assert[                                       \
+        (name##_count == (rows) * (cols)) ? 1 : -1                          \
+    ];                                                                      \
+    static const type (*const name)[(cols)] =                                \
+        (const type (*)[(cols)]) name##_flat
+#else
+#define MATRIX(name, type, rows, cols, ...)                                 \
+    static const type name##_flat[] = { __VA_ARGS__ };                       \
+    _Static_assert(                                                          \
+        sizeof(name##_flat)/sizeof(type) == (rows)*(cols),                   \
+        #name " : need " #rows " x " #cols " entries (edit the list)"        \
+    );                                                                       \
+    static const type (*const name)[(cols)] =                                \
+        (const type (*)[(cols)]) name##_flat
+#endif
 
 struct tga { 
     u32 w, h; // dimensions
@@ -193,7 +231,7 @@ enum units get_unit(u32 x, u32 y, struct unit_stack unit_stacks[PLAYER_COUNT * M
         return UINT32_MAX; // invalid unit type
     }
     return unit_type;
-}; 
+}
 enum units get_unit_load(u32 x, u32 y) {
     u32 unit_color = units.pix[y * units.w + x];
     for (u32 i = 0; i < UNIT_COUNT; i++)
@@ -1098,6 +1136,22 @@ void *script(void *arg) {
     }
 }
 
+#if defined(_WIN32)
+static inline struct tga tga_load(const char *path) {
+    FILE *f = fopen(path, "rb"); if (!f) { fprintf(stderr, "File not found: %s\n", path); exit(1); }
+    u8 h18[18]; if (fread(h18,1,18,f)!=18) { fprintf(stderr,"Bad TGA: %s\n", path); exit(1); }
+    if (h18[2]!=2 || h18[16]!=32 || (h18[17]&0x20)==0) { fprintf(stderr,"Unsupported TGA: %s\n", path); exit(1); }
+    u32 w = h18[12] | h18[13]<<8, h = h18[14] | h18[15]<<8;
+    size_t off = 18 + h18[0], bytes = (size_t)w*h*4;
+    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+    if (off + bytes > (size_t)sz) { fprintf(stderr,"Short TGA: %s\n", path); exit(1); }
+    void *buf = malloc((size_t)sz); if (!buf) { fprintf(stderr,"OOM: %s\n", path); exit(1); }
+    if (fread(buf,1,(size_t)sz,f)!=(size_t)sz) { fprintf(stderr,"Read fail: %s\n", path); exit(1); }
+    fclose(f);
+    return (struct tga){ w, h, (u32*)((u8*)buf + off), buf, (size_t)sz };
+}
+static inline void tga_free(struct tga img) { free((void*)img.map); }
+#else
 static inline struct tga tga_load(const char *path)
 {
     u32 fd = open(path, O_RDONLY | 02000000);
@@ -1132,6 +1186,7 @@ static inline void tga_free(struct tga img)
 {
     munmap((void*)img.map, img.map_len);
 }
+#endif
 
 #define MAX_BUFFER_WIDTH (1920)
 #define MAX_BUFFER_HEIGHT (1200)
@@ -1247,7 +1302,7 @@ u32 main(void) {
         commit(window); // tell compositor it can read from the buffer
         frame ++;
 
-        #if _DEBUG_FPS
+        #if DEBUG_FPS
         printf("total: %ld us\n", elapsed_us(frame_us));
         printf("get thread: %ld us\n", us_thread);
         printf("process inputs: %ld us\n", us_process_inputs);
