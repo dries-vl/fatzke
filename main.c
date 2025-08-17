@@ -1152,12 +1152,10 @@ static inline int get_exe_dir(char* out, size_t n)
     out[n - 1] = 0;
     return 1;
 }
-
 static inline int is_abs(const char* p)
 {
     return p && (p[0] == '/' || p[0] == '\\' || (p[1] == ':' && (p[2] == '\\' || p[2] == '/')));
 }
-
 static inline FILE* fopen_exedir(const char* path, const char* mode)
 {
     FILE* f = fopen(path, mode);
