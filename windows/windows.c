@@ -1,25 +1,13 @@
+#include "../header/header.c"
+
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
 #include <stdlib.h>
 #include <string.h>
 
-// todo: separate header for all common c stuff
-#include <stdint.h>
-typedef uint8_t   u8;
-typedef uint16_t  u16;
-typedef uint32_t  u32;
-typedef uint64_t  u64;
-typedef int8_t    i8;
-typedef int16_t   i16;
-typedef int32_t   i32;
-typedef int64_t   i64;
-typedef float     f32;
-typedef double    f64;
-typedef intptr_t  isize;
-typedef uintptr_t usize;
-
-typedef void (*keyboard_cb)(void *ud, uint32_t key, uint32_t state);
-typedef void (*mouse_cb)(void *ud, int32_t x, int32_t y, uint32_t b);
+typedef void (*keyboard_cb)(void *ud, u32 key, u32 state);
+typedef void (*mouse_cb)(void *ud, i32 x, i32 y, u32 b);
 typedef void (*resize_cb)(void *ud, u32 w, u32 h);
 
 #ifndef GET_X_LPARAM
@@ -35,28 +23,21 @@ typedef void (*resize_cb)(void *ud, u32 w, u32 h);
 struct ctx {
     HWND hwnd;
     HDC  hdc;
-
-    /* single CPU buffer (ARGB8888, top-down) */
     u32 *pixels;
-    int  buf_w, buf_h, stride; /* stride in bytes */
-
+    int  buf_w, buf_h, stride;
     int  win_w, win_h;
-    int  configured;           /* always 1 after create */
-    int  alive;                /* 1 until WM_DESTROY */
-
+    int  configured;
+    int  alive;
     double last_x, last_y;
-    int  vsync_ready;          /* set to 1 after each commit */
-
+    int  vsync_ready;
     keyboard_cb keyboard_cb;
     mouse_cb    mouse_cb;
     resize_cb   resize_window_cb;
     void       *callback_userdata;
-
-    /* BITMAPINFO with BI_BITFIELDS masks for ARGB8888 */
     struct {
         BITMAPINFOHEADER hdr;
-        DWORD masks[3]; /* R,G,B */
-    } bmi;
+        DWORD masks[3]; // RGB
+    } bmi; // bitmap info
 };
 
 static void alloc_buffer(struct ctx *c, int w, int h) {
@@ -80,8 +61,9 @@ static void alloc_buffer(struct ctx *c, int w, int h) {
 static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wParam, LPARAM lParam) {
     struct ctx *c = (struct ctx*)GetWindowLongPtr(h, GWLP_USERDATA);
     switch (msg) {
-    case WM_CREATE: return 0;
-
+    case WM_CREATE: {
+        return 0;
+    }
     case WM_SIZE: {
         if (!c) break;
         int w = LOWORD(lParam), hgt = HIWORD(lParam);
@@ -211,13 +193,14 @@ struct ctx *create_window(const char *title, keyboard_cb kcb, mouse_cb mcb, resi
     c->vsync_ready = 1;
 
     c->hwnd = CreateWindowEx(WS_EX_APPWINDOW, "ultrafast_win32", title ? title : "",
-                             WS_POPUP, CW_USEDEFAULT, CW_USEDEFAULT, 640, 480,
+                             WS_POPUP, CW_USEDEFAULT, CW_USEDEFAULT, 128, 128,
                              NULL, NULL, inst, NULL);
     if (!c->hwnd) { free(c); return NULL; }
 
     SetWindowLongPtr(c->hwnd, GWLP_USERDATA, (LONG_PTR)c);
     ShowWindow(c->hwnd, SW_SHOW);
-    fullscreen(c->hwnd); /* mirror the Wayland fullscreen */
+    if (c->resize_window_cb) c->resize_window_cb(c->callback_userdata, (u32)128, (u32)128);
+    //fullscreen(c->hwnd); /* mirror the Wayland fullscreen */
 
     c->hdc = GetDC(c->hwnd);
 
