@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 : '
 @echo off
-tcc main.c -run || (echo [ERROR] tcc failed & pause & exit /b 1)
+tcc main.c -run -lwayland-client
 goto :eof
 '
 exec tcc main.c -run
