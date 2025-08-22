@@ -2,10 +2,8 @@
 // sudo apt install libwayland-dev (for getting the wayland-client header and lib)
 #include <wayland-client.h>
 // sudo apt install wayland-protocols wayland-scanner (for generating the xdg-shell files)
-// wayland-scanner client-header /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml xdg-shell-client-protocol.h
-// wayland-scanner private-code /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml xdg-shell-client-protocol.c
-// mv xdg-shell-client-protocol.h /usr/include
-// mv xdg-shell-client-protocol.c /usr/include
+// sudo wayland-scanner client-header /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml /usr/include/xdg-shell-client-protocol.h
+// sudo wayland-scanner private-code /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml /usr/include/xdg-shell-client-protocol.c
 #include <xdg-shell-client-protocol.h>
 #include <xdg-shell-client-protocol.c>
 
@@ -15,10 +13,14 @@
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
+
+#include "../fatzke/icon.h"
 
 typedef void (*keyboard_cb)(void *ud, u32 key, u32 state);
 typedef void (*mouse_cb)(void *ud, i32 x, i32 y, u32 b);
@@ -260,9 +262,6 @@ int window_poll(struct ctx *c) {
     // Process any new events already in queue
     return wl_display_dispatch_pending(c->dpy) >= 0;
 }
-
-#include <limits.h>
-#include "../icon.h"
 
 static int mkpath(const char *p) { char t[PATH_MAX]; size_t n=strlen(p); if (n>=sizeof t) return -1; strcpy(t,p); for (char *q=t+1; *q; q++) if (*q=='/') { *q=0; if (mkdir(t,0755)&&errno!=EEXIST) return -1; *q='/'; } return mkdir(t,0755)&&errno!=EEXIST?-1:0; }
 static int writen(const char *p, const void *buf, size_t len) { FILE *f=fopen(p,"wb"); if(!f) return -1; size_t w=fwrite(buf,1,len,f); fclose(f); return w==len?0:-1; }

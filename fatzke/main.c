@@ -1218,7 +1218,7 @@ void resize_window_callback(void *userdata, u32 new_w, u32 new_h) {
 
 i32 main(void) {
     struct camera camera = {0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 1};
-    struct ctx *window = create_window("Fatzke", key_input_callback, mouse_input_callback, resize_window_callback, &camera);
+    struct ctx *window = create_window(key_input_callback, mouse_input_callback, resize_window_callback, &camera);
     struct scaler scaler; create_scaler(&scaler, 8);
 
     map = tga_load("data/map.tga");
