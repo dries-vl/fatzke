@@ -261,21 +261,57 @@ int window_poll(struct ctx *c) {
     return wl_display_dispatch_pending(c->dpy) >= 0;
 }
 
-struct ctx *create_window(const char *title, keyboard_cb kcb, mouse_cb mcb, resize_cb rcb, void *ud) {
-    struct ctx *st = calloc(1, sizeof *st);
-    
-    st->keyboard_cb = kcb;
-    st->mouse_cb = mcb;
-    st->resize_window_cb = rcb;
-    st->callback_userdata = ud;
+#include <limits.h>
+#include "../icon.h"
 
-    if (!(st->dpy = wl_display_connect(NULL))) { perror("connect"); goto fail; }
+static int mkpath(const char *p) { char t[PATH_MAX]; size_t n=strlen(p); if (n>=sizeof t) return -1; strcpy(t,p); for (char *q=t+1; *q; q++) if (*q=='/') { *q=0; if (mkdir(t,0755)&&errno!=EEXIST) return -1; *q='/'; } return mkdir(t,0755)&&errno!=EEXIST?-1:0; }
+static int writen(const char *p, const void *buf, size_t len) { FILE *f=fopen(p,"wb"); if(!f) return -1; size_t w=fwrite(buf,1,len,f); fclose(f); return w==len?0:-1; }
+
+static void install_desktop_and_icon_once(const char *executable_name) {
+    const char *home = getenv("HOME"); if (!home || !*home) return;
+    char icon_dir[PATH_MAX]; snprintf(icon_dir, sizeof icon_dir, "%s/.local/share/icons/hicolor/256x256/apps", home);
+    char icon_path[PATH_MAX]; snprintf(icon_path, sizeof icon_path, "%s/%s.png", icon_dir, executable_name);
+    char desk_dir[PATH_MAX]; snprintf(desk_dir, sizeof desk_dir, "%s/.local/share/applications", home);
+    char desk_path[PATH_MAX]; snprintf(desk_path, sizeof desk_path, "%s/%s.desktop", desk_dir, executable_name);
+
+    if (access(icon_path, F_OK) != 0) { if (!mkpath(icon_dir)) writen(icon_path, icon_png, icon_png_len); }
+    if (access(desk_path, F_OK) != 0) {
+        if (!mkpath(desk_dir)) {
+            char buf[1024];
+            int n = snprintf(buf, sizeof buf,
+                "[Desktop Entry]\n"
+                "Type=Application\n"
+                "Version=1.5\n"
+                "Name=%s\n"
+                "Exec=%s\n"
+                "Icon=%s\n"
+                "Terminal=false\n"
+                "Categories=Utility;\n"
+                "StartupWMClass=%s\n",
+                executable_name, executable_name, icon_path, executable_name);
+            if (n>0 && n<(int)sizeof buf) { writen(desk_path,buf,strlen(buf)); chmod(desk_path,0755); }
+        }
+    }
+}
+
+struct ctx *create_window(keyboard_cb kcb, mouse_cb mcb, resize_cb rcb, void *ud) {
+    // Stupid hack needed on wayland: put exe icon in executable, and then copy to the right dir to have an icon
+    char exe_path[PATH_MAX]; ssize_t path_len = readlink("/proc/self/exe", exe_path, sizeof exe_path - 1); if (path_len <= 0) _exit(1); exe_path[path_len]=0;
+    const char *exe_name = strrchr(exe_path, '/');
+    exe_name = exe_name ? exe_name + 1 : exe_path;
+    int running_from_tcc = strcmp(exe_name, "tcc") == 0;
+    if (!running_from_tcc) // install the .desktop and .png files to have an icon (if not already done previously)
+        install_desktop_and_icon_once(exe_name);
+
+    struct ctx *st = calloc(1, sizeof *st);
+    st->keyboard_cb = kcb; st->mouse_cb = mcb; st->resize_window_cb = rcb; st->callback_userdata = ud;
+
+    if (!((st->dpy = wl_display_connect(NULL)))) { perror("connect"); goto fail; }
 
     struct wl_registry *r = wl_display_get_registry(st->dpy);
     wl_registry_add_listener(r, &reg_lis, st);
 
-    while (!st->comp || !st->shm || !st->wm)
-        wl_display_dispatch(st->dpy);
+    while (!st->comp || !st->shm || !st->wm) wl_display_dispatch(st->dpy);
     xdg_wm_base_add_listener(st->wm, &wm_lis, NULL);
 
     st->surf = wl_compositor_create_surface(st->comp);
@@ -283,10 +319,12 @@ struct ctx *create_window(const char *title, keyboard_cb kcb, mouse_cb mcb, resi
     st->top  = xdg_surface_get_toplevel(st->xs);
     xdg_surface_add_listener(st->xs,  &surf_lis, st);
     xdg_toplevel_add_listener(st->top, &top_lis, st);
-    if (title) xdg_toplevel_set_title(st->top, title);
 
-    xdg_toplevel_set_fullscreen(st->top, NULL); // set fullscreen
-    wl_surface_commit(st->surf); // 1st commit: no buffer
+    xdg_toplevel_set_title(st->top, exe_name);
+    xdg_toplevel_set_app_id(st->top, exe_name);
+
+    xdg_toplevel_set_fullscreen(st->top, NULL);
+    wl_surface_commit(st->surf);
     wl_display_flush(st->dpy);
 
     run_until(st, &st->configured);
@@ -295,15 +333,14 @@ struct ctx *create_window(const char *title, keyboard_cb kcb, mouse_cb mcb, resi
     wl_surface_attach(st->surf, st->buf, 0, 0);
     wl_surface_damage_buffer(st->surf, 0, 0, st->win_w, st->win_h);
     wl_surface_commit(st->surf);
-    
+
     struct wl_callback *cb = wl_surface_frame(st->surf);
     wl_callback_add_listener(cb, &frame_listener, st);
     st->vsync_ready = 1;
 
     wl_display_flush(st->dpy);
-
     return st;
-fail:
-    free(st);
+    fail:
+        free(st);
     return NULL;
 }
