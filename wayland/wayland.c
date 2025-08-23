@@ -20,7 +20,8 @@
 #include <string.h>
 #include <limits.h>
 
-#include "../fatzke/icon.h"
+// todo: this is interlinked badly
+#include "../fatzke/data/static/icon.h"
 
 typedef void (*keyboard_cb)(void *ud, u32 key, u32 state);
 typedef void (*mouse_cb)(void *ud, i32 x, i32 y, u32 b);

@@ -12,6 +12,7 @@
 // 2. big functions (cannot call other big functions)
 // 3. pure functions
 
+// todo: create simplified 'std' header with most important stuff declared (if faster to compile?)
 #include <stdio.h>
 #include <time.h>
 #include <assert.h>
@@ -23,7 +24,7 @@
 #include "../wayland/wayland.c" // sudo apt install libwayland-dev
 #endif
 
-// todo: translation unit
+// todo: separate lib
 #include "scale.c"
 
 #if defined(_WIN32)
@@ -91,26 +92,6 @@ void move_camera(struct camera *camera, i32 delta_x, i32 delta_y) {
 #define RED 0xFFFF0000
 #define GREEN 0xFF00FF00
 #define YELLOW 0xFFFFFF00
-
-#if defined(_WIN32)
-#define MATRIX(name, type, rows, cols, ...)                                \
-    static const type name##_flat[] = { __VA_ARGS__ };                      \
-    enum { name##_count = (int)(sizeof(name##_flat) / sizeof(type)) };      \
-    typedef char name##_static_assert[                                       \
-        (name##_count == (rows) * (cols)) ? 1 : -1                          \
-    ];                                                                      \
-    static const type (*const name)[(cols)] =                                \
-        (const type (*)[(cols)]) name##_flat
-#else
-#define MATRIX(name, type, rows, cols, ...)                                 \
-    static const type name##_flat[] = { __VA_ARGS__ };                       \
-    _Static_assert(                                                          \
-        sizeof(name##_flat)/sizeof(type) == (rows)*(cols),                   \
-        #name " : need " #rows " x " #cols " entries (edit the list)"        \
-    );                                                                       \
-    static const type (*const name)[(cols)] =                                \
-        (const type (*)[(cols)]) name##_flat
-#endif
 
 struct tga { 
     u32 w, h; // dimensions
@@ -238,12 +219,12 @@ u32 unit_cost[UNIT_COUNT] = {
     [MOTORIZED] = 200,
     [ARMOR] = 400,
 };
-MATRIX(movement_cost, u32, UNIT_COUNT, TILE_COUNT,
-/*               SEA,    CITY,  MNT,  CRO,  PLN,  FST  */
-/*INFANTRY */ -1,  100,     -1,    100,    100,    200,
-/*MOTORIZED*/ -1,  100,     -1,    50,    50,     200,
-/*ARMOR    */ -1,  100,     -1,    60,    60,     200
-);
+u32 movement_cost[UNIT_COUNT][TILE_COUNT] = {
+    /*               SEA,    CITY,  MNT,  CRO,  PLN,  FST  */
+    /*INFANTRY */ -1,  100,     -1,    100,    100,    200,
+    /*MOTORIZED*/ -1,  100,     -1,    50,    50,     200,
+    /*ARMOR    */ -1,  100,     -1,    60,    60,     200
+};
 
 #pragma endregion
 
