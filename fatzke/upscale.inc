@@ -1,10 +1,3 @@
-#include "../header/header.c"
-
-#include <pthread.h>
-
-typedef pthread_t thread;
-typedef pthread_barrier_t barrier;
-
 struct data
 {
     u32* src;
@@ -37,7 +30,7 @@ void* thread_loop(void* thread_args)
 
     for (;;)
     {
-        pthread_barrier_wait(&scaler->barrier); // wait until main calls scale()
+        barrier_wait(&scaler->barrier); // wait until main calls scale()
 
         u32 total_rows = scaler->data.sh;
         u32 rows_per_worker = total_rows / (u32)scaler->number_of_threads; // divide rows among threads
@@ -68,7 +61,7 @@ void* thread_loop(void* thread_args)
             }
         }
 
-        pthread_barrier_wait(&scaler->barrier);
+        barrier_wait(&scaler->barrier);
     }
     return NULL;
 }
@@ -77,13 +70,13 @@ void create_scaler(struct scaler* scaler, int number_of_threads)
 {
     *scaler = (struct scaler){0};
     scaler->number_of_threads = number_of_threads;
-    pthread_barrier_init(&scaler->barrier, NULL, (unsigned)(scaler->number_of_threads + 1));
+    barrier_init(&scaler->barrier, (unsigned)(scaler->number_of_threads + 1));
 
     for (int i = 0; i < scaler->number_of_threads; ++i)
     {
         scaler->thread_data[i].scaler = scaler;
         scaler->thread_data[i].index = i;
-        pthread_create(&scaler->threads[i], NULL, thread_loop, &scaler->thread_data[i]);
+        thread_create(&scaler->threads[i], thread_loop, &scaler->thread_data[i]);
     }
 }
 
@@ -96,6 +89,6 @@ void scale(struct scaler* scaler, u32* src, u32 sw, u32 sh, u32* dst, u32 dw)
     scaler->data.dw = dw;
     scaler->data.outw = sw * 2;
 
-    pthread_barrier_wait(&scaler->barrier); // start the threads
-    pthread_barrier_wait(&scaler->barrier); // wait for the threads to finish
+    barrier_wait(&scaler->barrier); // start the threads
+    barrier_wait(&scaler->barrier); // wait for the threads to finish
 }

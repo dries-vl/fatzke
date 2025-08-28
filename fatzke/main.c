@@ -3,29 +3,29 @@
 // todo: add some include path or other solution for proper include and avoiding "../header.c" in other source files
 // todo: xxd -i map.tga > map_tga.h (-i to create c-style include file) to make a single executable without game files
 //       OR use: ld -r -b binary unit.tga -o unit_tga.o (to create .o binary file that can be linked to have less compile time)
-#include "../header/header.c"
+#include "../header/header.inc"
 
-// todo: up-to-date tcc run command (ie. readme is not up-to-date, run.bat gets updated but is ugly ...)
+// todo: up-to-date tcc run command (ie. readme is not up-to-date, run.cmd gets updated but is ugly ...)
 // todo: windows tcc doesn't have pthreads -> add own small threading lib that works and that has simpler names
 
 // 1. header + main + high level calls to big functions (max ~50 lines)
 // 2. big functions (cannot call other big functions)
 // 3. pure functions
 
-// todo: create simplified 'std' header with most important stuff declared (if faster to compile?)
 #include <stdio.h>
 #include <time.h>
 #include <assert.h>
 #include <stdbool.h>
 
-#ifdef _WIN32
-#include "../windows/windows.c"
-#else
-#include "../wayland/wayland.c" // sudo apt install libwayland-dev
-#endif
-
 // todo: separate lib
-#include "scale.c"
+#include "../thread/thread.inc"
+#include "upscale.inc"
+
+#ifdef _WIN32 // always keep the platform include at the bottom of includes (todo: or better: invert control and let platform call this code instead ~WinMain/main)
+#include "../windows/win32.inc"
+#else
+#include "../wayland/wayland.inc"
+#endif
 
 #if defined(_WIN32)
 static inline long time_us(void) {
@@ -93,7 +93,7 @@ void move_camera(struct camera *camera, i32 delta_x, i32 delta_y) {
 #define GREEN 0xFF00FF00
 #define YELLOW 0xFFFFFF00
 
-struct tga { 
+struct tga {
     u32 w, h; // dimensions
     u32 *pix; // pointer to pixel data
     const void *map; // handle
@@ -1245,7 +1245,7 @@ i32 main(void) {
     u32 frame = 0;
     u64 start_us = time_us();
     
-    pthread_t tid;
+    thread tid;
     struct thread_args args = { .player_units = {0} 
                                 , .resolve_order = {0}
                                 , .player_paths = {0}
@@ -1265,7 +1265,7 @@ i32 main(void) {
             memcpy(args.player_units, player_units, sizeof(struct unit_list) * PLAYER_COUNT);
             memcpy(args.resolve_order, resolve_order, sizeof(struct resolve_bucket) * BUCKET_COUNT);
             memcpy(args.player_paths, player_paths, sizeof(struct path) * PLAYER_COUNT * MAX_UNITS);
-            pthread_create(&tid, NULL, script, &args);
+            thread_create(&tid, script, &args);
             printf("Script thread started\n");
         }
         u64 us_thread = elapsed_us(frame_us);

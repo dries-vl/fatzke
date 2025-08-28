@@ -1,4 +1,4 @@
-#include "../header/header.c"
+#include "../header/header.inc"
 // sudo apt install libwayland-dev (for getting the wayland-client header and lib)
 #include <wayland-client.h>
 // sudo apt install wayland-protocols wayland-scanner (for generating the xdg-shell files)

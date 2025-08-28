@@ -1,5 +1,3 @@
-#include "../header/header.c"
-
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
@@ -166,8 +164,7 @@ static void fullscreen(HWND hwnd) {
     SetWindowPos(hwnd, HWND_TOP, 0, 0, w, h, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
 }
 
-/* same signature as your Wayland create_window() */
-struct ctx *create_window(const char *title, keyboard_cb kcb, mouse_cb mcb, resize_cb rcb, void *ud) {
+struct ctx *create_window(keyboard_cb kcb, mouse_cb mcb, resize_cb rcb, void *ud) {
     HINSTANCE inst = GetModuleHandle(NULL);
     static ATOM cls = 0;
     if (!cls) {
@@ -192,7 +189,8 @@ struct ctx *create_window(const char *title, keyboard_cb kcb, mouse_cb mcb, resi
     c->alive = 1;
     c->vsync_ready = 1;
 
-    c->hwnd = CreateWindowEx(WS_EX_APPWINDOW, "ultrafast_win32", title ? title : "",
+    // todo: get exe path and assign window name
+    c->hwnd = CreateWindowEx(WS_EX_APPWINDOW, "ultrafast_win32", "",
                              WS_POPUP, CW_USEDEFAULT, CW_USEDEFAULT, 128, 128,
                              NULL, NULL, inst, NULL);
     if (!c->hwnd) { free(c); return NULL; }
@@ -211,7 +209,6 @@ struct ctx *create_window(const char *title, keyboard_cb kcb, mouse_cb mcb, resi
 
     c->configured = 1; /* immediately ready on Windows */
 
-    /* first present to seed the surface (Wayland did a first commit) */
     commit(c);
     return c;
 }
