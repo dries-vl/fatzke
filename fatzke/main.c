@@ -20,6 +20,7 @@
 // todo: separate lib
 #include "../thread/thread.inc"
 #include "upscale.inc"
+#include "../palette/palette.inc"
 
 #ifdef _WIN32 // always keep the platform include at the bottom of includes (todo: or better: invert control and let platform call this code instead ~WinMain/main)
 #include "../windows/win32.inc"

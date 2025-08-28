@@ -1,13 +1,15 @@
 #include "../header/header.inc"
 
-static inline u32 color_from_index(u32 idx)
-{
-    u32 r = (idx) & 7, g = (idx >> 3) & 7, b = (idx >> 6) & 7;
-    return 0xFF000000u | (r << 21) | (g << 13) | (b << 5);
+inline unsigned color_to_index_rgb332(unsigned argb) {
+    unsigned rgb = argb & 0x00FFFFFF;
+    // RG: 0-31 map to 0, 32-63 to 1, etc., B: 0-63 map to 0, etc.
+    return ((rgb >> 16) & 0xE0) | ((rgb >> 11) & 0x1C) | ((rgb >> 6) & 0x03);
 }
 
-static inline u32 index_from_color(u32 argb)
-{
-    u32 r = (argb >> 21) & 7, g = (argb >> 13) & 7, b = (argb >> 5) & 7;
-    return r | (g << 3) | (b << 6);
+inline unsigned index_to_color_rgb332(unsigned i){
+    unsigned r3=i>>5, g3=(i>>2)&7, b2=i&3;
+    unsigned R=(r3<<5)|(r3<<2)|(r3>>1); // {0,36,73,109,146,182,219,255}
+    unsigned G=(g3<<5)|(g3<<2)|(g3>>1); // {0,36,73,109,146,182,219,255}
+    unsigned B=(b2<<6)|(b2<<4)|(b2<<2)|b2; // {0,85,170,255}
+    return (R<<16)|(G<<8)|B;
 }
