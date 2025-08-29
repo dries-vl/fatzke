@@ -198,7 +198,7 @@ struct ctx *create_window(keyboard_cb kcb, mouse_cb mcb, resize_cb rcb, void *ud
     SetWindowLongPtr(c->hwnd, GWLP_USERDATA, (LONG_PTR)c);
     ShowWindow(c->hwnd, SW_SHOW);
     if (c->resize_window_cb) c->resize_window_cb(c->callback_userdata, (u32)128, (u32)128);
-    //fullscreen(c->hwnd); /* mirror the Wayland fullscreen */
+    fullscreen(c->hwnd); /* mirror the Wayland fullscreen */
 
     c->hdc = GetDC(c->hwnd);
 
