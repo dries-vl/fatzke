@@ -812,11 +812,11 @@ static VkResult present_frame(void)
 
 int main(void)
 {
-    /* Pin Intel Vulkan (avoid NVIDIA) if you need it */
-    setenv("VK_DRIVER_FILES", "/usr/share/vulkan/icd.d/intel_icd.x86_64.json", 1);
-    setenv("VK_ICD_FILENAMES", "/usr/share/vulkan/icd.d/intel_icd.x86_64.json", 1);
-    unsetenv("VK_LAYER_PATH");
-    unsetenv("VK_ADD_LAYER_PATH");
+    // /* Pin Intel Vulkan (avoid NVIDIA) if you need it */
+    // setenv("VK_DRIVER_FILES", "/usr/share/vulkan/icd.d/intel_icd.x86_64.json", 1);
+    // setenv("VK_ICD_FILENAMES", "/usr/share/vulkan/icd.d/intel_icd.x86_64.json", 1);
+    // unsetenv("VK_LAYER_PATH");
+    // unsetenv("VK_ADD_LAYER_PATH");
 
     TINIT();
     dpy = wl_display_connect(NULL);
