@@ -1,35 +1,30 @@
+#include "../header/header.inc"
+// sudo apt install libwayland-dev (for getting the wayland-client header and lib)
+#include <wayland-client.h>
+// sudo apt install wayland-protocols wayland-scanner (for generating the xdg-shell files)
+// sudo wayland-scanner client-header /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml /usr/include/xdg-shell-client-protocol.h
+// sudo wayland-scanner private-code /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml /usr/include/xdg-shell-client-protocol.c
+#include <xdg-shell-client-protocol.h>
+#include <xdg-shell-client-protocol.c>
+
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
-#include <stdint.h>
+#include <sys/mman.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#include <sys/stat.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <sys/syscall.h>
-#include <unistd.h>
-#include <wayland-client.h>
+#include <limits.h>
 
-#include "xdg-shell-client-protocol.h"
-#include "xdg-shell-protocol.c"
+// todo: this is interlinked badly
+#include "../fatzke/data/static/icon.h"
 
-// todo: separate header for all common c stuff
-typedef uint8_t   u8;
-typedef uint16_t  u16;
-typedef uint32_t  u32;
-typedef uint64_t  u64;
-typedef int8_t    i8;
-typedef int16_t   i16;
-typedef int32_t   i32;
-typedef int64_t   i64;
-typedef float     f32;
-typedef double    f64;
-typedef intptr_t  isize;
-typedef uintptr_t usize;
-
-typedef void (*keyboard_cb)(void *ud, uint32_t key, uint32_t state);
-typedef void (*mouse_cb)(void *ud, int32_t x, int32_t y, uint32_t b);
+typedef void (*keyboard_cb)(void *ud, u32 key, u32 state);
+typedef void (*mouse_cb)(void *ud, i32 x, i32 y, u32 b);
 typedef void (*resize_cb)(void *ud, u32 w, u32 h);
 
 struct ctx {
@@ -81,33 +76,33 @@ static void alloc_buffer(struct ctx *st, int w, int h) {
 }
 
 // INPUT CALLBACKS
-static void kb_key(void *data, struct wl_keyboard *kbd, uint32_t serial, uint32_t time, uint32_t key, uint32_t state) {
+static void kb_key(void *data, struct wl_keyboard *kbd, u32 serial, u32 time, u32 key, u32 state) {
     struct ctx *c = data;
     if (c->keyboard_cb) c->keyboard_cb(c->callback_userdata, key, state);
 }
 
-static void ptr_motion(void *data, struct wl_pointer *ptr, uint32_t time, wl_fixed_t sx, wl_fixed_t sy) {
+static void ptr_motion(void *data, struct wl_pointer *ptr, u32 time, wl_fixed_t sx, wl_fixed_t sy) {
     struct ctx *c = data;
     c->last_x = wl_fixed_to_double(sx);
     c->last_y = wl_fixed_to_double(sy);
 }
 
-static void ptr_enter(void *data, struct wl_pointer *ptr, uint32_t serial, struct wl_surface *surface, wl_fixed_t sx, wl_fixed_t sy) {
+static void ptr_enter(void *data, struct wl_pointer *ptr, u32 serial, struct wl_surface *surface, wl_fixed_t sx, wl_fixed_t sy) {
     struct ctx *c = data;
     c->last_x = wl_fixed_to_double(sx);
     c->last_y = wl_fixed_to_double(sy);
 }
 
-static void ptr_button(void *data, struct wl_pointer *ptr, uint32_t serial, uint32_t time, uint32_t button, uint32_t state) {
+static void ptr_button(void *data, struct wl_pointer *ptr, u32 serial, u32 time, u32 button, u32 state) {
     struct ctx *c = data;
     if (c->mouse_cb) c->mouse_cb(c->callback_userdata, c->last_x, c->last_y, state);
 }
 
-static void kb_keymap(void *d, struct wl_keyboard *k, uint32_t format, int32_t fd, uint32_t size) {}
-static void kb_enter(void *d, struct wl_keyboard *k, uint32_t serial, struct wl_surface *s, struct wl_array *keys) {}
-static void kb_leave(void *d, struct wl_keyboard *k, uint32_t serial, struct wl_surface *s) {}
-static void kb_modifiers(void *d, struct wl_keyboard *k, uint32_t serial, uint32_t dep, uint32_t lat, uint32_t lock, uint32_t grp) {}
-static void kb_repeat_info(void *d, struct wl_keyboard *k, int32_t rate, int32_t delay) {}
+static void kb_keymap(void *d, struct wl_keyboard *k, u32 format, i32 fd, u32 size) {}
+static void kb_enter(void *d, struct wl_keyboard *k, u32 serial, struct wl_surface *s, struct wl_array *keys) {}
+static void kb_leave(void *d, struct wl_keyboard *k, u32 serial, struct wl_surface *s) {}
+static void kb_modifiers(void *d, struct wl_keyboard *k, u32 serial, u32 dep, u32 lat, u32 lock, u32 grp) {}
+static void kb_repeat_info(void *d, struct wl_keyboard *k, i32 rate, i32 delay) {}
 
 static const struct wl_keyboard_listener kbd_lis = {
     .keymap       = kb_keymap,
@@ -118,8 +113,8 @@ static const struct wl_keyboard_listener kbd_lis = {
     .repeat_info  = kb_repeat_info
 };
 
-static void ptr_leave(void *d, struct wl_pointer *p, uint32_t serial, struct wl_surface *s) {}
-static void ptr_axis(void *d, struct wl_pointer *p, uint32_t time, uint32_t axis, wl_fixed_t value) {}
+static void ptr_leave(void *d, struct wl_pointer *p, u32 serial, struct wl_surface *s) {}
+static void ptr_axis(void *d, struct wl_pointer *p, u32 time, u32 axis, wl_fixed_t value) {}
 static void ptr_frame(void *d, struct wl_pointer *p) {}
 
 static const struct wl_pointer_listener ptr_lis = {
@@ -136,10 +131,10 @@ struct output_info {
     int height;
 };
 
-static void output_geometry(void *data, struct wl_output *output, int32_t x, int32_t y, int32_t phys_width, int32_t phys_height, int32_t subpixel, const char *make, const char *model, int32_t transform) {}
+static void output_geometry(void *data, struct wl_output *output, i32 x, i32 y, i32 phys_width, i32 phys_height, i32 subpixel, const char *make, const char *model, i32 transform) {}
 static void output_done(void *data, struct wl_output *output) {}
-static void output_scale(void *data, struct wl_output *output, int32_t factor) {}
-static void output_mode(void *data, struct wl_output *output, uint32_t flags, int32_t width, int32_t height, int32_t refresh) {}
+static void output_scale(void *data, struct wl_output *output, i32 factor) {}
+static void output_mode(void *data, struct wl_output *output, u32 flags, i32 width, i32 height, i32 refresh) {}
 
 static const struct wl_output_listener output_listener = {
     .geometry = output_geometry,
@@ -148,7 +143,7 @@ static const struct wl_output_listener output_listener = {
     .scale    = output_scale
 };
 
-static void reg_add(void *data, struct wl_registry *reg, uint32_t id, const char *iface, uint32_t ver) {
+static void reg_add(void *data, struct wl_registry *reg, u32 id, const char *iface, u32 ver) {
     struct ctx *st = data;
     if (!strcmp(iface, "wl_compositor"))
         st->comp = wl_registry_bind(reg, id, &wl_compositor_interface, 4);
@@ -171,14 +166,14 @@ static const struct wl_registry_listener reg_lis = {
     reg_add, NULL
 };
 
-static void ping_cb(void *d, struct xdg_wm_base *wm, uint32_t serial) {
+static void ping_cb(void *d, struct xdg_wm_base *wm, u32 serial) {
     xdg_wm_base_pong(wm, serial);
 }
 static const struct xdg_wm_base_listener wm_lis = {
     ping_cb
 };
 
-static void surf_cfg(void *d, struct xdg_surface *s, uint32_t serial) {
+static void surf_cfg(void *d, struct xdg_surface *s, u32 serial) {
     struct ctx *st = d;
     xdg_surface_ack_configure(s, serial);
     st->configured = 1;
@@ -187,7 +182,7 @@ static const struct xdg_surface_listener surf_lis = {
     surf_cfg
 };
 
-void top_cfg(void *d, struct xdg_toplevel *t, int32_t w, int32_t h, struct wl_array *st_) {
+void top_cfg(void *d, struct xdg_toplevel *t, i32 w, i32 h, struct wl_array *st_) {
     struct ctx *st = d;
 
     int resized = (w != st->win_w) || (h != st->win_h);
@@ -214,13 +209,13 @@ u32 *get_buffer(struct ctx *c) {
     return c->pixels;
 }
 
-static void frame_done(void *data, struct wl_callback *cb, uint32_t time);
+static void frame_done(void *data, struct wl_callback *cb, u32 time);
 
 static const struct wl_callback_listener frame_listener = {
     .done = frame_done,
 };
 
-static void frame_done(void *data, struct wl_callback *cb, uint32_t time) {
+static void frame_done(void *data, struct wl_callback *cb, u32 time) {
     wl_callback_destroy(cb);
     struct ctx *c = data;
     c->vsync_ready = 1;
@@ -269,21 +264,54 @@ int window_poll(struct ctx *c) {
     return wl_display_dispatch_pending(c->dpy) >= 0;
 }
 
-struct ctx *create_window(const char *title, keyboard_cb kcb, mouse_cb mcb, resize_cb rcb, void *ud) {
-    struct ctx *st = calloc(1, sizeof *st);
-    
-    st->keyboard_cb = kcb;
-    st->mouse_cb = mcb;
-    st->resize_window_cb = rcb;
-    st->callback_userdata = ud;
+static int mkpath(const char *p) { char t[PATH_MAX]; size_t n=strlen(p); if (n>=sizeof t) return -1; strcpy(t,p); for (char *q=t+1; *q; q++) if (*q=='/') { *q=0; if (mkdir(t,0755)&&errno!=EEXIST) return -1; *q='/'; } return mkdir(t,0755)&&errno!=EEXIST?-1:0; }
+static int writen(const char *p, const void *buf, size_t len) { FILE *f=fopen(p,"wb"); if(!f) return -1; size_t w=fwrite(buf,1,len,f); fclose(f); return w==len?0:-1; }
 
-    if (!(st->dpy = wl_display_connect(NULL))) { perror("connect"); goto fail; }
+static void install_desktop_and_icon_once(const char *executable_name) {
+    const char *home = getenv("HOME"); if (!home || !*home) return;
+    char icon_dir[PATH_MAX]; snprintf(icon_dir, sizeof icon_dir, "%s/.local/share/icons/hicolor/256x256/apps", home);
+    char icon_path[PATH_MAX]; snprintf(icon_path, sizeof icon_path, "%s/%s.png", icon_dir, executable_name);
+    char desk_dir[PATH_MAX]; snprintf(desk_dir, sizeof desk_dir, "%s/.local/share/applications", home);
+    char desk_path[PATH_MAX]; snprintf(desk_path, sizeof desk_path, "%s/%s.desktop", desk_dir, executable_name);
+
+    if (access(icon_path, F_OK) != 0) { if (!mkpath(icon_dir)) writen(icon_path, icon_png, icon_png_len); }
+    if (access(desk_path, F_OK) != 0) {
+        if (!mkpath(desk_dir)) {
+            char buf[1024];
+            int n = snprintf(buf, sizeof buf,
+                "[Desktop Entry]\n"
+                "Type=Application\n"
+                "Version=1.5\n"
+                "Name=%s\n"
+                "Exec=%s\n"
+                "Icon=%s\n"
+                "Terminal=false\n"
+                "Categories=Utility;\n"
+                "StartupWMClass=%s\n",
+                executable_name, executable_name, icon_path, executable_name);
+            if (n>0 && n<(int)sizeof buf) { writen(desk_path,buf,strlen(buf)); chmod(desk_path,0755); }
+        }
+    }
+}
+
+struct ctx *create_window(keyboard_cb kcb, mouse_cb mcb, resize_cb rcb, void *ud) {
+    // Stupid hack needed on wayland: put exe icon in executable, and then copy to the right dir to have an icon
+    char exe_path[PATH_MAX]; ssize_t path_len = readlink("/proc/self/exe", exe_path, sizeof exe_path - 1); if (path_len <= 0) _exit(1); exe_path[path_len]=0;
+    const char *exe_name = strrchr(exe_path, '/');
+    exe_name = exe_name ? exe_name + 1 : exe_path;
+    int running_from_tcc = strcmp(exe_name, "tcc") == 0;
+    if (!running_from_tcc) // install the .desktop and .png files to have an icon (if not already done previously)
+        install_desktop_and_icon_once(exe_name);
+
+    struct ctx *st = calloc(1, sizeof *st);
+    st->keyboard_cb = kcb; st->mouse_cb = mcb; st->resize_window_cb = rcb; st->callback_userdata = ud;
+
+    if (!((st->dpy = wl_display_connect(NULL)))) { perror("connect"); goto fail; }
 
     struct wl_registry *r = wl_display_get_registry(st->dpy);
     wl_registry_add_listener(r, &reg_lis, st);
 
-    while (!st->comp || !st->shm || !st->wm)
-        wl_display_dispatch(st->dpy);
+    while (!st->comp || !st->shm || !st->wm) wl_display_dispatch(st->dpy);
     xdg_wm_base_add_listener(st->wm, &wm_lis, NULL);
 
     st->surf = wl_compositor_create_surface(st->comp);
@@ -291,10 +319,12 @@ struct ctx *create_window(const char *title, keyboard_cb kcb, mouse_cb mcb, resi
     st->top  = xdg_surface_get_toplevel(st->xs);
     xdg_surface_add_listener(st->xs,  &surf_lis, st);
     xdg_toplevel_add_listener(st->top, &top_lis, st);
-    if (title) xdg_toplevel_set_title(st->top, title);
 
-    xdg_toplevel_set_fullscreen(st->top, NULL); // set fullscreen
-    wl_surface_commit(st->surf); // 1st commit: no buffer
+    xdg_toplevel_set_title(st->top, exe_name);
+    xdg_toplevel_set_app_id(st->top, exe_name);
+
+    xdg_toplevel_set_fullscreen(st->top, NULL);
+    wl_surface_commit(st->surf);
     wl_display_flush(st->dpy);
 
     run_until(st, &st->configured);
@@ -303,15 +333,14 @@ struct ctx *create_window(const char *title, keyboard_cb kcb, mouse_cb mcb, resi
     wl_surface_attach(st->surf, st->buf, 0, 0);
     wl_surface_damage_buffer(st->surf, 0, 0, st->win_w, st->win_h);
     wl_surface_commit(st->surf);
-    
+
     struct wl_callback *cb = wl_surface_frame(st->surf);
     wl_callback_add_listener(cb, &frame_listener, st);
     st->vsync_ready = 1;
 
     wl_display_flush(st->dpy);
-
     return st;
-fail:
-    free(st);
+    fail:
+        free(st);
     return NULL;
 }

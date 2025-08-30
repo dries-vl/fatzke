@@ -1,4 +1,8 @@
 .vscode
-main
-a.out
-fatzke
+.idea
+*.out
+*.exe
+config/Cargo.lock
+target
+cmake-*
+NUL
