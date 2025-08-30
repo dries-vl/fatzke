@@ -322,8 +322,8 @@ struct ctx *create_window(keyboard_cb kcb, mouse_cb mcb, resize_cb rcb, void *ud
 
     xdg_toplevel_set_title(st->top, exe_name);
     xdg_toplevel_set_app_id(st->top, exe_name);
-
     xdg_toplevel_set_fullscreen(st->top, NULL);
+
     wl_surface_commit(st->surf);
     wl_display_flush(st->dpy);
 

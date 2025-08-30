@@ -1,8 +1,12 @@
 #include "../header/header.inc"
 
+// --- 80 percent of bandwidth is the upscale (if rendering remains simple)
 // READ 0.5 byte 1k texture + WRITE 0.5 byte 1k buffer + READ 0.5 byte 1k buffer + WRITE 4 byte 2k upscale
 // READ 1 byte 1k texture + WRITE 1 byte 1k buffer + READ 1 byte 1k buffer + WRITE 4 byte 2k upscale
 // READ 4 byte 2k texture + WRITE 4 byte 2k buffer
+// --- possible solution: use GL based, very simple, "high resolution" backend that takes the result and upscales + decodes it simply
+// --- but is optional for if you have a high resolution screen, no dpi etc.
+// --- BUT we still need to decode anyway when not doing it (?)
 
 // 16 colors (4bit, two indices fit in one byte)
 inline unsigned color_to_index_rgb121(unsigned argb)
