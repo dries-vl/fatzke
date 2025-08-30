@@ -21,4 +21,5 @@ function(add_bin name src libs_win libs_unix)
 endfunction()
 
 # add each binary project in one line
-add_bin(fatzke ../fatzke/main.c user32;gdi32 wayland-client)
+add_bin(fatzke ../fatzke/main.c gdi32,user32 wayland-client)
+add_bin(fz ../fz/main.c user32,gdi32 wayland-client;wgpu_native)

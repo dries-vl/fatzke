@@ -83,7 +83,7 @@ static void thread_sleep_ms(unsigned ms) { struct timespec ts = { ms/1000, (long
 
 /* Prefer native pthread barrier if available (Linux glibc, musl: yes). */
 #ifdef PTHREAD_BARRIER_SERIAL_THREAD
-typedef barrier barrier;
+typedef pthread_barrier_t barrier;
 static int barrier_init(barrier *b, unsigned n) { return (!b || n==0) ? -1 : pthread_barrier_init(b, NULL, n); }
 static int barrier_wait(barrier *b) { int r = pthread_barrier_wait(b); return (r == PTHREAD_BARRIER_SERIAL_THREAD) ? 1 : 0; }
 static int barrier_destroy(barrier *b) { return pthread_barrier_destroy(b); }
