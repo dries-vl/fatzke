@@ -209,19 +209,87 @@ static VkShaderModule sm_from_file(const char* path)
     return m;
 }
 
+#include <dirent.h>
+#include <dlfcn.h>
+/* returns malloc'ed string with absolute/soname path or NULL */
+static char* read_file_all(const char* p, size_t* n){ FILE* f=fopen(p,"rb"); if(!f)return NULL; fseek(f,0,SEEK_END); long m=ftell(f); fseek(f,0,SEEK_SET); char* b=(char*)malloc((size_t)m+1); if(!b){fclose(f);return NULL;} if(fread(b,1,(size_t)m,f)!=(size_t)m){fclose(f);free(b);return NULL;} fclose(f); b[m]=0; if(n)*n=(size_t)m; return b; }
+static int has_suffix(const char* s,const char* suf){ size_t n=strlen(s), m=strlen(suf); return n>=m && 0==strcmp(s+n-m,suf); }
+static int contains_icd_intel(const char* s){ return strstr(s,"\"ICD\"") && (strstr(s,"intel")||strstr(s,"INTEL")||strstr(s,"anv")); }
+static char* json_extract_library_path(const char* json){
+    const char* k=strstr(json,"\"library_path\"");
+    if(!k) return NULL;
+    k=strchr(k,':'); if(!k) return NULL; k++;
+    while(*k && (*k==' '||*k=='\t')) k++;
+    if(*k!='\"') return NULL; k++;
+    const char* e=strchr(k,'\"'); if(!e) return NULL;
+    size_t len=(size_t)(e-k);
+    char* out=(char*)malloc(len+1);
+    if(!out) return NULL;
+    memcpy(out,k,len); out[len]=0; return out;
+}
+/* try soname first (many distros link it) then scan ICD dirs */
+static char* find_intel_icd_lib(void){
+    /* 1) try common soname without path (fast path) */
+    void* h=dlopen("libvulkan_intel.so", RTLD_NOW|RTLD_LOCAL);
+    if(h){ dlclose(h); char* s=(char*)malloc(19); strcpy(s,"libvulkan_intel.so"); return s; }
+
+    /* 2) scan standard ICD directories and parse JSON */
+    const char* dirs[]={"/usr/share/vulkan/icd.d","/etc/vulkan/icd.d","/usr/local/share/vulkan/icd.d"};
+    for(size_t di=0; di<sizeof(dirs)/sizeof(dirs[0]); ++di){
+        DIR* d=opendir(dirs[di]); if(!d) continue;
+        struct dirent* ent;
+        while((ent=readdir(d))){
+            if(ent->d_name[0]=='.') continue;
+            if(!has_suffix(ent->d_name,".json")) continue;
+            if(!(strstr(ent->d_name,"intel")||strstr(ent->d_name,"anv"))) continue;
+            char path[1024]; snprintf(path,sizeof(path),"%s/%s",dirs[di],ent->d_name);
+            size_t n=0; char* txt=read_file_all(path,&n); if(!txt) continue;
+            if(!contains_icd_intel(txt)){ free(txt); continue; }
+            char* lib=json_extract_library_path(txt); free(txt);
+            if(!lib) continue;
+            /* verify it actually loads */
+            void* h2=dlopen(lib, RTLD_NOW|RTLD_LOCAL);
+            if(h2){ dlclose(h2); return lib; }
+            free(lib);
+        }
+        closedir(d);
+    }
+    return NULL;
+}
+PFN_vkGetInstanceProcAddrLUNARG load_icd_gpa(void *h){
+    void *p = dlsym(h, "vkGetInstanceProcAddr");  // rarely exported by ICDs
+    if (!p) p = dlsym(h, "vk_icdGetInstanceProcAddr"); // commonly exported
+    return (PFN_vkGetInstanceProcAddrLUNARG)p;
+}
 /* --- Vulkan core --- */
 static void vk_make_instance(void)
 {
-    VkApplicationInfo ai = {
-        .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "tri2", .applicationVersion = 1,
-        .pEngineName = "none", .engineVersion = 0, .apiVersion = VK_API_VERSION_1_1
+    /* before vkCreateInstance: */
+    char* intel_icd = find_intel_icd_lib();
+    if(!intel_icd){ fprintf(stderr,"Intel ICD not found\n"); exit(1); }
+    void* h = dlopen(intel_icd, RTLD_NOW|RTLD_LOCAL);
+    if(!h){ fprintf(stderr,"dlopen failed for %s\n", intel_icd); exit(1); }
+    free(intel_icd);
+
+    PFN_vkGetInstanceProcAddrLUNARG icd_gpa = load_icd_gpa(h);
+    if(!icd_gpa){ fprintf(stderr,"Intel ICD lacks GetInstanceProcAddr symbol\n"); exit(1); }
+
+    VkDirectDriverLoadingInfoLUNARG dinfo = {
+        .sType = VK_STRUCTURE_TYPE_DIRECT_DRIVER_LOADING_INFO_LUNARG,
+        .pfnGetInstanceProcAddr = icd_gpa
     };
-    const char* exts[] = {"VK_KHR_surface", "VK_KHR_wayland_surface"};
-    VkInstanceCreateInfo ci = {
-        .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &ai, .enabledExtensionCount = 2,
-        .ppEnabledExtensionNames = exts
+    VkDirectDriverLoadingListLUNARG dlist = {
+        .sType = VK_STRUCTURE_TYPE_DIRECT_DRIVER_LOADING_LIST_LUNARG,
+        .mode = VK_DIRECT_DRIVER_LOADING_MODE_EXCLUSIVE_LUNARG,
+        .driverCount = 1, .pDrivers = &dinfo
     };
-    VKC(vkCreateInstance(&ci,NULL,&inst));
+    VkApplicationInfo ai = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "tri2", .applicationVersion = 1, .pEngineName = "none", .apiVersion = VK_API_VERSION_1_1 };
+    const char *exts[] = { "VK_KHR_surface", "VK_KHR_wayland_surface", "VK_LUNARG_direct_driver_loading" };
+    VkInstanceCreateInfo ci = { .sType=VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pNext=&dlist,
+        .pApplicationInfo=&ai, .enabledExtensionCount=3, .ppEnabledExtensionNames=exts };
+    VKC(vkCreateInstance(&ci, NULL, &inst));
+
+
     TSTAMP("vkCreateInstance");
 }
 
@@ -809,6 +877,7 @@ static VkResult present_frame(void)
     r = vkQueuePresentKHR(q, &pi);
     return r;
 }
+
 
 int main(void)
 {
