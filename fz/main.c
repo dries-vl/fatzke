@@ -98,13 +98,15 @@ static void xsurf_conf(void* d, struct xdg_surface* s, u32 serial)
 
 static const struct xdg_surface_listener xsurf_l = {.configure = xsurf_conf};
 
-static void reg_add(void* d, struct wl_registry* r, u32 name, const char* iface, u32 ver)
-{
-    if (!strcmp(iface, "wl_compositor")) comp = wl_registry_bind(r, name, &wl_compositor_interface, 4);
-    else if (!strcmp(iface, "xdg_wm_base"))
-    {
-        xdg = wl_registry_bind(r, name, &xdg_wm_base_interface, 6);
-        xdg_wm_base_add_listener(xdg, &xdg_wm,NULL);
+static void reg_add(void* d, struct wl_registry* r, uint32_t name, const char* iface, uint32_t ver){
+    (void)d;
+    if (!strcmp(iface, wl_compositor_interface.name)) {
+        uint32_t v = ver < 4 ? ver : 4; // we only need <= v4 features; v1 is fine too
+        comp = wl_registry_bind(r, name, &wl_compositor_interface, v);
+    } else if (!strcmp(iface, xdg_wm_base_interface.name)) {
+        uint32_t v = ver < 6 ? ver : 6; // clamp to server's version (yours is 1)
+        xdg = wl_registry_bind(r, name, &xdg_wm_base_interface, v);
+        xdg_wm_base_add_listener(xdg, &xdg_wm, NULL); // only .ping used → v1 OK
     }
 }
 
