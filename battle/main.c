@@ -5,6 +5,6 @@
 #endif
 #include "battle.inc"
 
-void main() {
+void bmain() {
     simulate_battle();
 }

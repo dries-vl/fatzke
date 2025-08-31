@@ -7,16 +7,22 @@
 #include <stdbool.h>
 #include <stdio.h>
 
-/* Pull in platform-agnostic Vulkan implementation (creates Win32 surface via helper) */
-#include "vulkan.inc"
-
 typedef uint32_t u32; typedef int32_t i32; typedef unsigned long long u64;
 
 /* timing: QPC */
 static LARGE_INTEGER g_freq; static inline u64 now_ns(void){ LARGE_INTEGER t; QueryPerformanceCounter(&t); return (u64)((t.QuadPart*1000000000ull)/g_freq.QuadPart); }
 static u64 T0;
 #define TINIT() do{ QueryPerformanceFrequency(&g_freq); T0=now_ns(); }while(0)
-#define TSTAMP(msg) do{ u64 _t=now_ns(); wchar_t _buf[256]; swprintf(_buf,256,L"[+%7.3f ms] %S\n",((_t-T0)/1e6),(msg)); OutputDebugStringW(_buf); }while(0)
+#define TSTAMP(msg) \
+do { \
+    u64 _t = now_ns(); \
+    char buf[256]; \
+    snprintf(buf, sizeof(buf), "[+%7.3f ms] %s\n", ((_t - T0) / 1e6), (msg)); \
+    OutputDebugStringA(buf); \
+} while (0)
+
+/* Pull in platform-agnostic Vulkan implementation (creates Win32 surface via helper) */
+#include "vulkan.inc"
 
 /* Vulkan entry points (from vulkan.c) */
 void vk_init_instance(void); void vk_choose_phys_and_queue(void); void vk_make_device(void);
