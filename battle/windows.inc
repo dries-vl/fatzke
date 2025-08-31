@@ -34,6 +34,8 @@ static i32 win_w=640, win_h=480; static bool running=true, need_swapchain=false;
 
 static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam){
     switch(msg){
+        case WM_KEYDOWN: if(wParam == VK_ESCAPE) running = false; return 0;
+        break;
         case WM_SIZE:{
             win_w = (i32)LOWORD(lParam); win_h = (i32)HIWORD(lParam);
             if(win_w>0 && win_h>0) need_swapchain = true;

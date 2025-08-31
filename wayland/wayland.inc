@@ -32,7 +32,6 @@ struct ctx {
     struct wl_compositor *comp;
     struct wl_shm *shm;
     struct xdg_wm_base *wm;
-
     struct wl_surface *surf;
     struct xdg_surface *xs;
     struct xdg_toplevel *top;
@@ -236,7 +235,7 @@ void commit(struct ctx *c)
     wl_display_flush(c->dpy);
 }
 
-int poll_events(struct ctx *c) {
+int pf_poll_events(struct ctx *c) {
     // blocks until we receive an event
     return wl_display_dispatch(c->dpy) >= 0; // returns -1 if connection to compositor dead
 }
@@ -294,7 +293,7 @@ static void install_desktop_and_icon_once(const char *executable_name) {
     }
 }
 
-struct ctx *create_window(keyboard_cb kcb, mouse_cb mcb, resize_cb rcb, void *ud) {
+struct ctx *pf_create_window(keyboard_cb kcb, mouse_cb mcb, resize_cb rcb, void *ud) {
     // Stupid hack needed on wayland: put exe icon in executable, and then copy to the right dir to have an icon
     char exe_path[PATH_MAX]; ssize_t path_len = readlink("/proc/self/exe", exe_path, sizeof exe_path - 1); if (path_len <= 0) _exit(1); exe_path[path_len]=0;
     const char *exe_name = strrchr(exe_path, '/');
@@ -327,7 +326,11 @@ struct ctx *create_window(keyboard_cb kcb, mouse_cb mcb, resize_cb rcb, void *ud
     wl_surface_commit(st->surf);
     wl_display_flush(st->dpy);
 
-    run_until(st, &st->configured);
+    int *flag = &st->configured;
+    while (!*flag) {
+        wl_display_flush(st->dpy);
+        if (wl_display_dispatch(st->dpy) < 0) exit(1);
+    }
     alloc_buffer(st, st->win_w, st->win_h);
 
     wl_surface_attach(st->surf, st->buf, 0, 0);

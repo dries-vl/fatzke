@@ -88,7 +88,7 @@ static int contains_icd_intel(const char* s){ return strstr(s,"\"ICD\"") && (str
 static char* json_extract_library_path(const char* json){ const char* k=strstr(json,"\"library_path\""); if(!k) return NULL; k=strchr(k,':'); if(!k) return NULL; k++; while(*k && (*k==' '||*k=='\t')) k++; if(*k!='\"') return NULL; k++; const char* e=strchr(k,'\"'); if(!e) return NULL; size_t len=(size_t)(e-k); char* out=(char*)malloc(len+1); if(!out) return NULL; memcpy(out,k,len); out[len]=0; return out; }
 static char* find_intel_icd_lib(void){
     void* h=dlopen("libvulkan_intel.so", RTLD_NOW|RTLD_LOCAL);
-    if(h){ dlclose(h); char* s=(char*)malloc(19); strcpy(s,"libvulkan_intel.so"); return s; }
+    if(h){ dlclose(h); return "libvulkan_intel.so"; }
     const char* dirs[]={"/usr/share/vulkan/icd.d","/etc/vulkan/icd.d","/usr/local/share/vulkan/icd.d"};
     for(size_t di=0; di<sizeof(dirs)/sizeof(dirs[0]); ++di){
         DIR* d=opendir(dirs[di]); if(!d) continue; struct dirent* ent;
@@ -114,7 +114,6 @@ static PFN_vkGetInstanceProcAddrLUNARG load_icd_gpa(void *h){ void *p=dlsym(h,"v
 void vk_init_instance(void){
     char* intel_icd=find_intel_icd_lib(); if(!intel_icd){ fprintf(stderr,"Intel ICD not found\n"); exit(1); }
     void* h=dlopen(intel_icd,RTLD_NOW|RTLD_LOCAL); if(!h){ fprintf(stderr,"dlopen failed for %s\n",intel_icd); exit(1); }
-    free(intel_icd);
     PFN_vkGetInstanceProcAddrLUNARG icd_gpa=load_icd_gpa(h); if(!icd_gpa){ fprintf(stderr,"Intel ICD lacks GetInstanceProcAddr symbol\n"); exit(1); }
     VkDirectDriverLoadingInfoLUNARG dinfo={.sType=VK_STRUCTURE_TYPE_DIRECT_DRIVER_LOADING_INFO_LUNARG,.pfnGetInstanceProcAddr=icd_gpa};
     VkDirectDriverLoadingListLUNARG dlist={.sType=VK_STRUCTURE_TYPE_DIRECT_DRIVER_LOADING_LIST_LUNARG,.mode=VK_DIRECT_DRIVER_LOADING_MODE_EXCLUSIVE_LUNARG,.driverCount=1,.pDrivers=&dinfo};

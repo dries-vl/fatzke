@@ -46,8 +46,14 @@ static inline int nanosleep(const struct timespec *req, struct timespec *rem) {
 #endif
 #else
 #define time_us() ({ struct timespec ts; clock_gettime(1, &ts); (long)(ts.tv_sec * 1000000L + ts.tv_nsec / 1000L); })
+#define time_ns() ({ struct timespec ts; clock_gettime(1, &ts); (long)(ts.tv_sec * 1000000000L + ts.tv_nsec); })
 #endif
 #define elapsed_us(start) (time_us() - (start))
+
+static u64 T0;
+#define TINIT() do{T0=time_ns();}while(0)
+#define TSTAMP(msg) do{u64 _t=time_ns(); fprintf(stderr,"[+%7.3f ms] %s\n",(_t-T0)/1e6,(msg));}while(0)
+
 
 #pragma region CAMERA
 // todo: this needs to match the data in the tga files, but needs to be in scenario/save data (and also not global in code but passed via eg. a struct)
@@ -432,8 +438,82 @@ i32 pathing(u32 from_x, u32 from_y, u32 to_x, u32 to_y, u8 *path, u32 *pathlengt
     return 0; // no path found
 }
 
-static inline u32 mix_colors(u32 a, u32 b) {
-    return (((a ^ b) & 0xFEFEFEFEU) >> 1U) + (a & b);
+static const u32 PALETTE32[16] = {     /* 0xAARRGGBB; edit or include your palette.inc */
+    0xFF000000,0xFF222222,0xFF444444,0xFF666666,
+    0xFF888888,0xFFAAAAAA,0xFFCCCCCC,0xFFEEEEEE,
+    0xFFFF0000,0xFF00FF00,0xFF0000FF,0xFFFFFF00,
+    0xFFFF00FF,0xFF00FFFF,0xFFFF8800,0xFFFFFFFF
+};
+#define TRANSPARENT_IDX 0              /* for _masked blits; 0 == skip write */
+struct atlas_bin { u8 *file; size_t size; u32 *ofs; u32 num_tiles; };
+
+/* ---- row decoder: from tokens -> RGBA32; consumes exactly TILE_SIZE/2 bytes of payload ---- */
+inline const u8* decode_row_to_rgba(const u8 *t, u32 *dst, const u32 *pal){
+    int need = TILE_SIZE>>1; /* bytes to produce in this row */
+    int out = 0;
+    while(out<need){
+        u8 h=*t++; int len=(h&0x7F)+1;
+        if(!(h&0x80)){ /* RAW */
+            for(int i=0;i<len;i++){
+                u8 b=*t++; dst[0]=pal[b>>4]; dst[1]=pal[b&15]; dst+=2;
+            }
+        }else{          /* BYTE-RUN */
+            u8 b=*t++; u32 c0=pal[b>>4], c1=pal[b&15];
+            for(int i=0;i<len;i++){ dst[0]=c0; dst[1]=c1; dst+=2; }
+        }
+        out += len;
+    }
+    return t;
+}
+/* masked variant (treat TRANSPARENT_IDX as skip) */
+inline const u8* decode_row_to_rgba_masked(const u8 *t, u32 *dst, const u32 *pal){
+    int need=TILE_SIZE>>1; int out=0;
+    while(out<need){
+        u8 h=*t++; int len=(h&0x7F)+1;
+        if(!(h&0x80)){
+            for(int i=0;i<len;i++){
+                u8 b=*t++; u8 i0=b>>4, i1=b&15; if(i0!=TRANSPARENT_IDX) dst[0]=pal[i0]; if(i1!=TRANSPARENT_IDX) dst[1]=pal[i1]; dst+=2;
+            }
+        }else{
+            u8 b=*t++; u8 i0=b>>4, i1=b&15; u32 c0=pal[i0], c1=pal[i1];
+            if(i0==TRANSPARENT_IDX && i1==TRANSPARENT_IDX){ dst+=2*len; }
+            else if(i0==TRANSPARENT_IDX){ for(int i=0;i<len;i++){ /* keep dst[0] */ dst[1]=c1; dst+=2; } }
+            else if(i1==TRANSPARENT_IDX){ for(int i=0;i<len;i++){ dst[0]=c0; /* keep dst[1] */ dst+=2; } }
+            else { for(int i=0;i<len;i++){ dst[0]=c0; dst[1]=c1; dst+=2; } }
+        }
+        out+=len;
+    }
+    return t;
+}
+
+/* ---- draw one tile by tile-id (row-major index into offsets[]) ---- */
+inline void draw_tile_bin(struct camera cam, const struct atlas_bin *atlas, u32 tile_id){
+    const u8 *p = atlas->file + atlas->ofs[tile_id];
+    u32 start_y = 0, start_x = 0; /* caller sets actual on-screen coords */
+    /* decode TILE_SIZE rows to cam.buffer at (start_x,start_y). */
+    /* This function only decodes; wrap it to place at (start_x,start_y). */
+}
+
+/* Convenience wrappers matching your code flow */
+inline void blit_tile_bin(struct camera cam, const struct atlas_bin *atlas, u32 dst_x, u32 dst_y, u32 tile_id){
+    u32 *dst_row = cam.buffer + dst_y*cam.buffer_w + dst_x;
+    const u8 *p = atlas->file + atlas->ofs[tile_id];
+    for(u32 ry=0; ry<TILE_SIZE; ry++){
+        decode_row_to_rgba(p, dst_row, PALETTE32);
+        /* decode_row_to_rgba returns next pointer; but we inlined it returning const u8* */
+        /* we must capture its return: */
+        /* (Do it properly:) */
+        p = decode_row_to_rgba(p, dst_row, PALETTE32);
+        dst_row += cam.buffer_w;
+    }
+}
+inline void blit_tile_bin_masked(struct camera cam, const struct atlas_bin *atlas, u32 dst_x, u32 dst_y, u32 tile_id){
+    u32 *dst_row = cam.buffer + dst_y*cam.buffer_w + dst_x;
+    const u8 *p = atlas->file + atlas->ofs[tile_id];
+    for(u32 ry=0; ry<TILE_SIZE; ry++){
+        p = decode_row_to_rgba_masked(p, dst_row, PALETTE32);
+        dst_row += cam.buffer_w;
+    }
 }
 
 void blit(struct camera camera, struct tga atlas, u32 buffer_x, u32 buffer_y, u32 atlas_x, u32 atlas_y, u32 width, u32 height) {
@@ -1103,7 +1183,7 @@ void *script(void *arg) {
         }
         struct timespec ts = {0, 16 * 1000000};
         if (elapsed_us(us_scrpt) >= 1000) {
-            printf("%ld ms_scrpt\n", elapsed_us(us_scrpt));
+            //printf("%ld ms_scrpt\n", elapsed_us(us_scrpt));
         }
         nanosleep(&ts, NULL);
         scrpt_frame++;
@@ -1140,46 +1220,59 @@ static inline FILE* fopen_exedir(const char* path, const char* mode)
     snprintf(full, sizeof full, "%s\\%s", dir, path);
     return fopen(full, mode);
 }
-static inline struct tga tga_load(const char *path) {
-    FILE *f = fopen_exedir(path, "rb"); if (!f) { fprintf(stderr,"File not found: %s\n", path); exit(1); }
-    u8 h18[18]; if (fread(h18,1,18,f)!=18) { fprintf(stderr,"Bad TGA: %s\n", path); exit(1); }
-    if (h18[2]!=2 || h18[16]!=32 || (h18[17]&0x20)==0) { fprintf(stderr,"Unsupported TGA: %s\n", path); exit(1); }
-    u32 w = h18[12] | h18[13]<<8, h = h18[14] | h18[15]<<8;
-    size_t off = 18 + h18[0], bytes = (size_t)w*h*4;
-    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
-    if (off + bytes > (size_t)sz) { fprintf(stderr,"Short TGA: %s\n", path); exit(1); }
-    void *buf = malloc((size_t)sz); if (!buf) { fprintf(stderr,"OOM: %s\n", path); exit(1); }
-    if (fread(buf,1,(size_t)sz,f)!=(size_t)sz) { fprintf(stderr,"Read fail: %s\n", path); exit(1); }
-    fclose(f);
-    return (struct tga){ w, h, (u32*)((u8*)buf + off), buf, (size_t)sz };
-}
 static inline void tga_free(struct tga img) { free((void*)img.map); }
 #else
 #include <sys/stat.h>
 static inline int get_exe_dir(char *out, size_t n) { char buf[4096]; ssize_t k=readlink("/proc/self/exe",buf,sizeof buf-1); if (k<=0) return 0; buf[k]=0; for (char *p=buf+k; p!=buf; --p) if (p[-1]=='/'||p[-1]=='\\') { p[-1]=0; break; } if (!buf[0]) return 0; strncpy(out, buf, n); out[n-1]=0; return 1; }
 static inline int is_abs(const char *p) { return p && (p[0]=='/'||p[0]=='\\'); }
 static inline int open_exedir(const char *path, int flags) { int fd=open(path,flags); if (fd>=0||is_abs(path)) return fd; char dir[1024]; if(!get_exe_dir(dir,sizeof dir)) return -1; char full[2048]; snprintf(full,sizeof full,"%s/%s",dir,path); return open(full,flags); }
-static inline struct tga tga_load(const char *path) {
-    u32 fd = open_exedir(path, O_RDONLY | 02000000);
-    if ((int)fd < 0) { fprintf(stderr,"File not found: %s\n", path); exit(1); }
-    u8 h18[18]; assert(read(fd, h18, 18) == 18);
-    if (h18[2]!=2) { fprintf(stderr,"TGA type ≠ 2 for %s\n", path); exit(1); }
-    if (h18[16]!=32){ fprintf(stderr,"TGA bpp ≠ 32 (got %u) for %s\n",h18[16], path); exit(1); }
-    if ((h18[17]&0x20)==0){ fprintf(stderr,"TGA not top-left for %s\n", path); exit(1); }
-    u32 w = h18[12] | h18[13]<<8, h = h18[14] | h18[15]<<8;
-    size_t off = 18 + h18[0], bytes = (size_t)w*h*4;
-    struct stat st; fstat(fd,&st);
-    assert(off + bytes <= (size_t)st.st_size);
-    void *map = mmap(0, st.st_size, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
-    assert(map != MAP_FAILED);
-    close(fd);
-    return (struct tga){ w, h, (u32*)((u8*)map + off), map, st.st_size };
-}
-static inline void tga_free(struct tga img) { munmap((void*)img.map, img.map_len); }
 #endif
 
-#define MAX_BUFFER_WIDTH (1920)
-#define MAX_BUFFER_HEIGHT (1200)
+static void die2(char *m){ fprintf(stderr,"atlas: %s\n",m); _exit(1); }
+static struct atlas_bin atlas_bin_load(const char *path){
+    struct atlas_bin a = {0};
+#if defined(_WIN32)
+    FILE *f = fopen_exedir(path, "rb"); if(!f) die2("open .bin");
+    fseek(f,0,SEEK_END); long sz = ftell(f); fseek(f,0,SEEK_SET);
+    a.file = (u8*)malloc((size_t)sz); if(!a.file) die2("oom");
+    if(fread(a.file,1,(size_t)sz,f)!=(size_t)sz) die2("read");
+    fclose(f);
+#else
+    int fd = open_exedir(path, O_RDONLY|02000000); if(fd<0) die2("open .bin");
+    struct stat st; if(fstat(fd,&st)<0) die2("stat");
+    a.file = (u8*)mmap(0, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if(a.file==(u8*)MAP_FAILED) die2("mmap");
+    close(fd);
+    a.size = (size_t)st.st_size;
+#endif
+#if defined(_WIN32)
+    a.size = (size_t)sz;
+#endif
+    /* infer num_tiles: offsets are ascending u32 LE, all < file size */
+    u32 *v = (u32*)a.file; size_t cap = a.size/4; if(cap==0) die2("too small");
+    u32 prev = 0; u32 n = 0;
+    for(; n<cap; n++){
+        u32 off = v[n];
+        if(off <= prev) break;
+        if(off >= a.size) break;
+        prev = off;
+    }
+    if(n==0) die2("no offsets found");
+    a.num_tiles = n; a.ofs = v;
+    /* sanity: first payload should not overlap header */
+    if(a.ofs[0] < a.num_tiles*4) die2("bad header/payload overlap");
+    return a;
+}
+static void atlas_bin_free(struct atlas_bin a){
+#if defined(_WIN32)
+    free(a.file);
+#else
+    munmap(a.file, a.size);
+#endif
+}
+
+#define MAX_BUFFER_WIDTH (1920 / 2)
+#define MAX_BUFFER_HEIGHT (1200 / 2)
 
 void resize_window_callback(void *userdata, u32 new_w, u32 new_h) {
     struct camera *camera = (struct camera *)userdata;
@@ -1199,17 +1292,21 @@ void resize_window_callback(void *userdata, u32 new_w, u32 new_h) {
 }
 
 i32 main(void) {
+    TINIT();
     struct camera camera = {0, 0, 0, 0, NULL, 0, 0, 0, 0, 0, 0, 1};
-    struct ctx *window = create_window(key_input_callback, mouse_input_callback, resize_window_callback, &camera);
+    struct ctx *window = pf_create_window(key_input_callback, mouse_input_callback, resize_window_callback, &camera);
+    TSTAMP("create window");
     struct scaler scaler; create_scaler(&scaler, 8);
+    TSTAMP("create scaler");
 
     map = tga_load("data/map.tga");
     units = tga_load("data/units.tga");
     players = tga_load("data/players.tga");
-    
+
     struct tga map_atlas = tga_load("data/map_atlas.tga");
     struct tga units_atlas = tga_load("data/units_atlas.tga");
     struct tga directions_atlas = tga_load("data/directions_atlas.tga");
+    TSTAMP("load tgas");
 
     // Player unit movement structs
     struct unit_list player_units[PLAYER_COUNT] = {0};
@@ -1243,6 +1340,8 @@ i32 main(void) {
         }
     }
 
+    TSTAMP("setup state");
+
     u32 frame = 0;
     u64 start_us = time_us();
     
@@ -1257,7 +1356,7 @@ i32 main(void) {
                                 };
     
 
-    while(poll_events(window)) {// poll for events
+    while(pf_poll_events(window)) {// poll for events
         if (!window->vsync_ready) continue; // wait for next event until vsync is not done
 
         u64 frame_us = time_us();
@@ -1292,7 +1391,7 @@ i32 main(void) {
         commit(window); // tell compositor it can read from the buffer
         frame ++;
 
-        #if DEBUG_FPS
+        #if 1
         printf("total: %ld us\n", elapsed_us(frame_us));
         printf("get thread: %ld us\n", us_thread);
         printf("process inputs: %ld us\n", us_process_inputs);
