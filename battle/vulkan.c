@@ -1,128 +1,24 @@
-// cc main.c -lwayland-client -lvulkan -ldl -lpthread -O2 -o tri2 && ./tri2
-#define _GNU_SOURCE
-#include <stdint.h>
-#include <stdbool.h>
+#include "header.h"
+
+#if defined(_WIN32)
+#define VK_USE_PLATFORM_WIN32_KHR
+#else
+#define VK_USE_PLATFORM_WAYLAND_KHR
+#endif
+#include <vulkan/vulkan.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
-#include <unistd.h>
+#if !defined(_WIN32)
+#include <dirent.h>
+#include <dlfcn.h>
+#endif
 
-#include <wayland-client.h>
-#include <xdg-shell-client-protocol.h>
-#include <xdg-shell-client-protocol.c>
+/* --- error helpers --- */
+#define VKC(x) do{ VkResult _r=(x); if(_r!=VK_SUCCESS){ fprintf(stderr,"VK ERR %d @%s:%d\n",(int)_r,__FILE__,__LINE__); exit(1);} }while(0)
+#define VKC_ENUM(x) do{ VkResult _r=(x); if(_r!=VK_SUCCESS && _r!=VK_INCOMPLETE){ fprintf(stderr,"VK ENUM ERR %d @%s:%d\n",(int)_r,__FILE__,__LINE__); exit(1);} }while(0)
 
-#define VK_USE_PLATFORM_WAYLAND_KHR
-#include <vulkan/vulkan.h>
-
-typedef uint32_t u32;
-typedef int32_t i32;
-
-/* --- timing --- */
-typedef unsigned long long u64;
-
-static inline u64 now_ns(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (u64)ts.tv_sec * 1000000000ull + ts.tv_nsec;
-}
-
-static u64 T0;
-#define TINIT() do{T0=now_ns();}while(0)
-#define TSTAMP(msg) do{u64 _t=now_ns(); fprintf(stderr,"[+%7.3f ms] %s\n",(_t-T0)/1e6,(msg));}while(0)
-
-/* --- Wayland --- */
-static struct wl_display* dpy;
-static struct wl_compositor* comp;
-static struct xdg_wm_base* xdg;
-static struct wl_surface* surf;
-static struct xdg_surface* xsurf;
-static struct xdg_toplevel* xtop;
-static i32 win_w = 1280, win_h = 720;
-static bool running = true, need_swapchain = false;
-
-static void xdg_ping(void* d, struct xdg_wm_base* b, u32 s)
-{
-    (void)d;
-    xdg_wm_base_pong(b, s);
-}
-
-static const struct xdg_wm_base_listener xdg_wm = {.ping = xdg_ping};
-
-static void top_config(void* d, struct xdg_toplevel* t, i32 w, i32 h, struct wl_array* st)
-{
-    (void)d;
-    (void)t;
-    (void)st;
-    if (w > 0 && h > 0)
-    {
-        win_w = w;
-        win_h = h;
-    }
-}
-
-static void top_close(void* d, struct xdg_toplevel* t)
-{
-    (void)d;
-    (void)t;
-    running = false;
-}
-
-static void top_bounds(void* d, struct xdg_toplevel* t, i32 w, i32 h)
-{
-    (void)d;
-    (void)t;
-    (void)w;
-    (void)h;
-}
-
-static void top_caps(void* d, struct xdg_toplevel* t, struct wl_array* c)
-{
-    (void)d;
-    (void)t;
-    (void)c;
-}
-
-static const struct xdg_toplevel_listener top_l = {
-    .configure = top_config, .close = top_close, .configure_bounds = top_bounds, .wm_capabilities = top_caps
-};
-
-static void xsurf_conf(void* d, struct xdg_surface* s, u32 serial)
-{
-    (void)d;
-    xdg_surface_ack_configure(s, serial);
-    need_swapchain = true;
-    TSTAMP("xdg_surface configure");
-}
-
-static const struct xdg_surface_listener xsurf_l = {.configure = xsurf_conf};
-
-static void reg_add(void* d, struct wl_registry* r, uint32_t name, const char* iface, uint32_t ver){
-    (void)d;
-    if (!strcmp(iface, wl_compositor_interface.name)) {
-        uint32_t v = ver < 4 ? ver : 4; // we only need <= v4 features; v1 is fine too
-        comp = wl_registry_bind(r, name, &wl_compositor_interface, v);
-    } else if (!strcmp(iface, xdg_wm_base_interface.name)) {
-        uint32_t v = ver < 6 ? ver : 6; // clamp to server's version (yours is 1)
-        xdg = wl_registry_bind(r, name, &xdg_wm_base_interface, v);
-        xdg_wm_base_add_listener(xdg, &xdg_wm, NULL); // only .ping used → v1 OK
-    }
-}
-
-static void reg_rem(void* d, struct wl_registry* r, u32 name)
-{
-    (void)d;
-    (void)r;
-    (void)name;
-}
-
-static const struct wl_registry_listener reg_l = {.global = reg_add, .global_remove = reg_rem};
-
-/* --- Vulkan helpers --- */
-#define VKC(x) do{ VkResult _r=(x); if(_r!=VK_SUCCESS){ fprintf(stderr,"VK ERR %d @%s:%d\n",_r,__FILE__,__LINE__); exit(1);} }while(0)
-#define VKC_ENUM(x) do{ VkResult _r=(x); if(_r!=VK_SUCCESS && _r!=VK_INCOMPLETE){ fprintf(stderr,"VK ENUM ERR %d @%s:%d\n",_r,__FILE__,__LINE__); exit(1);} }while(0)
-
+/* --- Vulkan state --- */
 static VkInstance inst;
 static VkSurfaceKHR vsurf;
 static VkPhysicalDevice phys;
@@ -144,8 +40,9 @@ static VkCommandBuffer cmdbuf[8];
 static VkSemaphore sem_acquire, sem_render;
 static VkFence fence;
 
-/* offscreen 8x8 */
-static const u32 OFF_W = 100, OFF_H = 100;
+/* offscreen */
+#define OFF_W 640
+#define OFF_H 480
 static VkImage off_img;
 static VkDeviceMemory off_mem;
 static VkImageView off_view;
@@ -157,12 +54,12 @@ static VkFramebuffer off_fb;
 static VkPipelineLayout plA = VK_NULL_HANDLE, plB = VK_NULL_HANDLE;
 static VkPipeline gpA = VK_NULL_HANDLE, gpB = VK_NULL_HANDLE;
 
-/* descriptors for sampling off_img in pass B */
+/* descriptors */
 static VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
 static VkDescriptorPool dpool = VK_NULL_HANDLE;
 static VkDescriptorSet dset = VK_NULL_HANDLE;
 
-/* --- file IO --- */
+/* --- small IO --- */
 static void* read_file(const char* path, size_t* out_sz)
 {
     FILE* f = fopen(path, "rb");
@@ -191,6 +88,7 @@ static void* read_file(const char* path, size_t* out_sz)
     return p;
 }
 
+// TODO: convert spirv to static .h to include bytes directly
 static VkShaderModule sm_from_file(const char* path)
 {
     size_t sz = 0;
@@ -209,163 +107,22 @@ static VkShaderModule sm_from_file(const char* path)
     return m;
 }
 
-#include <dirent.h>
-#include <dlfcn.h>
-/* returns malloc'ed string with absolute/soname path or NULL */
-static char* read_file_all(const char* p, size_t* n){ FILE* f=fopen(p,"rb"); if(!f)return NULL; fseek(f,0,SEEK_END); long m=ftell(f); fseek(f,0,SEEK_SET); char* b=(char*)malloc((size_t)m+1); if(!b){fclose(f);return NULL;} if(fread(b,1,(size_t)m,f)!=(size_t)m){fclose(f);free(b);return NULL;} fclose(f); b[m]=0; if(n)*n=(size_t)m; return b; }
-static int has_suffix(const char* s,const char* suf){ size_t n=strlen(s), m=strlen(suf); return n>=m && 0==strcmp(s+n-m,suf); }
-static int contains_icd_intel(const char* s){ return strstr(s,"\"ICD\"") && (strstr(s,"intel")||strstr(s,"INTEL")||strstr(s,"anv")); }
-static char* json_extract_library_path(const char* json){
-    const char* k=strstr(json,"\"library_path\"");
-    if(!k) return NULL;
-    k=strchr(k,':'); if(!k) return NULL; k++;
-    while(*k && (*k==' '||*k=='\t')) k++;
-    if(*k!='\"') return NULL; k++;
-    const char* e=strchr(k,'\"'); if(!e) return NULL;
-    size_t len=(size_t)(e-k);
-    char* out=(char*)malloc(len+1);
-    if(!out) return NULL;
-    memcpy(out,k,len); out[len]=0; return out;
-}
-/* try soname first (many distros link it) then scan ICD dirs */
-static char* find_intel_icd_lib(void){
-    /* 1) try common soname without path (fast path) */
-    void* h=dlopen("libvulkan_intel.so", RTLD_NOW|RTLD_LOCAL);
-    if(h){ dlclose(h); char* s=(char*)malloc(19); strcpy(s,"libvulkan_intel.so"); return s; }
-
-    /* 2) scan standard ICD directories and parse JSON */
-    const char* dirs[]={"/usr/share/vulkan/icd.d","/etc/vulkan/icd.d","/usr/local/share/vulkan/icd.d"};
-    for(size_t di=0; di<sizeof(dirs)/sizeof(dirs[0]); ++di){
-        DIR* d=opendir(dirs[di]); if(!d) continue;
-        struct dirent* ent;
-        while((ent=readdir(d))){
-            if(ent->d_name[0]=='.') continue;
-            if(!has_suffix(ent->d_name,".json")) continue;
-            if(!(strstr(ent->d_name,"intel")||strstr(ent->d_name,"anv"))) continue;
-            char path[1024]; snprintf(path,sizeof(path),"%s/%s",dirs[di],ent->d_name);
-            size_t n=0; char* txt=read_file_all(path,&n); if(!txt) continue;
-            if(!contains_icd_intel(txt)){ free(txt); continue; }
-            char* lib=json_extract_library_path(txt); free(txt);
-            if(!lib) continue;
-            /* verify it actually loads */
-            void* h2=dlopen(lib, RTLD_NOW|RTLD_LOCAL);
-            if(h2){ dlclose(h2); return lib; }
-            free(lib);
-        }
-        closedir(d);
-    }
-    return NULL;
-}
-PFN_vkGetInstanceProcAddrLUNARG load_icd_gpa(void *h){
-    void *p = dlsym(h, "vkGetInstanceProcAddr");  // rarely exported by ICDs
-    if (!p) p = dlsym(h, "vk_icdGetInstanceProcAddr"); // commonly exported
-    return (PFN_vkGetInstanceProcAddrLUNARG)p;
-}
-/* --- Vulkan core --- */
-static void vk_make_instance(void)
+/* --- helpers --- */
+static u32 find_mem_type(u32 typeBits, VkMemoryPropertyFlags req)
 {
-    /* before vkCreateInstance: */
-    char* intel_icd = find_intel_icd_lib();
-    if(!intel_icd){ fprintf(stderr,"Intel ICD not found\n"); exit(1); }
-    void* h = dlopen(intel_icd, RTLD_NOW|RTLD_LOCAL);
-    if(!h){ fprintf(stderr,"dlopen failed for %s\n", intel_icd); exit(1); }
-    free(intel_icd);
-
-    PFN_vkGetInstanceProcAddrLUNARG icd_gpa = load_icd_gpa(h);
-    if(!icd_gpa){ fprintf(stderr,"Intel ICD lacks GetInstanceProcAddr symbol\n"); exit(1); }
-
-    VkDirectDriverLoadingInfoLUNARG dinfo = {
-        .sType = VK_STRUCTURE_TYPE_DIRECT_DRIVER_LOADING_INFO_LUNARG,
-        .pfnGetInstanceProcAddr = icd_gpa
-    };
-    VkDirectDriverLoadingListLUNARG dlist = {
-        .sType = VK_STRUCTURE_TYPE_DIRECT_DRIVER_LOADING_LIST_LUNARG,
-        .mode = VK_DIRECT_DRIVER_LOADING_MODE_EXCLUSIVE_LUNARG,
-        .driverCount = 1, .pDrivers = &dinfo
-    };
-    VkApplicationInfo ai = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "tri2", .applicationVersion = 1, .pEngineName = "none", .apiVersion = VK_API_VERSION_1_1 };
-    const char *exts[] = { "VK_KHR_surface", "VK_KHR_wayland_surface", "VK_LUNARG_direct_driver_loading" };
-    VkInstanceCreateInfo ci = { .sType=VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pNext=&dlist,
-        .pApplicationInfo=&ai, .enabledExtensionCount=3, .ppEnabledExtensionNames=exts };
-    VKC(vkCreateInstance(&ci, NULL, &inst));
-
-
-    TSTAMP("vkCreateInstance");
-}
-
-static void vk_make_surface(void)
-{
-    VkWaylandSurfaceCreateInfoKHR sci = {
-        .sType = VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR, .display = dpy, .surface = surf
-    };
-    VKC(vkCreateWaylandSurfaceKHR(inst,&sci,NULL,&vsurf));
-    TSTAMP("vkCreateWaylandSurfaceKHR");
-}
-
-static void vk_choose_phys_and_queue(void)
-{
-    u32 n = 0;
-    VKC(vkEnumeratePhysicalDevices(inst,&n,NULL));
-    VkPhysicalDevice list[8];
-    if (n > 8)n = 8;
-    VKC(vkEnumeratePhysicalDevices(inst,&n,list));
-    phys = list[0];
-    for (u32 i = 0; i < n; i++)
-    {
-        VkPhysicalDeviceProperties p;
-        vkGetPhysicalDeviceProperties(list[i], &p);
-        if (p.vendorID == 0x8086)
-        {
-            phys = list[i];
-            break;
-        }
-    }
-    u32 qn = 0;
-    vkGetPhysicalDeviceQueueFamilyProperties(phys, &qn,NULL);
-    VkQueueFamilyProperties qfp[16];
-    if (qn > 16) qn = 16;
-    vkGetPhysicalDeviceQueueFamilyProperties(phys, &qn, qfp);
-    qfam = ~0u;
-    for (u32 i = 0; i < qn; i++)
-    {
-        VkBool32 pres = false;
-        VKC(vkGetPhysicalDeviceSurfaceSupportKHR(phys,i,vsurf,&pres));
-        if ((qfp[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && pres)
-        {
-            qfam = i;
-            break;
-        }
-    }
-    if (qfam == ~0u)
-    {
-        fprintf(stderr, "no graphics+present queue\n");
-        exit(1);
-    }
-    TSTAMP("pick phys+queue");
-}
-
-static void vk_make_device(void)
-{
-    float pr = 1.0f;
-    VkDeviceQueueCreateInfo qci = {
-        .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = qfam, .queueCount = 1,
-        .pQueuePriorities = &pr
-    };
-    const char* exts[] = {"VK_KHR_swapchain"};
-    VkDeviceCreateInfo dci = {
-        .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
-        .enabledExtensionCount = 1, .ppEnabledExtensionNames = exts
-    };
-    VKC(vkCreateDevice(phys,&dci,NULL,&dev));
-    vkGetDeviceQueue(dev, qfam, 0, &q);
-    TSTAMP("vkCreateDevice");
+    VkPhysicalDeviceMemoryProperties mp;
+    vkGetPhysicalDeviceMemoryProperties(phys, &mp);
+    for (u32 i = 0; i < mp.memoryTypeCount; i++) if ((typeBits & (1u << i)) && (mp.memoryTypes[i].propertyFlags & req)
+        == req) return i;
+    fprintf(stderr, "no memtype\n");
+    exit(1);
 }
 
 static VkSurfaceFormatKHR choose_format(void)
 {
     u32 n = 0;
     VKC_ENUM(vkGetPhysicalDeviceSurfaceFormatsKHR(phys,vsurf,&n,NULL));
-    if (n == 0)
+    if (!n)
     {
         fprintf(stderr, "no formats\n");
         exit(1);
@@ -387,7 +144,7 @@ static VkPresentModeKHR choose_present_mode(void)
 {
     u32 n = 0;
     VKC_ENUM(vkGetPhysicalDeviceSurfacePresentModesKHR(phys,vsurf,&n,NULL));
-    if (n == 0) return VK_PRESENT_MODE_FIFO_KHR;
+    if (!n) return VK_PRESENT_MODE_FIFO_KHR;
     VkPresentModeKHR* m = malloc(n * sizeof(*m));
     VKC_ENUM(vkGetPhysicalDeviceSurfacePresentModesKHR(phys,vsurf,&n,m));
     VkPresentModeKHR pick = VK_PRESENT_MODE_FIFO_KHR;
@@ -411,24 +168,270 @@ static VkCompositeAlphaFlagBitsKHR choose_alpha(const VkSurfaceCapabilitiesKHR c
     return VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
 }
 
-/* --- offscreen image (8x8 RGBA, color-attach + sampled) --- */
-static u32 find_mem_type(u32 typeBits, VkMemoryPropertyFlags req)
+/* --- instance creation (platform-specific loader path) --- */
+#if defined(_WIN32)
+void vk_init_instance(void)
 {
-    VkPhysicalDeviceMemoryProperties mp;
-    vkGetPhysicalDeviceMemoryProperties(phys, &mp);
-    for (u32 i = 0; i < mp.memoryTypeCount; i++) if ((typeBits & (1u << i)) && (mp.memoryTypes[i].propertyFlags & req)
-        == req) return i;
-    fprintf(stderr, "no memtype\n");
-    exit(1);
+    VkApplicationInfo ai = {
+        .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "tri2", .applicationVersion = 1,
+        .pEngineName = "none", .apiVersion = VK_API_VERSION_1_1
+    };
+    const char* exts[] = {"VK_KHR_surface", "VK_KHR_win32_surface"};
+    VkInstanceCreateInfo ci = {
+        .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &ai, .enabledExtensionCount = 2,
+        .ppEnabledExtensionNames = exts
+    };
+    VKC(vkCreateInstance(&ci, NULL, &inst));
+    pf_timestamp("vkCreateInstance");
+}
+#else
+/* LINUX: direct-driver-loading to pin Intel ICD (as before) */
+#include <string.h>
+
+static char* read_file_all(const char* p, size_t* n)
+{
+    FILE* f = fopen(p, "rb");
+    if (!f)return NULL;
+    fseek(f, 0,SEEK_END);
+    long m = ftell(f);
+    fseek(f, 0,SEEK_SET);
+    char* b = (char*)malloc((size_t)m + 1);
+    if (!b)
+    {
+        fclose(f);
+        return NULL;
+    }
+    if (fread(b, 1, (size_t)m, f) != (size_t)m)
+    {
+        fclose(f);
+        free(b);
+        return NULL;
+    }
+    fclose(f);
+    b[m] = 0;
+    if (n)*n = (size_t)m;
+    return b;
 }
 
+static int has_suffix(const char* s, const char* suf)
+{
+    size_t n = strlen(s), m = strlen(suf);
+    return n >= m && 0 == strcmp(s + n - m, suf);
+}
+
+static int contains_icd_intel(const char* s)
+{
+    return strstr(s, "\"ICD\"") && (strstr(s, "intel") || strstr(s, "INTEL") || strstr(s, "anv"));
+}
+
+static char* json_extract_library_path(const char* json)
+{
+    const char* k = strstr(json, "\"library_path\"");
+    if (!k) return NULL;
+    k = strchr(k, ':');
+    if (!k) return NULL;
+    k++;
+    while (*k && (*k == ' ' || *k == '\t')) k++;
+    if (*k != '\"') return NULL;
+    k++;
+    const char* e = strchr(k, '\"');
+    if (!e) return NULL;
+    size_t len = (size_t)(e - k);
+    char* out = (char*)malloc(len + 1);
+    if (!out) return NULL;
+    memcpy(out, k, len);
+    out[len] = 0;
+    return out;
+}
+
+static char* find_intel_icd_lib(void)
+{
+    void* h = dlopen("libvulkan_intel.so", RTLD_NOW | RTLD_LOCAL);
+    if (h)
+    {
+        dlclose(h);
+        return "libvulkan_intel.so";
+    }
+    const char* dirs[] = {"/usr/share/vulkan/icd.d", "/etc/vulkan/icd.d", "/usr/local/share/vulkan/icd.d"};
+    for (size_t di = 0; di < sizeof(dirs) / sizeof(dirs[0]); ++di)
+    {
+        DIR* d = opendir(dirs[di]);
+        if (!d) continue;
+        struct dirent* ent;
+        while ((ent = readdir(d)))
+        {
+            if (ent->d_name[0] == '.') continue;
+            if (!has_suffix(ent->d_name, ".json")) continue;
+            if (!(strstr(ent->d_name, "intel") || strstr(ent->d_name, "anv"))) continue;
+            char path[1024];
+            snprintf(path, sizeof(path), "%s/%s", dirs[di], ent->d_name);
+            size_t n = 0;
+            char* txt = read_file_all(path, &n);
+            if (!txt) continue;
+            if (!contains_icd_intel(txt))
+            {
+                free(txt);
+                continue;
+            }
+            char* lib = json_extract_library_path(txt);
+            free(txt);
+            if (!lib) continue;
+            void* h2 = dlopen(lib, RTLD_NOW | RTLD_LOCAL);
+            if (h2)
+            {
+                dlclose(h2);
+                return lib;
+            }
+            free(lib);
+        }
+        closedir(d);
+    }
+    return NULL;
+}
+
+typedef PFN_vkVoidFunction (*PFN_vkGetInstanceProcAddrLUNARG)(VkInstance, const char*);
+
+static PFN_vkGetInstanceProcAddrLUNARG load_icd_gpa(void* h)
+{
+    void* p = dlsym(h, "vkGetInstanceProcAddr");
+    if (!p) p = dlsym(h, "vk_icdGetInstanceProcAddr");
+    return (PFN_vkGetInstanceProcAddrLUNARG)p;
+}
+
+void vk_init_instance(void)
+{
+    char* intel_icd = find_intel_icd_lib();
+    if (!intel_icd)
+    {
+        fprintf(stderr, "Intel ICD not found\n");
+        exit(1);
+    }
+    void* h = dlopen(intel_icd,RTLD_NOW | RTLD_LOCAL);
+    if (!h)
+    {
+        fprintf(stderr, "dlopen failed for %s\n", intel_icd);
+        exit(1);
+    }
+    PFN_vkGetInstanceProcAddrLUNARG icd_gpa = load_icd_gpa(h);
+    if (!icd_gpa)
+    {
+        fprintf(stderr, "Intel ICD lacks GetInstanceProcAddr symbol\n");
+        exit(1);
+    }
+    VkDirectDriverLoadingInfoLUNARG dinfo = {
+        .sType = VK_STRUCTURE_TYPE_DIRECT_DRIVER_LOADING_INFO_LUNARG, .pfnGetInstanceProcAddr = icd_gpa
+    };
+    VkDirectDriverLoadingListLUNARG dlist = {
+        .sType = VK_STRUCTURE_TYPE_DIRECT_DRIVER_LOADING_LIST_LUNARG,
+        .mode = VK_DIRECT_DRIVER_LOADING_MODE_EXCLUSIVE_LUNARG, .driverCount = 1, .pDrivers = &dinfo
+    };
+    VkApplicationInfo ai = {
+        .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "tri2", .applicationVersion = 1,
+        .pEngineName = "none", .apiVersion = VK_API_VERSION_1_1
+    };
+    const char* exts[] = {"VK_KHR_surface", "VK_KHR_wayland_surface", "VK_LUNARG_direct_driver_loading"};
+    VkInstanceCreateInfo ci = {
+        .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pNext = &dlist, .pApplicationInfo = &ai,
+        .enabledExtensionCount = 3, .ppEnabledExtensionNames = exts
+    };
+    VKC(vkCreateInstance(&ci,NULL,&inst));
+    pf_timestamp("vkCreateInstance");
+}
+#endif
+
+/* --- surface creation (both) --- */
+#ifdef __linux__
+void vk_create_surface(void* display, void* surface)
+{
+    VkWaylandSurfaceCreateInfoKHR sci = {
+        .sType = VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR, .display = display, .surface = surface
+    };
+    VKC(vkCreateWaylandSurfaceKHR(inst,&sci,NULL,&vsurf));
+    pf_timestamp("vkCreateWaylandSurfaceKHR");
+}
+#endif
+#ifdef _WIN32
+void vk_create_surface(void* hinst, void* hwnd)
+{
+    VkWin32SurfaceCreateInfoKHR sci = {
+        .sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR, .hinstance = hinst, .hwnd = hwnd
+    };
+    VKC(vkCreateWin32SurfaceKHR(inst, &sci, NULL, &vsurf));
+    pf_timestamp("vkCreateWin32SurfaceKHR");
+}
+#endif
+
+void vk_choose_phys_and_queue(void)
+{
+    u32 n = 0;
+    VKC(vkEnumeratePhysicalDevices(inst,&n,NULL));
+    if (!n)
+    {
+        fprintf(stderr, "no phys devs\n");
+        exit(1);
+    }
+    VkPhysicalDevice list[8];
+    if (n > 8) n = 8;
+    VKC(vkEnumeratePhysicalDevices(inst,&n,list));
+    phys = list[0];
+    for (u32 i = 0; i < n; i++)
+    {
+        VkPhysicalDeviceProperties p;
+        vkGetPhysicalDeviceProperties(list[i], &p);
+        if (p.vendorID == 0x8086)
+        {
+            phys = list[i];
+            break;
+        }
+    }
+    u32 qn = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(phys, &qn,NULL);
+    if (qn > 16) qn = 16;
+    VkQueueFamilyProperties qfp[16];
+    vkGetPhysicalDeviceQueueFamilyProperties(phys, &qn, qfp);
+    qfam = ~0u;
+    for (u32 i = 0; i < qn; i++)
+    {
+        VkBool32 pres = VK_FALSE;
+        VKC(vkGetPhysicalDeviceSurfaceSupportKHR(phys,i,vsurf,&pres));
+        if ((qfp[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && pres)
+        {
+            qfam = i;
+            break;
+        }
+    }
+    if (qfam == ~0u)
+    {
+        fprintf(stderr, "no graphics+present queue\n");
+        exit(1);
+    }
+    pf_timestamp("pick phys+queue");
+}
+
+void vk_make_device(void)
+{
+    float pr = 1.0f;
+    VkDeviceQueueCreateInfo qci = {
+        .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = qfam, .queueCount = 1,
+        .pQueuePriorities = &pr
+    };
+    const char* exts[] = {"VK_KHR_swapchain"};
+    VkDeviceCreateInfo dci = {
+        .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
+        .enabledExtensionCount = 1, .ppEnabledExtensionNames = exts
+    };
+    VKC(vkCreateDevice(phys,&dci,NULL,&dev));
+    vkGetDeviceQueue(dev, qfam, 0, &q);
+    pf_timestamp("vkCreateDevice");
+}
+
+/* offscreen image + descriptors */
 static void make_offscreen(void)
 {
     VkImageCreateInfo ici = {
-        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
-        .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = {OFF_W, OFF_H, 1}, .mipLevels = 1, .arrayLayers = 1,
-        .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
-        .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM,
+        .extent = {OFF_W,OFF_H, 1}, .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED
     };
     VKC(vkCreateImage(dev,&ici,NULL,&off_img));
@@ -442,8 +445,7 @@ static void make_offscreen(void)
     VKC(vkBindImageMemory(dev,off_img,off_mem,0));
     VkImageViewCreateInfo vci = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = off_img, .viewType = VK_IMAGE_VIEW_TYPE_2D,
-        .format = VK_FORMAT_R8G8B8A8_UNORM,
-        .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}
+        .format = VK_FORMAT_R8G8B8A8_UNORM, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}
     };
     VKC(vkCreateImageView(dev,&vci,NULL,&off_view));
     VkSamplerCreateInfo sci = {
@@ -455,7 +457,6 @@ static void make_offscreen(void)
     VKC(vkCreateSampler(dev,&sci,NULL,&off_samp));
 }
 
-/* --- descriptor set for pass B --- */
 static void make_descriptors(void)
 {
     VkDescriptorSetLayoutBinding b0 = {
@@ -481,7 +482,7 @@ static void make_descriptors(void)
 /* destroy everything tied to swapchain (and per-pass resources) */
 static void vk_destroy_swapchain_all(void)
 {
-    if (dev == VK_NULL_HANDLE) return;
+    if (!dev) return;
     if (fence)
     {
         vkDestroyFence(dev, fence,NULL);
@@ -502,7 +503,6 @@ static void vk_destroy_swapchain_all(void)
         vkDestroyCommandPool(dev, cpool,NULL);
         cpool = VK_NULL_HANDLE;
     }
-
     if (gpB)
     {
         vkDestroyPipeline(dev, gpB,NULL);
@@ -523,7 +523,6 @@ static void vk_destroy_swapchain_all(void)
         vkDestroyPipelineLayout(dev, plA,NULL);
         plA = VK_NULL_HANDLE;
     }
-
     for (u32 i = 0; i < sc_img_count; i++)
     {
         if (fb[i])
@@ -557,7 +556,6 @@ static void vk_destroy_swapchain_all(void)
         vkDestroySwapchainKHR(dev, sc,NULL);
         sc = VK_NULL_HANDLE;
     }
-
     if (dpool)
     {
         vkDestroyDescriptorPool(dev, dpool,NULL);
@@ -568,7 +566,6 @@ static void vk_destroy_swapchain_all(void)
         vkDestroyDescriptorSetLayout(dev, dsl,NULL);
         dsl = VK_NULL_HANDLE;
     }
-
     if (off_samp)
     {
         vkDestroySampler(dev, off_samp,NULL);
@@ -594,11 +591,11 @@ static void vk_destroy_swapchain_all(void)
 /* pipelines and passes */
 static void make_passes_and_pipelines(VkFormat swap_fmt, VkExtent2D swap_ext)
 {
-    /* Pass A: offscreen render pass */
+    (void)swap_ext;
     VkAttachmentDescription aA = {
-        .format = VK_FORMAT_R8G8B8A8_UNORM, .samples = VK_SAMPLE_COUNT_1_BIT,
-        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED, .finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+        .format = VK_FORMAT_R8G8B8A8_UNORM, .samples = VK_SAMPLE_COUNT_1_BIT, .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp = VK_ATTACHMENT_STORE_OP_STORE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
     };
     VkAttachmentReference arA = {.attachment = 0, .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
     VkSubpassDescription spA = {
@@ -610,11 +607,10 @@ static void make_passes_and_pipelines(VkFormat swap_fmt, VkExtent2D swap_ext)
     };
     VKC(vkCreateRenderPass(dev,&rpciA,NULL,&rpA));
 
-    /* Pass B: onscreen render pass */
     VkAttachmentDescription aB = {
-        .format = swap_fmt, .samples = VK_SAMPLE_COUNT_1_BIT,
-        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED, .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+        .format = swap_fmt, .samples = VK_SAMPLE_COUNT_1_BIT, .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp = VK_ATTACHMENT_STORE_OP_STORE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
     };
     VkAttachmentReference arB = {.attachment = 0, .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
     VkSubpassDescription spB = {
@@ -626,17 +622,15 @@ static void make_passes_and_pipelines(VkFormat swap_fmt, VkExtent2D swap_ext)
     };
     VKC(vkCreateRenderPass(dev,&rpciB,NULL,&rpB));
 
-    /* pipeline A (triangle → offscreen) */
-    VkShaderModule vA = sm_from_file("triA.vert.spv");
-    VkShaderModule fA = sm_from_file("triA.frag.spv");
+    VkShaderModule vA = sm_from_file("shaders.spv");
     VkPipelineShaderStageCreateInfo stA[2] = {
         {
             .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT,
-            .module = vA, .pName = "main"
+            .module = vA, .pName = "VS_Tri"
         },
         {
             .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-            .module = fA, .pName = "main"
+            .module = vA, .pName = "PS_Tri"
         }
     };
     VkPipelineVertexInputStateCreateInfo vin = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
@@ -667,24 +661,19 @@ static void make_passes_and_pipelines(VkFormat swap_fmt, VkExtent2D swap_ext)
     VkGraphicsPipelineCreateInfo pciA = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .stageCount = 2, .pStages = stA,
         .pVertexInputState = &vin, .pInputAssemblyState = &ia, .pViewportState = &vpst, .pDynamicState = &dyn,
-        .pRasterizationState = &rs, .pMultisampleState = &ms, .pColorBlendState = &cb,
-        .layout = plA, .renderPass = rpA, .subpass = 0
+        .pRasterizationState = &rs, .pMultisampleState = &ms, .pColorBlendState = &cb, .layout = plA, .renderPass = rpA,
+        .subpass = 0
     };
     VKC(vkCreateGraphicsPipelines(dev,VK_NULL_HANDLE,1,&pciA,NULL,&gpA));
-    vkDestroyShaderModule(dev, vA,NULL);
-    vkDestroyShaderModule(dev, fA,NULL);
 
-    /* pipeline B (fullscreen sample → swapchain) */
-    VkShaderModule vB = sm_from_file("triB.vert.spv");
-    VkShaderModule fB = sm_from_file("triB.frag.spv");
     VkPipelineShaderStageCreateInfo stB[2] = {
         {
             .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT,
-            .module = vB, .pName = "main"
+            .module = vA, .pName = "VS_Blit"
         },
         {
             .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-            .module = fB, .pName = "main"
+            .module = vA, .pName = "PS_Blit"
         }
     };
     VkPipelineLayoutCreateInfo plciB = {
@@ -694,25 +683,20 @@ static void make_passes_and_pipelines(VkFormat swap_fmt, VkExtent2D swap_ext)
     VkGraphicsPipelineCreateInfo pciB = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .stageCount = 2, .pStages = stB,
         .pVertexInputState = &vin, .pInputAssemblyState = &ia, .pViewportState = &vpst, .pDynamicState = &dyn,
-        .pRasterizationState = &rs, .pMultisampleState = &ms, .pColorBlendState = &cb,
-        .layout = plB, .renderPass = rpB, .subpass = 0
+        .pRasterizationState = &rs, .pMultisampleState = &ms, .pColorBlendState = &cb, .layout = plB, .renderPass = rpB,
+        .subpass = 0
     };
     VKC(vkCreateGraphicsPipelines(dev,VK_NULL_HANDLE,1,&pciB,NULL,&gpB));
-    vkDestroyShaderModule(dev, vB,NULL);
-    vkDestroyShaderModule(dev, fB,NULL);
+    vkDestroyShaderModule(dev, vA,NULL);
 
-    /* offscreen framebuffer */
     VkImageView off_att[] = {off_view};
     VkFramebufferCreateInfo fciA = {
         .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, .renderPass = rpA, .attachmentCount = 1,
         .pAttachments = off_att, .width = OFF_W, .height = OFF_H, .layers = 1
     };
     VKC(vkCreateFramebuffer(dev,&fciA,NULL,&off_fb));
-
-    /* swapchain framebuffers will be created later (need sc_view[]) */
 }
 
-/* build swapchain + per-frame CMDBUFs that record BOTH passes */
 static void make_swapchain_and_record(u32 w, u32 h)
 {
     VkSurfaceCapabilitiesKHR caps;
@@ -721,18 +705,17 @@ static void make_swapchain_and_record(u32 w, u32 h)
     sc_fmt = sf.format;
     VkPresentModeKHR pm = choose_present_mode();
     if (caps.currentExtent.width != UINT32_MAX) sc_ext = caps.currentExtent;
-    else { sc_ext = (VkExtent2D){w, h}; }
+    else sc_ext = (VkExtent2D){w, h};
     if (sc_ext.width == 0 || sc_ext.height == 0) return;
     u32 desired = caps.minImageCount + 1;
     if (caps.maxImageCount > 0 && desired > caps.maxImageCount) desired = caps.maxImageCount;
     VkCompositeAlphaFlagBitsKHR alpha = choose_alpha(caps);
-
     VkSwapchainCreateInfoKHR sci = {
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, .surface = vsurf, .minImageCount = desired,
-        .imageFormat = sc_fmt, .imageColorSpace = sf.colorSpace,
-        .imageExtent = sc_ext, .imageArrayLayers = 1, .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-        .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE, .preTransform = caps.currentTransform,
-        .compositeAlpha = alpha, .presentMode = pm, .clipped = VK_TRUE, .oldSwapchain = sc
+        .imageFormat = sc_fmt, .imageColorSpace = sf.colorSpace, .imageExtent = sc_ext, .imageArrayLayers = 1,
+        .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .preTransform = caps.currentTransform, .compositeAlpha = alpha, .presentMode = pm, .clipped = VK_TRUE,
+        .oldSwapchain = sc
     };
     VKC(vkCreateSwapchainKHR(dev,&sci,NULL,&sc));
     if (sci.oldSwapchain) vkDestroySwapchainKHR(dev, sci.oldSwapchain,NULL);
@@ -744,13 +727,11 @@ static void make_swapchain_and_record(u32 w, u32 h)
     {
         VkImageViewCreateInfo vci = {
             .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = sc_img[i], .viewType = VK_IMAGE_VIEW_TYPE_2D,
-            .format = sc_fmt,
-            .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}
+            .format = sc_fmt, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}
         };
         VKC(vkCreateImageView(dev,&vci,NULL,&sc_view[i]));
     }
 
-    /* swapchain render pass was created earlier; create fb[] now */
     for (u32 i = 0; i < sc_img_count; i++)
     {
         VkImageView atts[] = {sc_view[i]};
@@ -761,7 +742,6 @@ static void make_swapchain_and_record(u32 w, u32 h)
         VKC(vkCreateFramebuffer(dev,&fciB,NULL,&fb[i]));
     }
 
-    /* command pool & buffers */
     VkCommandPoolCreateInfo cpci = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .queueFamilyIndex = qfam,
         .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT
@@ -773,7 +753,6 @@ static void make_swapchain_and_record(u32 w, u32 h)
     };
     VKC(vkAllocateCommandBuffers(dev,&cai,cmdbuf));
 
-    /* write descriptor set for uTex (point at off_view+sampler) */
     VkDescriptorImageInfo dii = {
         .sampler = off_samp, .imageView = off_view, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
     };
@@ -783,31 +762,24 @@ static void make_swapchain_and_record(u32 w, u32 h)
     };
     vkUpdateDescriptorSets(dev, 1, &w0, 0,NULL);
 
-    /* record BOTH passes into each cmdbuf[i] */
     for (u32 i = 0; i < sc_img_count; i++)
     {
         VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         VKC(vkBeginCommandBuffer(cmdbuf[i],&bi));
-
-        /* Pass A: offscreen 8x8 */
         VkClearValue clrA = {.color = {{0.02f, 0.02f, 0.05f, 1.0f}}};
         VkRenderPassBeginInfo rbiA = {
             .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = rpA, .framebuffer = off_fb,
-            .renderArea = {{0, 0}, {OFF_W, OFF_H}}, .clearValueCount = 1, .pClearValues = &clrA
+            .renderArea = {{0, 0}, {OFF_W,OFF_H}}, .clearValueCount = 1, .pClearValues = &clrA
         };
         vkCmdBeginRenderPass(cmdbuf[i], &rbiA, VK_SUBPASS_CONTENTS_INLINE);
         VkViewport vpA = {0, 0, (float)OFF_W, (float)OFF_H, 0, 1};
-        VkRect2D scA = {{0, 0}, {OFF_W, OFF_H}};
+        VkRect2D scA = {{0, 0}, {OFF_W,OFF_H}};
         vkCmdSetViewport(cmdbuf[i], 0, 1, &vpA);
         vkCmdSetScissor(cmdbuf[i], 0, 1, &scA);
         vkCmdBindPipeline(cmdbuf[i], VK_PIPELINE_BIND_POINT_GRAPHICS, gpA);
         vkCmdDraw(cmdbuf[i], 3, 1, 0, 0);
         vkCmdEndRenderPass(cmdbuf[i]);
 
-        /* Barrier: off_img COLOR_ATTACHMENT_OPTIMAL -> SHADER_READ_ONLY_OPTIMAL is handled by rpA finalLayout,
-           but we ensure visibility before pass B (no-op if driver handles subpass finalLayout fully). */
-
-        /* Pass B: fullscreen sample into swapchain */
         VkClearValue clrB = {.color = {{0.0f, 0.0f, 0.0f, 1.0f}}};
         VkRenderPassBeginInfo rbiB = {
             .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = rpB, .framebuffer = fb[i],
@@ -826,48 +798,53 @@ static void make_swapchain_and_record(u32 w, u32 h)
         VKC(vkEndCommandBuffer(cmdbuf[i]));
     }
 
-    /* sync objects */
     VkSemaphoreCreateInfo si = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
     VkFenceCreateInfo fi = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT};
     VKC(vkCreateSemaphore(dev,&si,NULL,&sem_acquire));
     VKC(vkCreateSemaphore(dev,&si,NULL,&sem_render));
     VKC(vkCreateFence(dev,&fi,NULL,&fence));
-
-    TSTAMP("swapchain+pipes+cmds");
+    pf_timestamp("swapchain+pipes+cmds");
 }
 
-static void recreate_all(void)
+/* exported helpers used by front-ends */
+void vk_graph_initial_build(u32 win_w, u32 win_h)
+{
+    make_offscreen();
+    make_descriptors();
+    make_passes_and_pipelines(VK_FORMAT_B8G8R8A8_UNORM, (VkExtent2D){win_w, win_h});
+    make_swapchain_and_record(win_w, win_h);
+}
+
+static void recreate_all(u32 w, u32 h)
 {
     vkDeviceWaitIdle(dev);
     vk_destroy_swapchain_all();
-    /* re-create the pieces in order */
     make_offscreen();
     make_descriptors();
-    make_passes_and_pipelines(sc_fmt, (VkExtent2D){(u32)win_w, (u32)win_h});
-    /* sc_fmt may be uninit first time; fine, we set later */
-    make_swapchain_and_record((u32)win_w, (u32)win_h);
+    make_passes_and_pipelines(sc_fmt, (VkExtent2D){w, h});
+    make_swapchain_and_record(w, h);
 }
 
-/* present one frame */
-static VkResult present_frame(void)
+void vk_recreate_all(u32 w, u32 h) { recreate_all(w, h); }
+
+int vk_present_frame(void)
 {
     u32 idx = 0;
     VkResult r;
     VKC(vkWaitForFences(dev,1,&fence,VK_TRUE,UINT64_MAX));
     VKC(vkResetFences(dev,1,&fence));
     r = vkAcquireNextImageKHR(dev, sc,UINT64_MAX, sem_acquire,VK_NULL_HANDLE, &idx);
-    if (r == VK_ERROR_OUT_OF_DATE_KHR) return r;
+    if (r == VK_ERROR_OUT_OF_DATE_KHR) return 1;
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR)
     {
-        fprintf(stderr, "acquire err %d\n", r);
+        fprintf(stderr, "acq err %d\n", (int)r);
         exit(1);
     }
     VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     VkSubmitInfo si = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .waitSemaphoreCount = 1, .pWaitSemaphores = &sem_acquire,
-        .pWaitDstStageMask = &waitStage,
-        .commandBufferCount = 1, .pCommandBuffers = &cmdbuf[idx], .signalSemaphoreCount = 1,
-        .pSignalSemaphores = &sem_render
+        .pWaitDstStageMask = &waitStage, .commandBufferCount = 1, .pCommandBuffers = &cmdbuf[idx],
+        .signalSemaphoreCount = 1, .pSignalSemaphores = &sem_render
     };
     VKC(vkQueueSubmit(q,1,&si,fence));
     VkPresentInfoKHR pi = {
@@ -875,89 +852,26 @@ static VkResult present_frame(void)
         .swapchainCount = 1, .pSwapchains = &sc, .pImageIndices = &idx
     };
     r = vkQueuePresentKHR(q, &pi);
-    return r;
+    return r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR ? 1 : 0;
 }
 
-
-int main(void)
+void vk_shutdown_all(void)
 {
-    // /* Pin Intel Vulkan (avoid NVIDIA) if you need it */
-    // setenv("VK_DRIVER_FILES", "/usr/share/vulkan/icd.d/intel_icd.x86_64.json", 1);
-    // setenv("VK_ICD_FILENAMES", "/usr/share/vulkan/icd.d/intel_icd.x86_64.json", 1);
-    // unsetenv("VK_LAYER_PATH");
-    // unsetenv("VK_ADD_LAYER_PATH");
-
-    TINIT();
-    dpy = wl_display_connect(NULL);
-    if (!dpy)
+    if (dev)
     {
-        fprintf(stderr, "wl connect failed\n");
-        return 1;
+        vkDeviceWaitIdle(dev);
+        vk_destroy_swapchain_all();
+        vkDestroyDevice(dev,NULL);
+        dev = VK_NULL_HANDLE;
     }
-    TSTAMP("wl_display_connect");
-    struct wl_registry* reg = wl_display_get_registry(dpy);
-    wl_registry_add_listener(reg, &reg_l,NULL);
-    wl_display_roundtrip(dpy);
-    TSTAMP("wl globals ready");
-    if (!comp || !xdg)
+    if (vsurf)
     {
-        fprintf(stderr, "missing compositor/xdg\n");
-        return 1;
+        vkDestroySurfaceKHR(inst, vsurf,NULL);
+        vsurf = VK_NULL_HANDLE;
     }
-
-    surf = wl_compositor_create_surface(comp);
-    xsurf = xdg_wm_base_get_xdg_surface(xdg, surf);
-    xdg_surface_add_listener(xsurf, &xsurf_l,NULL);
-    xtop = xdg_surface_get_toplevel(xsurf);
-    xdg_toplevel_add_listener(xtop, &top_l,NULL);
-    xdg_toplevel_set_title(xtop, "tri2");
-    xdg_toplevel_set_app_id(xtop, "tri2");
-    xdg_toplevel_set_fullscreen(xtop, NULL);
-    wl_surface_commit(surf);
-    TSTAMP("wl first commit");
-
-    vk_make_instance();
-    vk_make_surface();
-
-    while (running && !need_swapchain) wl_display_dispatch(dpy); /* wait for initial size */
-    vk_choose_phys_and_queue();
-    vk_make_device();
-
-    /* one-time creations + full graph */
-    make_offscreen();
-    make_descriptors();
-    make_passes_and_pipelines(VK_FORMAT_B8G8R8A8_UNORM, (VkExtent2D){(u32)win_w, (u32)win_h});
-    make_swapchain_and_record((u32)win_w, (u32)win_h);
-
-    VkResult pr = present_frame();
-    TSTAMP("first present");
-    if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR)
+    if (inst)
     {
-        recreate_all();
-        present_frame();
+        vkDestroyInstance(inst,NULL);
+        inst = VK_NULL_HANDLE;
     }
-
-    while (running)
-    {
-        wl_display_dispatch(dpy);
-        if (need_swapchain)
-        {
-            need_swapchain = false;
-            vkDeviceWaitIdle(dev);
-            vk_destroy_swapchain_all();
-            make_offscreen();
-            make_descriptors();
-            make_passes_and_pipelines(sc_fmt, (VkExtent2D){(u32)win_w, (u32)win_h});
-            make_swapchain_and_record((u32)win_w, (u32)win_h);
-        }
-        pr = present_frame();
-        if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR) { recreate_all(); }
-    }
-
-    vkDeviceWaitIdle(dev);
-    vk_destroy_swapchain_all();
-    if (dev) vkDestroyDevice(dev,NULL);
-    if (vsurf) vkDestroySurfaceKHR(inst, vsurf,NULL);
-    if (inst) vkDestroyInstance(inst,NULL);
-    return 0;
 }

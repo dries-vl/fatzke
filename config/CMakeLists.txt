@@ -1,25 +1,33 @@
 # CMAKE configuration to help CLion understand and debug
-cmake_minimum_required(VERSION 4.0)
-project(../fatzke C)
-
+cmake_minimum_required(VERSION 3.16)
+project(fatzke C)
 set(CMAKE_C_STANDARD 99)
 
-function(add_bin name src libs_win libs_unix)
+function(add_bin name src_dir libs_win libs_unix)
+    file(GLOB SRCS CONFIGURE_DEPENDS "${src_dir}/*.c")
+
+    if(SRCS STREQUAL "")
+        message(FATAL_ERROR "add_bin(${name}): no .c files found in ${src_dir}")
+    endif()
+
+    add_executable(${name} ${SRCS})
+    target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR})
+
     if(WIN32)
-        add_executable(${name} ${src})
-        if(NOT "${libs_win}" STREQUAL "")
-            target_link_libraries(${name} PRIVATE ${libs_win})
+        if(NOT "${libs_win_norm}" STREQUAL "")
+            target_link_libraries(${name} PRIVATE ${libs_win_norm})
         endif()
     else()
-        add_executable(${name} ${src})
-        if(NOT "${libs_unix}" STREQUAL "")
-            target_link_libraries(${name} PRIVATE ${libs_unix})
+        if(NOT "${libs_unix_norm}" STREQUAL "")
+            target_link_libraries(${name} PRIVATE ${libs_unix_norm})
         endif()
     endif()
-    target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR})
-    set_target_properties(${name} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/../${name}")
+
+    set_target_properties(${name} PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/../${name}"
+    )
 endfunction()
 
-# add each binary project in one line
-add_bin(fatzke ../fatzke/main.c gdi32,user32 wayland-client)
-add_bin(fz ../fz/main.c user32,gdi32 wayland-client;wgpu_native)
+# one-liners
+add_bin(fatzke ../fatzke "gdi32;user32" "wayland-client")
+add_bin(battle ../battle "user32;gdi32" "wayland-client;vulkan")

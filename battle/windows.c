@@ -1,5 +1,4 @@
-// cl /O2 win32.c /DUNICODE /D_UNICODE /I"%VULKAN_SDK%\Include" /link /LIBPATH:"%VULKAN_SDK%\Lib" vulkan-1.lib user32.lib gdi32.lib
-// or: x86_64-w64-mingw32-gcc win32.c -O2 -lvulkan-1 -luser32 -lgdi32 -o tri2.exe
+#ifdef _WIN32
 #define UNICODE
 #define _UNICODE
 #include <windows.h>
@@ -22,7 +21,7 @@ do { \
 } while (0)
 
 /* Pull in platform-agnostic Vulkan implementation (creates Win32 surface via helper) */
-#include "vulkan.inc"
+#include "vulkan.c"
 
 /* Vulkan entry points (from vulkan.c) */
 void vk_init_instance(void); void vk_choose_phys_and_queue(void); void vk_make_device(void);
@@ -80,3 +79,5 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR lpCmdLine, int nShow
 
     vk_shutdown_all(); return 0;
 }
+
+#endif

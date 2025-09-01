@@ -1,3 +1,4 @@
+#ifdef __linux__
 #include "header.h"
 
 #include <stdint.h>
@@ -15,26 +16,19 @@
 #include <xdg-shell-client-protocol.h>
 #include <xdg-shell-client-protocol.c>
 
-// todo: enum for keys (to sync windows and wayland keyboard presses)
-enum MOUSE_BUTTON { MOUSE_MOVED, MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT, MOUSE_BUTTON_MIDDLE, MOUSE_BUTTON_UNKNOWN };
-enum INPUT_STATE { RELEASED, PRESSED };
-typedef void (*keyboard_cb)(void* ud, unsigned key, enum INPUT_STATE state);
-typedef void (*mouse_cb)(void* ud, int x, unsigned y, enum MOUSE_BUTTON, enum INPUT_STATE state);
-
-// todo: find a good place to put these
 inline u64 now_ns(void){ struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts); return (u64)ts.tv_sec*1000000000ull+ts.tv_nsec; }
 u64 T0;
-#define TINIT() do{T0=now_ns();}while(0)
-#define TSTAMP(msg) do{u64 _t=now_ns(); fprintf(stderr,"[+%7.3f ms] %s\n",(_t-T0)/1e6,(msg));}while(0)
+void pf_time_reset() {T0=now_ns();}
+void pf_timestamp(char *msg) {u64 _t=now_ns(); fprintf(stderr,"[+%7.3f ms] %s\n",(_t-T0)/1e6,(msg));}
 
-struct Window {
+struct wayland_window {
     /* Wayland core */
-    struct wl_display* dpy;
-    struct wl_surface* surf;
-    struct wl_compositor* comp;
-    struct xdg_wm_base* xdg;
-    struct xdg_surface* xsurf;
-    struct xdg_toplevel* xtop;
+    struct wl_display* display;
+    struct wl_surface* surface;
+    struct wl_compositor* compositor;
+    struct xdg_wm_base* xdg_wm_base;
+    struct xdg_surface* xdg_surface;
+    struct xdg_toplevel* xdg_toplevel;
 
     /* Input */
     struct wl_seat* seat;
@@ -50,6 +44,7 @@ struct Window {
     /* App callbacks */
     keyboard_cb on_key;
     mouse_cb on_mouse;
+    void *callback_data;
 };
 
 /* ---------------- wl_keyboard callbacks ---------------- */
@@ -58,8 +53,10 @@ void kb_enter(void* data, struct wl_keyboard* k, u32 serial, struct wl_surface* 
 void kb_leave(void* data, struct wl_keyboard* k, u32 serial, struct wl_surface* surface) { (void)data;(void)k;(void)serial;(void)surface; }
 void kb_key(void* data, struct wl_keyboard* k, u32 serial, u32 time, u32 key, u32 state){
     (void)k;(void)serial;(void)time;
-    struct Window* w = (struct Window*)data;
-    if (w && w->on_key) w->on_key(NULL, key, state);
+    struct wayland_window* w = (struct wayland_window*)data;
+    enum KEYBOARD_BUTTON button = KEYBOARD_BUTTON_UNKNOWN;
+    if (key == 1) button = KEYBOARD_ESCAPE;
+    if (w && w->on_key) w->on_key(w->callback_data, button, state);
 }
 void kb_modifiers(void* data, struct wl_keyboard* k, u32 serial, u32 dep, u32 lat, u32 lock, u32 group){ (void)data;(void)k;(void)serial;(void)dep;(void)lat;(void)lock;(void)group; }
 void kb_repeat_info(void* data, struct wl_keyboard* k, i32 rate, i32 delay){ (void)data;(void)k;(void)rate;(void)delay; }
@@ -79,30 +76,30 @@ const struct wl_keyboard_listener* get_kb_listener(void){
 /* ---------------- wl_pointer callbacks ---------------- */
 void ptr_enter(void* d, struct wl_pointer* p, u32 serial, struct wl_surface* s, wl_fixed_t sx, wl_fixed_t sy){
     (void)p;(void)serial;(void)s;
-    struct Window* w = (struct Window*)d;
+    struct wayland_window* w = (struct wayland_window*)d;
     if (!w) return;
     w->mouse_x = wl_fixed_to_int(sx);
     w->mouse_y = wl_fixed_to_int(sy);
-    if (w->on_mouse) w->on_mouse(NULL, w->mouse_x, w->mouse_y, MOUSE_MOVED, 0u);
+    if (w->on_mouse) w->on_mouse(w->callback_data, w->mouse_x, w->mouse_y, MOUSE_MOVED, 0u);
 }
 void ptr_leave(void* d, struct wl_pointer* p, u32 serial, struct wl_surface* s){ (void)d;(void)p;(void)serial;(void)s; }
 void ptr_motion(void* d, struct wl_pointer* p, u32 time, wl_fixed_t sx, wl_fixed_t sy){
     (void)p;(void)time;
-    struct Window* w = (struct Window*)d;
+    struct wayland_window* w = (struct wayland_window*)d;
     if (!w) return;
     w->mouse_x = wl_fixed_to_int(sx);
     w->mouse_y = wl_fixed_to_int(sy);
-    if (w->on_mouse) w->on_mouse(NULL, w->mouse_x, w->mouse_y, MOUSE_MOVED, 0u);
+    if (w->on_mouse) w->on_mouse(w->callback_data, w->mouse_x, w->mouse_y, MOUSE_MOVED, 0u);
 }
 void ptr_button(void* d, struct wl_pointer* p, u32 serial, u32 time, u32 button, u32 state){
     (void)p;(void)serial;(void)time;
-    struct Window* w = (struct Window*)d;
+    struct wayland_window* w = (struct wayland_window*)d;
     if (!w) return;
     u32 mb = MOUSE_BUTTON_UNKNOWN;
-    if (button == 272) mb = MOUSE_BUTTON_LEFT;
-    if (button == 273) mb = MOUSE_BUTTON_RIGHT;
-    if (button == 274) mb = MOUSE_BUTTON_MIDDLE;
-    if (w->on_mouse) w->on_mouse(NULL, w->mouse_x, w->mouse_y, mb, state);
+    if (button == 272) mb = MOUSE_LEFT;
+    if (button == 273) mb = MOUSE_RIGHT;
+    if (button == 274) mb = MOUSE_MIDDLE;
+    if (w->on_mouse) w->on_mouse(w->callback_data, w->mouse_x, w->mouse_y, mb, state);
 }
 void ptr_axis(void* d, struct wl_pointer* p, u32 time, u32 axis, wl_fixed_t value){ (void)d;(void)p;(void)time;(void)axis;(void)value; }
 void ptr_frame(void* d, struct wl_pointer* p){ (void)d;(void)p; }
@@ -131,7 +128,7 @@ const struct wl_pointer_listener* get_ptr_listener(void){
 
 /* ---------------- wl_seat callbacks ---------------- */
 void seat_capabilities(void* d, struct wl_seat* s, u32 caps){
-    struct Window* w = (struct Window*)d;
+    struct wayland_window* w = (struct wayland_window*)d;
     if (!w) return;
     if ((caps & WL_SEAT_CAPABILITY_KEYBOARD) && !w->kbd){
         w->kbd = wl_seat_get_keyboard(s);
@@ -157,10 +154,10 @@ const struct xdg_wm_base_listener* get_xdg_wm_listener(void){
 }
 void top_config(void* d, struct xdg_toplevel* t, i32 w, i32 h, struct wl_array* st){
     (void)t;(void)st;
-    struct Window* wdw = (struct Window*)d;
+    struct wayland_window* wdw = (struct wayland_window*)d;
     if (wdw && w > 0 && h > 0){ wdw->win_w = w; wdw->win_h = h; }
 }
-void top_close(void* d, struct xdg_toplevel* t){ (void)t; struct Window* w = (struct Window*)d; if (w) w->running = false; }
+void top_close(void* d, struct xdg_toplevel* t){ (void)t; struct wayland_window* w = (struct wayland_window*)d; if (w) w->running = false; }
 void top_bounds(void* d, struct xdg_toplevel* t, i32 w, i32 h){ (void)d;(void)t;(void)w;(void)h; }
 void top_caps(void* d, struct xdg_toplevel* t, struct wl_array* c){ (void)d;(void)t;(void)c; }
 
@@ -172,9 +169,9 @@ const struct xdg_toplevel_listener* get_top_listener(void){
 }
 
 void xsurf_conf(void* d, struct xdg_surface* s, u32 serial){
-    struct Window* w = (struct Window*)d;
+    struct wayland_window* w = (struct wayland_window*)d;
     xdg_surface_ack_configure(s, serial);
-    if (w){ w->vsync_ready = true; TSTAMP("xdg_surface configure"); }
+    if (w){ w->vsync_ready = true; pf_timestamp("xdg_surface configure"); }
 }
 const struct xdg_surface_listener* get_xsurf_listener(void){
     static const struct xdg_surface_listener xsurf_l = { .configure = xsurf_conf };
@@ -183,13 +180,13 @@ const struct xdg_surface_listener* get_xsurf_listener(void){
 
 /* ---------------- registry ---------------- */
 void reg_add(void* d, struct wl_registry* r, uint32_t name, const char* iface, uint32_t ver){
-    struct Window* w = (struct Window*)d;
+    struct wayland_window* w = (struct wayland_window*)d;
     if (!w) return;
     if (!strcmp(iface, wl_compositor_interface.name)){
-        u32 v = ver < 4 ? ver : 4; w->comp = wl_registry_bind(r, name, &wl_compositor_interface, v);
+        u32 v = ver < 4 ? ver : 4; w->compositor = wl_registry_bind(r, name, &wl_compositor_interface, v);
     } else if (!strcmp(iface, xdg_wm_base_interface.name)){
-        u32 v = ver < 6 ? ver : 6; w->xdg = wl_registry_bind(r, name, &xdg_wm_base_interface, v);
-        xdg_wm_base_add_listener(w->xdg, get_xdg_wm_listener(), w);
+        u32 v = ver < 6 ? ver : 6; w->xdg_wm_base = wl_registry_bind(r, name, &xdg_wm_base_interface, v);
+        xdg_wm_base_add_listener(w->xdg_wm_base, get_xdg_wm_listener(), w);
     } else if (!strcmp(iface, wl_seat_interface.name)){
         u32 v = ver < 5 ? ver : 5; w->seat = wl_registry_bind(r, name, &wl_seat_interface, v);
         wl_seat_add_listener(w->seat, get_seat_listener(), w);
@@ -202,42 +199,43 @@ const struct wl_registry_listener* get_registry_listener(void){
     return &reg_l;
 }
 
-struct Window* pf_create_window(keyboard_cb key_cb, mouse_cb mouse_cb){
-    TINIT();
-    struct Window* w = (struct Window*)calloc(1, sizeof(*w));
+struct WINDOW pf_create_window(void *ud, keyboard_cb key_cb, mouse_cb mouse_cb){
+    pf_time_reset();
+    struct wayland_window* w = (struct wayland_window*)calloc(1, sizeof(*w));
     w->win_w = 0; w->win_h = 0; w->running = true; w->vsync_ready = false;
-    w->on_key = key_cb; w->on_mouse = mouse_cb;
+    w->on_key = key_cb; w->on_mouse = mouse_cb; w->callback_data = ud;
 
-    w->dpy = wl_display_connect(NULL);
-    if (!w->dpy){ fprintf(stderr, "wl connect failed\n"); exit(1); }
-    TSTAMP("wl_display_connect");
+    w->display = wl_display_connect(NULL);
+    if (!w->display){ fprintf(stderr, "wl connect failed\n"); exit(1); }
+    pf_timestamp("wl_display_connect");
 
-    struct wl_registry* reg = wl_display_get_registry(w->dpy);
+    struct wl_registry* reg = wl_display_get_registry(w->display);
     wl_registry_add_listener(reg, get_registry_listener(), w);
-    wl_display_roundtrip(w->dpy);
-    TSTAMP("wl globals ready");
-    if (!w->comp || !w->xdg){ fprintf(stderr, "missing compositor/xdg\n"); exit(1); }
+    wl_display_roundtrip(w->display);
+    pf_timestamp("wl globals ready");
+    if (!w->compositor || !w->xdg_wm_base){ fprintf(stderr, "missing compositor/xdg\n"); exit(1); }
 
-    w->surf  = wl_compositor_create_surface(w->comp);
-    w->xsurf = xdg_wm_base_get_xdg_surface(w->xdg, w->surf);
-    xdg_surface_add_listener(w->xsurf, get_xsurf_listener(), w);
-    w->xtop  = xdg_surface_get_toplevel(w->xsurf);
-    xdg_toplevel_add_listener(w->xtop, get_top_listener(), w);
-    xdg_toplevel_set_title(w->xtop, "tri2");
-    xdg_toplevel_set_app_id(w->xtop, "tri2");
-    xdg_toplevel_set_fullscreen(w->xtop, NULL);
-    wl_surface_commit(w->surf);
+    w->surface  = wl_compositor_create_surface(w->compositor);
+    w->xdg_surface = xdg_wm_base_get_xdg_surface(w->xdg_wm_base, w->surface);
+    xdg_surface_add_listener(w->xdg_surface, get_xsurf_listener(), w);
+    w->xdg_toplevel  = xdg_surface_get_toplevel(w->xdg_surface);
+    xdg_toplevel_add_listener(w->xdg_toplevel, get_top_listener(), w);
+    xdg_toplevel_set_title(w->xdg_toplevel, "tri2");
+    xdg_toplevel_set_app_id(w->xdg_toplevel, "tri2");
+    xdg_toplevel_set_fullscreen(w->xdg_toplevel, NULL);
+    wl_surface_commit(w->surface);
     bool *flag = &w->vsync_ready; // making sure here we've actually gone fullscreen before moving on
     while (!*flag) {
-        wl_display_flush(w->dpy);
-        if (wl_display_dispatch(w->dpy) < 0) exit(1);
+        wl_display_flush(w->display);
+        if (wl_display_dispatch(w->display) < 0) exit(1);
     }
-    TSTAMP("wl first commit"); // should be done with all this in ~10ms or less
-    return w;
+    pf_timestamp("wl first commit"); // should be done with all this in ~10ms or less
+    return (struct WINDOW) { w->win_w, w->win_h, w->display, w->surface};
 }
 
-int pf_poll_events(struct Window* w){
-    if (!w || !w->running) return 0;
-    wl_display_dispatch(w->dpy);
+int pf_poll_events(struct WINDOW* w){
+    if (!w) return 0;
+    wl_display_dispatch(w->display_or_inst);
     return 1;
 }
+#endif
