@@ -457,25 +457,22 @@ static void make_offscreen(void)
     VKC(vkCreateSampler(dev,&sci,NULL,&off_samp));
 }
 
-static void make_descriptors(void)
-{
-    VkDescriptorSetLayoutBinding b0 = {
-        .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1,
-        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT
+static void make_descriptors(void){
+    VkDescriptorSetLayoutBinding b[2] = {
+        { .binding=0, .descriptorType=VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .descriptorCount=1, .stageFlags=VK_SHADER_STAGE_FRAGMENT_BIT },
+        { .binding=1, .descriptorType=VK_DESCRIPTOR_TYPE_SAMPLER,       .descriptorCount=1, .stageFlags=VK_SHADER_STAGE_FRAGMENT_BIT }
     };
-    VkDescriptorSetLayoutCreateInfo dlci = {
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = &b0
-    };
+    VkDescriptorSetLayoutCreateInfo dlci = { .sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount=2, .pBindings=b };
     VKC(vkCreateDescriptorSetLayout(dev,&dlci,NULL,&dsl));
-    VkDescriptorPoolSize ps = {.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1};
-    VkDescriptorPoolCreateInfo dpci = {
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1, .poolSizeCount = 1, .pPoolSizes = &ps
+
+    VkDescriptorPoolSize ps[2] = {
+        { .type=VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .descriptorCount=1 },
+        { .type=VK_DESCRIPTOR_TYPE_SAMPLER,       .descriptorCount=1 }
     };
+    VkDescriptorPoolCreateInfo dpci = { .sType=VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets=1, .poolSizeCount=2, .pPoolSizes=ps };
     VKC(vkCreateDescriptorPool(dev,&dpci,NULL,&dpool));
-    VkDescriptorSetAllocateInfo dsai = {
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = dpool, .descriptorSetCount = 1,
-        .pSetLayouts = &dsl
-    };
+
+    VkDescriptorSetAllocateInfo dsai = { .sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool=dpool, .descriptorSetCount=1, .pSetLayouts=&dsl };
     VKC(vkAllocateDescriptorSets(dev,&dsai,&dset));
 }
 
@@ -753,14 +750,13 @@ static void make_swapchain_and_record(u32 w, u32 h)
     };
     VKC(vkAllocateCommandBuffers(dev,&cai,cmdbuf));
 
-    VkDescriptorImageInfo dii = {
-        .sampler = off_samp, .imageView = off_view, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+    VkDescriptorImageInfo img = { .imageView=off_view, .imageLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    VkDescriptorImageInfo smp = { .sampler=off_samp };
+    VkWriteDescriptorSet write_descriptor_set[2] = {
+        { .sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet=dset, .dstBinding=0, .descriptorCount=1, .descriptorType=VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .pImageInfo=&img },
+        { .sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet=dset, .dstBinding=1, .descriptorCount=1, .descriptorType=VK_DESCRIPTOR_TYPE_SAMPLER,       .pImageInfo=&smp }
     };
-    VkWriteDescriptorSet w0 = {
-        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = dset, .dstBinding = 0, .descriptorCount = 1,
-        .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &dii
-    };
-    vkUpdateDescriptorSets(dev, 1, &w0, 0,NULL);
+    vkUpdateDescriptorSets(dev, 2, write_descriptor_set, 0, NULL);
 
     for (u32 i = 0; i < sc_img_count; i++)
     {
