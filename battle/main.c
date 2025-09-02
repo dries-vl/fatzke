@@ -1,3 +1,5 @@
+#include <stdio.h>
+
 #include "header.h"
 
 void key_input_callback(void* ud, enum KEYBOARD_BUTTON key, enum INPUT_STATE state)
