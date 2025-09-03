@@ -1,6 +1,5 @@
 // source ~/Downloads/1.4.321.1/setup-env.sh
-// slangc shaders.slang -entry VS_Tri -entry PS_Tri -entry VS_Blit -entry
-// PS_Blit -target spirv -fvk-use-entrypoint-name -o shaders.spv
+// slangc shaders.slang -entry VS_Tri -entry PS_Tri -entry VS_Blit -entry PS_Blit -target spirv -fvk-use-entrypoint-name -o shaders.spv; xxd -i shaders.spv > shaders.h; rm shaders.spv
 struct Vertex {
   float4 pos : SV_Position;
   float3 col : COLOR0;
@@ -33,7 +32,7 @@ VSOutBlit VS_Blit(uint vid: SV_VertexID) {
 // Bindings: set=0,binding=0/1 (adjust if you prefer different layout)
 [[vk::binding(0, 0)]]
 Texture2D uTex;
-[[vk::binding(0, 1)]]
+[[vk::binding(1, 0)]]
 SamplerState uSamp;
 [shader("pixel")]
 float4 PS_Blit(VSOutBlit i) : SV_Target { return uTex.Sample(uSamp, i.uv); }

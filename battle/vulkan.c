@@ -89,21 +89,14 @@ static void* read_file(const char* path, size_t* out_sz)
 }
 
 // TODO: convert spirv to static .h to include bytes directly
+#include "static/shaders.h"
 static VkShaderModule sm_from_file(const char* path)
 {
-    size_t sz = 0;
-    void* bytes = read_file(path, &sz);
-    if (!bytes)
-    {
-        fprintf(stderr, "missing %s\n", path);
-        exit(1);
-    }
     VkShaderModuleCreateInfo ci = {
-        .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sz, .pCode = (const u32*)bytes
+        .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = static_shaders_spv_len, .pCode = (const u32*)static_shaders_spv
     };
     VkShaderModule m;
     VKC(vkCreateShaderModule(dev,&ci,NULL,&m));
-    free(bytes);
     return m;
 }
 
