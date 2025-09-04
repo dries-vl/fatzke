@@ -1,5 +1,8 @@
-// source ~/Downloads/1.4.321.1/setup-env.sh
-// slangc shaders.slang -entry VS_Tri -entry PS_Tri -entry VS_Blit -entry PS_Blit -target spirv -fvk-use-entrypoint-name -o shaders.spv; xxd -i shaders.spv > shaders.h; rm shaders.spv
+// WINDOWS: scoop install main/vulkan (for slangc)
+// WINDOWS: scoop install main/ktx-software (for toktx)
+// WINDOWS: scoop install main/vim (for xxd)
+// source ~/Downloads/1.4.321.1/setup-env.sh (vulkan sdk download on linux, for slangc)
+// slangc shaders.slang -entry VS_Tri -entry PS_Tri -entry VS_Blit -entry PS_Blit -target spirv -fvk-use-entrypoint-name -o static/shaders.spv; xxd -i static/shaders.spv > static/shaders.h; rm static/shaders.spv
 struct Vertex {
   float4 pos : SV_Position;
   float3 col : COLOR0;
