@@ -15,8 +15,17 @@
 // sudo wayland-scanner private-code /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml /usr/include/xdg-shell-client-protocol.c
 #include <xdg-shell-client-protocol.h>
 #include <xdg-shell-client-protocol.c>
+// sudo wayland-scanner client-header /usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml /usr/include/presentation-time-client-protocol.h
+// sudo wayland-scanner private-code /usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml /usr/include/presentation-time-client-protocol.c
+#include <presentation-time-client-protocol.h>
+#include <presentation-time-client-protocol.c>
+// sudo wayland-scanner client-header /usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml /usr/include/drm-lease-v1-client-protocol.h
+// sudo wayland-scanner private-code /usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml /usr/include/drm-lease-v1-client-protocol.c
+#include <drm-lease-v1-client-protocol.h>
+#include <drm-lease-v1-client-protocol.c>
 
-inline u64 now_ns(void){ struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts); return (u64)ts.tv_sec*1000000000ull+ts.tv_nsec; }
+
+u64 now_ns(void){ struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts); return (u64)ts.tv_sec*1000000000ull+ts.tv_nsec; }
 u64 T0;
 void pf_time_reset() {T0=now_ns();}
 void pf_timestamp(char *msg) {u64 _t=now_ns(); fprintf(stderr,"[+%7.3f ms] %s\n",(_t-T0)/1e6,(msg));}
@@ -29,6 +38,7 @@ struct wayland_window {
     struct xdg_wm_base* xdg_wm_base;
     struct xdg_surface* xdg_surface;
     struct xdg_toplevel* xdg_toplevel;
+    struct wp_presentation* presentation;  /* global */
 
     /* Input */
     struct wl_seat* seat;
@@ -37,9 +47,12 @@ struct wayland_window {
 
     /* State */
     i32 win_w, win_h;
-    bool running;
-    bool vsync_ready;
     i32 mouse_x, mouse_y;
+
+    bool vsync_ready;
+    int discard_streak;                    /* consecutive discarded frames */
+    bool active;                           /* xdg_toplevel state (ACTIVATED) */
+    bool minimized;                        /* configure(0,0) convention */
 
     /* App callbacks */
     keyboard_cb on_key;
@@ -147,19 +160,18 @@ const struct wl_seat_listener* get_seat_listener(void){
 }
 
 /* ---------------- xdg wm + toplevel ---------------- */
-void xdg_ping(void* d, struct xdg_wm_base* b, u32 s){ (void)d; xdg_wm_base_pong(b, s); }
+void xdg_ping(void* d, struct xdg_wm_base* b, u32 s){ xdg_wm_base_pong(b, s); }
 const struct xdg_wm_base_listener* get_xdg_wm_listener(void){
     static const struct xdg_wm_base_listener l = { .ping = xdg_ping };
     return &l;
 }
 void top_config(void* d, struct xdg_toplevel* t, i32 w, i32 h, struct wl_array* st){
-    (void)t;(void)st;
     struct wayland_window* wdw = (struct wayland_window*)d;
     if (wdw && w > 0 && h > 0){ wdw->win_w = w; wdw->win_h = h; }
 }
-void top_close(void* d, struct xdg_toplevel* t){ (void)t; struct wayland_window* w = (struct wayland_window*)d; if (w) w->running = false; }
-void top_bounds(void* d, struct xdg_toplevel* t, i32 w, i32 h){ (void)d;(void)t;(void)w;(void)h; }
-void top_caps(void* d, struct xdg_toplevel* t, struct wl_array* c){ (void)d;(void)t;(void)c; }
+void top_close(void* d, struct xdg_toplevel* t){ }
+void top_bounds(void* d, struct xdg_toplevel* t, i32 w, i32 h){ }
+void top_caps(void* d, struct xdg_toplevel* t, struct wl_array* c){ }
 
 const struct xdg_toplevel_listener* get_top_listener(void){
     static const struct xdg_toplevel_listener top_l = {
@@ -178,9 +190,18 @@ const struct xdg_surface_listener* get_xsurf_listener(void){
     return &xsurf_l;
 }
 
+static void surf_enter(void* d, struct wl_surface* s, struct wl_output* o){
+}
+static void surf_leave(void* d, struct wl_surface* s, struct wl_output* o){ // surface is minimized (alt tab is not enough)
+}
+static const struct wl_surface_listener* get_surface_listener(void){
+    static const struct wl_surface_listener L = { .enter = surf_enter, .leave = surf_leave };
+    return &L;
+}
+
 /* ---------------- registry ---------------- */
 void reg_add(void* d, struct wl_registry* r, uint32_t name, const char* iface, uint32_t ver){
-    struct wayland_window* w = (struct wayland_window*)d;
+    struct wayland_window* w = d;
     if (!w) return;
     if (!strcmp(iface, wl_compositor_interface.name)){
         u32 v = ver < 4 ? ver : 4; w->compositor = wl_registry_bind(r, name, &wl_compositor_interface, v);
@@ -190,19 +211,50 @@ void reg_add(void* d, struct wl_registry* r, uint32_t name, const char* iface, u
     } else if (!strcmp(iface, wl_seat_interface.name)){
         u32 v = ver < 5 ? ver : 5; w->seat = wl_registry_bind(r, name, &wl_seat_interface, v);
         wl_seat_add_listener(w->seat, get_seat_listener(), w);
+    } else if (!strcmp(iface, wp_presentation_interface.name)) {
+        /* v1 is fine */
+        w->presentation = wl_registry_bind(r, name, &wp_presentation_interface, 1);
     }
 }
-void reg_rem(void* d, struct wl_registry* r, u32 name){ (void)d;(void)r;(void)name; }
+void reg_rem(void* d, struct wl_registry* r, u32 name){}
 
 const struct wl_registry_listener* get_registry_listener(void){
     static const struct wl_registry_listener reg_l = { .global = reg_add, .global_remove = reg_rem };
     return &reg_l;
 }
 
-struct WINDOW pf_create_window(void *ud, keyboard_cb key_cb, mouse_cb mouse_cb){
+int pf_window_width(void *w) {
+    struct wayland_window* win = w; return win->win_w;
+}
+
+int pf_window_height(void *w) {
+    struct wayland_window* win = w; return win->win_h;
+}
+
+void *pf_surface_or_hwnd(void *w) {
+    struct wayland_window* win = w; return win->surface;
+}
+
+void *pf_display_or_instance(void *w) {
+    struct wayland_window* win = w; return win->display;
+}
+
+int pf_window_visible(void *w) {
+    struct wayland_window* win = w; return 1;
+}
+
+int pf_poll_events(void* win){
+    struct wayland_window* w = win;
+    if(!w) return 0;
+    wl_display_dispatch_pending(w->display);
+    wl_display_flush(w->display);
+    return 1;
+}
+
+void *pf_create_window(void *ud, keyboard_cb key_cb, mouse_cb mouse_cb){
     pf_time_reset();
-    struct wayland_window* w = (struct wayland_window*)calloc(1, sizeof(*w));
-    w->win_w = 0; w->win_h = 0; w->running = true; w->vsync_ready = false;
+    struct wayland_window* w = calloc(1, sizeof(*w));
+    w->win_w = 0; w->win_h = 0; w->vsync_ready = false;
     w->on_key = key_cb; w->on_mouse = mouse_cb; w->callback_data = ud;
 
     w->display = wl_display_connect(NULL);
@@ -215,7 +267,9 @@ struct WINDOW pf_create_window(void *ud, keyboard_cb key_cb, mouse_cb mouse_cb){
     pf_timestamp("wl globals ready");
     if (!w->compositor || !w->xdg_wm_base){ fprintf(stderr, "missing compositor/xdg\n"); exit(1); }
 
+
     w->surface  = wl_compositor_create_surface(w->compositor);
+    wl_surface_add_listener(w->surface, get_surface_listener(), w);
     w->xdg_surface = xdg_wm_base_get_xdg_surface(w->xdg_wm_base, w->surface);
     xdg_surface_add_listener(w->xdg_surface, get_xsurf_listener(), w);
     w->xdg_toplevel  = xdg_surface_get_toplevel(w->xdg_surface);
@@ -230,12 +284,6 @@ struct WINDOW pf_create_window(void *ud, keyboard_cb key_cb, mouse_cb mouse_cb){
         if (wl_display_dispatch(w->display) < 0) exit(1);
     }
     pf_timestamp("wl first commit"); // should be done with all this in ~10ms or less
-    return (struct WINDOW) { w->win_w, w->win_h, w->display, w->surface};
-}
-
-int pf_poll_events(struct WINDOW* w){
-    if (!w) return 0;
-    wl_display_dispatch(w->display_or_inst);
-    return 1;
+    return w;
 }
 #endif

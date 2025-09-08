@@ -3,31 +3,21 @@ cmake_minimum_required(VERSION 3.16)
 project(fatzke C)
 set(CMAKE_C_STANDARD 99)
 
-function(add_bin name src_dir libs_win libs_unix)
-    file(GLOB SRCS CONFIGURE_DEPENDS "${src_dir}/*.c")
+# fatzke
+file(GLOB SRC "${CMAKE_SOURCE_DIR}/../fatzke/*.c")
+add_executable(fatzke ${SRC})
+if(WIN32)
+    target_link_libraries(fatzke PRIVATE user32 gdi32)
+else()
+    target_link_libraries(fatzke PRIVATE wayland-client)
+endif()
+set_target_properties(fatzke PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
-    if(SRCS STREQUAL "")
-        message(FATAL_ERROR "add_bin(${name}): no .c files found in ${src_dir}")
-    endif()
-
-    add_executable(${name} ${SRCS})
-    target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR})
-
-    if(WIN32)
-        if(NOT "${libs_win_norm}" STREQUAL "")
-            target_link_libraries(${name} PRIVATE ${libs_win_norm})
-        endif()
-    else()
-        if(NOT "${libs_unix_norm}" STREQUAL "")
-            target_link_libraries(${name} PRIVATE ${libs_unix_norm})
-        endif()
-    endif()
-
-    set_target_properties(${name} PROPERTIES
-            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/../${name}"
-    )
-endfunction()
-
-# one-liners
-add_bin(fatzke ../fatzke "gdi32;user32" "wayland-client")
-add_bin(battle ../battle "user32;gdi32" "wayland-client;vulkan")
+# battle
+file(GLOB SRC "${CMAKE_SOURCE_DIR}/../battle/*.c")
+add_executable(battle ${SRC})
+if(WIN32)
+    target_link_libraries(battle PRIVATE user32 gdi32 vulkan-1)
+else()
+    target_link_libraries(battle PRIVATE wayland-client vulkan)
+endif()

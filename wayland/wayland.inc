@@ -208,17 +208,15 @@ u32 *get_buffer(struct ctx *c) {
     return c->pixels;
 }
 
-static void frame_done(void *data, struct wl_callback *cb, u32 time);
-
-static const struct wl_callback_listener frame_listener = {
-    .done = frame_done,
-};
-
 static void frame_done(void *data, struct wl_callback *cb, u32 time) {
     wl_callback_destroy(cb);
     struct ctx *c = data;
     c->vsync_ready = 1;
 }
+
+static const struct wl_callback_listener frame_listener = {
+    .done = frame_done,
+};
 
 void commit(struct ctx *c)
 {
@@ -235,7 +233,7 @@ void commit(struct ctx *c)
     wl_display_flush(c->dpy);
 }
 
-int pf_poll_events(struct ctx *c) {
+int poll_events(struct ctx *c) {
     // blocks until we receive an event
     return wl_display_dispatch(c->dpy) >= 0; // returns -1 if connection to compositor dead
 }
@@ -293,7 +291,7 @@ static void install_desktop_and_icon_once(const char *executable_name) {
     }
 }
 
-struct ctx *pf_create_window(keyboard_cb kcb, mouse_cb mcb, resize_cb rcb, void *ud) {
+struct ctx *create_window(keyboard_cb kcb, mouse_cb mcb, resize_cb rcb, void *ud) {
     // Stupid hack needed on wayland: put exe icon in executable, and then copy to the right dir to have an icon
     char exe_path[PATH_MAX]; ssize_t path_len = readlink("/proc/self/exe", exe_path, sizeof exe_path - 1); if (path_len <= 0) _exit(1); exe_path[path_len]=0;
     const char *exe_name = strrchr(exe_path, '/');
