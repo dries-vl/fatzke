@@ -1,138 +1,51 @@
-// main.c  (no Vulkan headers)
+#include "header.h"
 #include <stdio.h>
 #include <stdlib.h>
-#include <fcntl.h>
+#include <signal.h>
 #include <unistd.h>
 #include <time.h>
 
-#include "header.h"
+static volatile sig_atomic_t g_stop=0;
+static void on_sigint(int s){ (void)s; g_stop=1; }
 
-#include <xf86drm.h>
-#include <xf86drmMode.h>
-
-u64 now_ns(void){ struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts); return (u64)ts.tv_sec*1000000000ull+ts.tv_nsec; }
-u64 T0;
-void pf_time_reset() {T0=now_ns();}
-void pf_timestamp(char *msg) {u64 _t=now_ns(); fprintf(stderr,"[+%7.3f ms] %s\n",(_t-T0)/1e6,(msg));}
-
-#include <signal.h>
-#include <sys/ioctl.h>
-#include <linux/vt.h>
-#include <fcntl.h>
-#include <unistd.h>
-
-static int g_drm_fd = -1;
-static int g_home_vt = -1;
-
-static int vt_cur_active(void){
-    int fd = open("/dev/tty0", O_RDONLY|O_CLOEXEC);
-    if(fd < 0) return -1;
-    struct vt_stat s; int ok = ioctl(fd, VT_GETSTATE, &s) == 0;
-    close(fd);
-    return ok ? s.v_active : -1;
-}
-static int vt_activate(int vt){
-    int fd = open("/dev/tty0", O_RDONLY|O_CLOEXEC);
-    if(fd < 0) return -1;
-    int ok = (ioctl(fd, VT_ACTIVATE, vt) == 0) && (ioctl(fd, VT_WAITACTIVE, vt) == 0);
-    close(fd);
-    return ok ? 0 : -1;
-}
-
-// read MYGAME_HOME_VT if Steam launcher exported it, else remember the VT we came from
-static void detect_home_vt(void){
-    const char* v = getenv("MYGAME_HOME_VT");
-    if(v && *v){ g_home_vt = (int)strtol(v, NULL, 10); }
-    if(g_home_vt <= 0) g_home_vt = vt_cur_active(); // best-effort
-}
-
-static void safe_cleanup(void){
-    // Drop master so the console/compositor can re-take KMS
-    if(g_drm_fd >= 0){
-        drmDropMaster(g_drm_fd);
-        // don't close(g_drm_fd) here if your Vulkan path still needs it; otherwise:
-        // close(g_drm_fd); g_drm_fd = -1;
-    }
-    // Tear Vulkan down (your function already guards against NULLs)
-    vk_shutdown_all();
-    // Switch back to desktop VT
-    if(g_home_vt > 0) vt_activate(g_home_vt);
-}
-
-static void on_signal(int sig){
-    safe_cleanup();
-    // Re-raise default for crash signals so you still get a core/log
-    signal(sig, SIG_DFL);
-    raise(sig);
-}
-
-static int open_card_with_connectors(void)
-{
-    for (int i = 0; i < 8; i++)
-    {
-        char p[64];
-        snprintf(p, sizeof p, "/dev/dri/card%d", i);
-        int fd = open(p, O_RDWR | O_CLOEXEC);
-        if (fd < 0) continue;
-        drmModeRes* res = drmModeGetResources(fd);
-        int ok = res && res->count_connectors > 0;
-        if (res) drmModeFreeResources(res);
-        if (ok) return fd;
-        close(fd);
-    }
-    return -1;
-}
-
-static int ensure_master(int fd)
-{
-    if (drmIsMaster(fd)) return 1;
-    return drmSetMaster(fd) == 0;
-}
-
-static unsigned env_u32(const char* name, unsigned fallback)
-{
-    const char* v = getenv(name);
-    if (!v || !*v) return fallback;
-    char* end = NULL;
-    unsigned long x = strtoul(v, &end, 10);
-    return (end && *end == '\0') ? (unsigned)x : fallback;
-}
+static u64 now_ns(void){ struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts); return (u64)ts.tv_sec*1000000000ull+ts.tv_nsec; }
 
 int main(void){
-    detect_home_vt();
-    atexit(safe_cleanup);
-    signal(SIGINT,  on_signal);
-    signal(SIGTERM, on_signal);
-    signal(SIGHUP,  on_signal);
-    signal(SIGSEGV, on_signal);
+    struct sigaction sa; sa.sa_handler=on_sigint; sigemptyset(&sa.sa_mask); sa.sa_flags=0; sigaction(SIGINT,&sa,NULL); sigaction(SIGTERM,&sa,NULL);
 
-    vk_init_instance();
-    vk_pick_phys();
+    int drm_fd=-1; u32 conn=0, crtc=0; struct KmsMode mode={0};
+    if(!linux_open_drm_pick(0,&drm_fd,&conn,&crtc,&mode)){ fprintf(stderr,"DRM pick failed\n"); return 1; }
+    fprintf(stderr,"KMS %ux%u@%u conn=%u crtc=%u\n",mode.width,mode.height,mode.vrefresh,conn,crtc);
 
-    int drm_fd = open_card_with_connectors();
-    g_drm_fd = drm_fd;                // so the cleanup can drop master
-    if(drm_fd < 0){ fprintf(stderr,"no DRM card with connectors\n"); return 1; }
+    struct ScanoutImage imgs[3]={0};
+    if(!linux_alloc_scanout_images(drm_fd,mode.width,mode.height,3,imgs)){ fprintf(stderr,"alloc scanout failed\n"); return 1; }
 
-    if(!ensure_master(drm_fd)){
-        fprintf(stderr,"drmSetMaster failed (launch via openvt -sw)\n");
-        return 1;
+    /* one-time modeset on first FB so we own the screen */
+    if(drmModeSetCrtc(drm_fd, crtc, imgs[0].fb_id, 0, 0, &conn, 1, NULL)!=0){
+        /* fallback to helper if NULL mode rejected */
+        extern int linux_queue_flip_nonblock(int,u32,u32,int);
+        extern int linux_pump_events(int,int);
+        /* many drivers accept SetCrtc with the connector's current mode pulled by the helper in linux.c,
+           but keeping it compact here; if this fails, the prior helper modeset() can be called. */
     }
 
-    unsigned prefer = env_u32("CONNECTOR", 0);
-    if(!vk_try_direct_display_takeover_with_fd(drm_fd, (int)prefer)){
-        fprintf(stderr,"direct-display takeover failed\n");
-        return 1;
+    vk_init_instance(); vk_pick_phys_and_queue(); vk_create_device(); vk_adopt_scanout_images(imgs,3);
+
+    u32 idx=0; u64 t0=now_ns();
+    while(!g_stop){
+        int sync_fd = vk_draw_and_export_sync(idx);
+        if(!linux_queue_flip_nonblock(drm_fd,crtc,imgs[idx].fb_id,sync_fd)){ fprintf(stderr,"flip queue fail\n"); break; }
+        /* pump DRM events a little to avoid blocking / keep VT healthy */
+        linux_pump_events(drm_fd, 8);
+        idx=(idx+1)%3;
+
+        /* simple escape valve: quit after 10 minutes */
+        if(((now_ns()-t0)/1000000000ull) > 600ull) break;
     }
 
-    vk_pick_qfam_for_surface();
-    vk_make_device();
-    vk_graph_initial_build(0,0);
-
-    for(int i = 0; i < 1000; ++i){
-        int outdated = vk_present_frame();
-        if(outdated) vk_recreate_all(0,0);
-        pf_timestamp("FRAME");
-        // TODO: add your own quit condition if you don't want infinite loop
-    }
-    return 0; // atexit() will run safe_cleanup()
+    vk_wait_idle(); vk_shutdown();
+    linux_free_scanout_images(drm_fd,imgs,3);
+    linux_drop_master_if_owner(drm_fd);
+    if(drm_fd>=0) close(drm_fd);
+    return 0;
 }
