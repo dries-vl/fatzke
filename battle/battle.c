@@ -1,7 +1,6 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdbool.h>
-#include <unistd.h>
 
 #define MAX_UNIT_SIZE 256
 #define MAX_UNITS 256
@@ -68,6 +67,6 @@ void simulate_battle() {
 
     while (true) {
         draw_battlefield(units);
-        sleep(1000);
+        //sleep(1000);
     }
 }

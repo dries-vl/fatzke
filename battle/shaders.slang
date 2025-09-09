@@ -1,6 +1,5 @@
 // WINDOWS: scoop install main/vulkan (for slangc)
 // WINDOWS: scoop install main/ktx-software (for toktx/ktx)
-// WINDOWS: scoop install main/vim (for xxd)
 // ARCH: yay -S ktx-software-bin (for toktx/ktx)
 // source ~/Downloads/1.4.321.1/setup-env.sh (vulkan sdk on linux, for slangc)
 /* slangc shaders.slang -entry VS_Tri -entry PS_Tri -entry VS_Blit

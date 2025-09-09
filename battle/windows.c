@@ -1,17 +1,16 @@
 #ifdef _WIN32
 #include "header.h"
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#include <stdbool.h>
-#include <stdlib.h>
-int printf(char *__format, ...);
 
-struct win32_window
-{
+#include <stdlib.h> // todo: get rid of calloc
+
+struct win32_window {
     HWND hwnd;
     HINSTANCE hinst;
     int win_w;
     int win_h;
-    bool running;
+    int running;
     int mouse_x;
     int mouse_y;
     keyboard_cb on_key;
@@ -33,7 +32,7 @@ static LRESULT CALLBACK pf_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         {
             if (ww)
             {
-                ww->running = false;
+                ww->running = 0;
                 SetWindowLongPtrW(h, GWLP_USERDATA, 0);
                 free(ww);
             }
@@ -102,8 +101,7 @@ static LRESULT CALLBACK pf_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
     return DefWindowProcW(h, m, w, l);
 }
 
-struct WINDOW pf_create_window(void* ud, keyboard_cb key_cb, mouse_cb mouse_cb)
-{
+WINDOW pf_create_window(void* ud, keyboard_cb key_cb, mouse_cb mouse_cb) {
     pf_time_reset();
     HINSTANCE hinst = GetModuleHandleW(NULL);
     WNDCLASSW wc = {0};
@@ -113,19 +111,18 @@ struct WINDOW pf_create_window(void* ud, keyboard_cb key_cb, mouse_cb mouse_cb)
     wc.lpszClassName = L"tri2_cls";
     RegisterClassW(&wc);
     int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
-    struct win32_window* ww = (struct win32_window*)calloc(1,sizeof *ww); if(!ww) exit(1);
-    ww->hinst=hinst; ww->win_w=sw; ww->win_h=sh; ww->running=true; ww->ud=ud; ww->on_key=key_cb; ww->on_mouse=mouse_cb;
+    struct win32_window* ww = calloc(1,sizeof *ww); if(!ww) exit(1);
+    ww->hinst=hinst; ww->win_w=sw; ww->win_h=sh; ww->running=1; ww->ud=ud; ww->on_key=key_cb; ww->on_mouse=mouse_cb;
     pf_timestamp("Register class etc.");
     HWND hwnd = CreateWindowExW(WS_EX_APPWINDOW, L"tri2_cls", L"tri2", WS_POPUP, 0, 0, sw, sh, NULL, NULL, hinst, NULL);
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)ww);
     pf_timestamp("Win32 window created");
     ShowWindow(hwnd, SW_SHOW);
     pf_timestamp("Win32 window shown");
-    return (struct WINDOW){(u32)sw, (u32)sh, (void*)hinst, (void*)hwnd};
+    return ww;
 }
 
-int pf_poll_events(struct WINDOW* w)
-{
+int pf_poll_events(WINDOW w) {
     if (!w) return 0;
     MSG msg;
     while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE))
@@ -134,5 +131,25 @@ int pf_poll_events(struct WINDOW* w)
         DispatchMessageW(&msg);
     }
     return 1;
+}
+
+int pf_window_width(void *w) {
+    struct win32_window* win = w; return win->win_w;
+}
+
+int pf_window_height(void *w) {
+    struct win32_window* win = w; return win->win_h;
+}
+
+void *pf_surface_or_hwnd(void *w) {
+    struct win32_window* win = w; return win->hwnd;
+}
+
+void *pf_display_or_instance(void *w) {
+    struct win32_window* win = w; return win->hinst;
+}
+
+int pf_window_visible(void *w) {
+    struct win32_window* win = w; return 1;
 }
 #endif
