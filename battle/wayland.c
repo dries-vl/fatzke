@@ -1,13 +1,7 @@
 #ifdef __linux__
 #include "header.h"
 
-#include <stdint.h>
-#include <stdbool.h>
-#include <stdio.h>
-#include <stdlib.h> // todo: get rid of calloc
-#include <string.h>
 #include <time.h>
-
 // sudo apt install libwayland-dev (for getting the wayland-client header and lib)
 #include <wayland-client.h>
 // sudo apt install wayland-protocols wayland-scanner (for generating the xdg-shell files)
@@ -24,11 +18,10 @@
 #include <drm-lease-v1-client-protocol.h>
 #include <drm-lease-v1-client-protocol.c>
 
-
 u64 now_ns(void){ struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts); return (u64)ts.tv_sec*1000000000ull+ts.tv_nsec; }
 u64 T0;
 void pf_time_reset() {T0=now_ns();}
-void pf_timestamp(char *msg) {u64 _t=now_ns(); fprintf(stderr,"[+%7.3f ms] %s\n",(_t-T0)/1e6,(msg));}
+void pf_timestamp(char *msg) {u64 _t=now_ns(); printf("[+%7.3f ms] %s\n",(_t-T0)/1e6,(msg));}
 
 struct wayland_window {
     /* Wayland core */
@@ -55,8 +48,8 @@ struct wayland_window {
     bool minimized;                        /* configure(0,0) convention */
 
     /* App callbacks */
-    keyboard_cb on_key;
-    mouse_cb on_mouse;
+    KEYBOARD_CB on_key;
+    MOUSE_CB on_mouse;
     void *callback_data;
 };
 
@@ -240,32 +233,32 @@ void *pf_display_or_instance(void *w) {
 }
 
 int pf_window_visible(void *w) {
-    struct wayland_window* win = w; return 1;
+    struct wayland_window* win = w; return 1; // todo: use presentation time callbacks to know if visible and not render if not
 }
 
 int pf_poll_events(void* win){
     struct wayland_window* w = win;
     if(!w) return 0;
-    wl_display_dispatch_pending(w->display);
+    wl_display_dispatch_pending(w->display); // dispatch all queued up events, don't block
     wl_display_flush(w->display);
-    return 1;
+    return 1; // let vulkan handle vsync
 }
 
-void *pf_create_window(void *ud, keyboard_cb key_cb, mouse_cb mouse_cb){
+void *pf_create_window(void *ud, KEYBOARD_CB key_cb, MOUSE_CB mouse_cb){
     pf_time_reset();
     struct wayland_window* w = calloc(1, sizeof(*w));
     w->win_w = 0; w->win_h = 0; w->vsync_ready = false;
     w->on_key = key_cb; w->on_mouse = mouse_cb; w->callback_data = ud;
 
     w->display = wl_display_connect(NULL);
-    if (!w->display){ fprintf(stderr, "wl connect failed\n"); exit(1); }
+    if (!w->display){ printf("wl connect failed\n"); _exit(1); }
     pf_timestamp("wl_display_connect");
 
     struct wl_registry* reg = wl_display_get_registry(w->display);
     wl_registry_add_listener(reg, get_registry_listener(), w);
     wl_display_roundtrip(w->display);
     pf_timestamp("wl globals ready");
-    if (!w->compositor || !w->xdg_wm_base){ fprintf(stderr, "missing compositor/xdg\n"); exit(1); }
+    if (!w->compositor || !w->xdg_wm_base){ printf("missing compositor/xdg\n"); _exit(1); }
 
 
     w->surface  = wl_compositor_create_surface(w->compositor);
@@ -281,7 +274,7 @@ void *pf_create_window(void *ud, keyboard_cb key_cb, mouse_cb mouse_cb){
     bool *flag = &w->vsync_ready; // making sure here we've actually gone fullscreen before moving on
     while (!*flag) {
         wl_display_flush(w->display);
-        if (wl_display_dispatch(w->display) < 0) exit(1);
+        if (wl_display_dispatch(w->display) < 0) _exit(1);
     }
     pf_timestamp("wl first commit"); // should be done with all this in ~10ms or less
     return w;

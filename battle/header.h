@@ -13,15 +13,20 @@ typedef long long isize;
 typedef unsigned long long usize;
 
 extern void _exit(int);
-extern int printf(const char*, ...);
+extern int setenv (const char*,const char*,int);
+extern int printf(const char*,...);
+extern void *memcpy(void *__restrict,const void*__restrict,__SIZE_TYPE__);
+extern int memcmp(const void*,const void*,__SIZE_TYPE__);
+extern int strcmp(const char*,const char*);
+#define NULL ((void *)0)
 
 #pragma region PLATFORM
+typedef void* WINDOW;
 enum MOUSE_BUTTON { MOUSE_MOVED, MOUSE_LEFT, MOUSE_RIGHT, MOUSE_MIDDLE, MOUSE_BUTTON_UNKNOWN };
 enum KEYBOARD_BUTTON { KEYBOARD_ESCAPE, KEYBOARD_BUTTON_UNKNOWN };
 enum INPUT_STATE { RELEASED, PRESSED };
-typedef void (*keyboard_cb)(void* ud, enum KEYBOARD_BUTTON key, enum INPUT_STATE state);
-typedef void (*mouse_cb)(void* ud, i32 x, unsigned y, enum MOUSE_BUTTON, enum INPUT_STATE state);
-typedef void* WINDOW;
+typedef void (*KEYBOARD_CB)(void*,enum KEYBOARD_BUTTON,enum INPUT_STATE);
+typedef void (*MOUSE_CB)(void*,i32,i32,enum MOUSE_BUTTON,enum INPUT_STATE);
 void pf_time_reset();
 void pf_timestamp(char*);
 int pf_window_width(WINDOW);
@@ -30,17 +35,15 @@ void *pf_surface_or_hwnd(WINDOW);
 void *pf_display_or_instance(WINDOW);
 int pf_window_visible(WINDOW);
 int pf_poll_events(WINDOW);
-WINDOW pf_create_window(void *ud, keyboard_cb key_cb, mouse_cb mouse_cb);
+WINDOW pf_create_window(void*,KEYBOARD_CB,MOUSE_CB);
 #pragma endregion
 
 #pragma region VULKAN
-void vk_init_instance(void);
-void vk_create_surface(void*, void*);
-void vk_make_device(void);
-void vk_choose_phys_and_queue(void);
-void vk_graph_initial_build(u32,u32);
-int  vk_present_frame(void);
-void vk_recreate_all(u32,u32);
-void vk_shutdown_all(void);
+void vk_init(void*,void*);
+void vk_create_resources(void);
+void vk_render_frame(u32,u32);
 #pragma endregion
 
+#pragma region SETTINGS
+#define DEBUG 1
+#pragma endregion
