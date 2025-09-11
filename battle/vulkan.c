@@ -7,6 +7,9 @@
 extern int putenv(char*);
 #endif
 #include <vulkan/vulkan.h>
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h> // malloc/free
 
 extern const unsigned char font_atlas[];
 extern const unsigned char font_atlas_end[];
@@ -79,6 +82,8 @@ static const char* vk_result_str(VkResult r) {
     case VK_ERROR_TOO_MANY_OBJECTS: return "VK_ERROR_TOO_MANY_OBJECTS";
     case VK_ERROR_FORMAT_NOT_SUPPORTED: return "VK_ERROR_FORMAT_NOT_SUPPORTED";
     case VK_ERROR_FRAGMENTED_POOL: return "VK_ERROR_FRAGMENTED_POOL";
+    case VK_SUBOPTIMAL_KHR: return "VK_SUBOPTIMAL_KHR";
+    case VK_ERROR_OUT_OF_DATE_KHR: return "VK_ERROR_OUT_OF_DATE_KHR";
     default: return "VK_RESULT_UNKNOWN";
     }
 }
@@ -91,7 +96,6 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL vk_debug_cb(
     const VkDebugUtilsMessengerCallbackDataEXT* data,
     void* user_data)
 {
-    (void)types; (void)user_data;
     const char* sev =
         (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) ? "ERROR" :
         (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) ? "WARN " :
@@ -127,7 +131,7 @@ void vk_init(void* display_or_hinst, void* surface_or_hwnd) {
     //putenv("VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/intel_icd.x86_64.json");
 #endif
 
-#ifdef DEBUG
+#if DEBUG == 1
     const char* layers[] = { "VK_LAYER_KHRONOS_validation" };
     const uint32_t layer_count = 1;
 #else
@@ -141,12 +145,13 @@ void vk_init(void* display_or_hinst, void* surface_or_hwnd) {
     const char* exts[] = {"VK_KHR_surface","VK_KHR_wayland_surface","VK_EXT_debug_utils"};
 #endif
     const uint32_t ext_count = sizeof(exts)/sizeof(exts[0]);
+
     // Optional: turn on extra validation goodies
     VkValidationFeatureEnableEXT enables[] = {
         VK_VALIDATION_FEATURE_ENABLE_BEST_PRACTICES_EXT,
         VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_EXT,
         VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT,
-        // VK_VALIDATION_FEATURE_ENABLE_DEBUG_PRINTF_EXT, // enable if you use debugPrintf in shaders
+        // VK_VALIDATION_FEATURE_ENABLE_DEBUG_PRINTF_EXT,
     };
     VkValidationFeaturesEXT vfeatures = {
         .sType = VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT,
@@ -160,13 +165,16 @@ void vk_init(void* display_or_hinst, void* surface_or_hwnd) {
         .messageSeverity =
             VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT |
             VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
-            VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT, // drop INFO/VERBOSE if too chatty
+            VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT,
         .messageType =
             VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
             VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
             VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
         .pfnUserCallback = vk_debug_cb,
     };
+
+    // Chain validation features -> debug messenger -> instance
+    vfeatures.pNext = &dbg_ci;
 
     VkInstanceCreateInfo ci = {
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
@@ -175,7 +183,7 @@ void vk_init(void* display_or_hinst, void* surface_or_hwnd) {
         .ppEnabledExtensionNames = exts,
         .enabledLayerCount = layer_count,
         .ppEnabledLayerNames = layers,
-        .pNext = &dbg_ci
+        .pNext = &vfeatures
     };
     VULKAN_CALL(vkCreateInstance(&ci, NULL, &vk.instance));  // -- ca. 20ms
     pf_timestamp("vkCreateInstance");
@@ -195,12 +203,50 @@ void vk_init(void* display_or_hinst, void* surface_or_hwnd) {
     VULKAN_CALL(vkCreateWin32SurfaceKHR(vk.instance, &sci, NULL, &vk.surface));
 #endif
     pf_timestamp("vkCreateWaylandSurfaceKHR");
-    uint32_t n=1; VkPhysicalDevice d[1];
-    VULKAN_CALL(vkEnumeratePhysicalDevices(vk.instance,&n,d));
-    if(!n){printf("no phys\n"); _exit(1);}
-    vk.physical_device=d[0]; vk.queue_family_index=0;  /* assumes family 0 works */
+
+    // --- Enumerate physical devices (2-call pattern) ---
+    uint32_t phys_count = 0;
+    VkResult er = vkEnumeratePhysicalDevices(vk.instance, &phys_count, NULL);
+    if (er != VK_SUCCESS || phys_count == 0) { printf("no phys\n"); _exit(1); }
+
+    VkPhysicalDevice* phys = (VkPhysicalDevice*)malloc(sizeof(VkPhysicalDevice) * phys_count);
+    if (!phys) { printf("oom\n"); _exit(1); }
+    er = vkEnumeratePhysicalDevices(vk.instance, &phys_count, phys);
+    if (er != VK_SUCCESS && er != VK_INCOMPLETE) { printf("enum phys failed: %s\n", vk_result_str(er)); _exit(1); }
+
+    // Pick the first device that has a queue family supporting graphics + present
+    int chosen_phys = -1;
+    int chosen_qfam = -1;
+    for (uint32_t pd = 0; pd < phys_count; ++pd) {
+        uint32_t qcount = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(phys[pd], &qcount, NULL);
+        if (!qcount) continue;
+        VkQueueFamilyProperties* qprops = (VkQueueFamilyProperties*)malloc(sizeof(VkQueueFamilyProperties)*qcount);
+        if (!qprops) continue;
+        vkGetPhysicalDeviceQueueFamilyProperties(phys[pd], &qcount, qprops);
+
+        for (uint32_t i = 0; i < qcount; ++i) {
+            VkBool32 sup = VK_FALSE;
+            VULKAN_CALL(vkGetPhysicalDeviceSurfaceSupportKHR(phys[pd], i, vk.surface, &sup));
+            if (sup && (qprops[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
+                chosen_phys = (int)pd;
+                chosen_qfam = (int)i;
+                break;
+            }
+        }
+        free(qprops);
+        if (chosen_phys >= 0) break;
+    }
+
+    if (chosen_phys < 0) { printf("No device with graphics+present queue\n"); _exit(1); }
+
+    vk.physical_device = phys[chosen_phys];
+    vk.queue_family_index = (u32)chosen_qfam;
+    free(phys);
+
     vkGetPhysicalDeviceMemoryProperties(vk.physical_device, &vk.device_memory_properties);
     pf_timestamp("pick phys+queue");
+
     float pr = 1.0f;
     VkDeviceQueueCreateInfo qci = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = vk.queue_family_index, .queueCount = 1,
@@ -239,6 +285,14 @@ void vk_create_resources(void) {
     if (memcmp(hdr.identifier, magic, 12) != 0) { printf("not a KTX2\n"); _exit(1); }
     VkFormat fmt = (VkFormat)hdr.vkFormat;
     if (!(fmt==VK_FORMAT_ASTC_12x12_UNORM_BLOCK || fmt==VK_FORMAT_ASTC_12x12_SRGB_BLOCK)) { printf("need ASTC 12x12\n"); _exit(1); }
+
+    // Check ASTC format support on this device
+    VkFormatProperties fprops;
+    vkGetPhysicalDeviceFormatProperties(vk.physical_device, fmt, &fprops);
+    if (!(fprops.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) {
+        printf("ASTC format not supported for sampled images on this device\n"); _exit(1);
+    }
+
     const u32 mips = hdr.levelCount;
     const struct KTX2LevelIndex* lv = (const struct KTX2LevelIndex*)(file + sizeof(struct KTX2Header));
     size_t total = 0;
@@ -256,7 +310,7 @@ void vk_create_resources(void) {
     VkMemoryPropertyFlags req = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
     u32 mem_type = 0;
     for (u32 i=0;i<vk.device_memory_properties.memoryTypeCount;i++)
-        if (mr.memoryTypeBits & 1u<<i && (vk.device_memory_properties.memoryTypes[i].propertyFlags & req)==req) { mem_type=i; break; }
+        if ((mr.memoryTypeBits & (1u<<i)) && (vk.device_memory_properties.memoryTypes[i].propertyFlags & req)==req) { mem_type=i; break; }
     VkMemoryAllocateInfo mai={ .sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize=mr.size, .memoryTypeIndex=mem_type };
     VULKAN_CALL(vkAllocateMemory(vk.device,&mai,NULL,&vk.texture_memory));
     VULKAN_CALL(vkBindImageMemory(vk.device,vk.texture_image,vk.texture_memory,0));
@@ -268,7 +322,7 @@ void vk_create_resources(void) {
     VkMemoryRequirements bmr; vkGetBufferMemoryRequirements(vk.device,stg,&bmr);
     u32 type=0; VkMemoryPropertyFlags flags=VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     for (u32 i=0;i<vk.device_memory_properties.memoryTypeCount;i++)
-        if (bmr.memoryTypeBits & 1u<<i && (vk.device_memory_properties.memoryTypes[i].propertyFlags & flags)==flags) { type=i; break; }
+        if ((bmr.memoryTypeBits & (1u<<i)) && (vk.device_memory_properties.memoryTypes[i].propertyFlags & flags)==flags) { type=i; break; }
     VkMemoryAllocateInfo bmai={ .sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize=bmr.size, .memoryTypeIndex=type };
     VULKAN_CALL(vkAllocateMemory(vk.device,&bmai,NULL,&stg_mem));
     VULKAN_CALL(vkBindBufferMemory(vk.device,stg,stg_mem,0));
@@ -335,7 +389,7 @@ void vk_create_resources(void) {
     VkMemoryRequirements mem_reqs; vkGetImageMemoryRequirements(vk.device,vk.off_img,&mem_reqs);
     u32 m_type=0; VkMemoryPropertyFlags m_flags=VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
     for (u32 i=0;i<vk.device_memory_properties.memoryTypeCount;i++)
-        if (mem_reqs.memoryTypeBits & 1u<<i && (vk.device_memory_properties.memoryTypes[i].propertyFlags & m_flags)==m_flags) { m_type=i; break; }
+        if ((mem_reqs.memoryTypeBits & (1u<<i)) && (vk.device_memory_properties.memoryTypes[i].propertyFlags & m_flags)==m_flags) { m_type=i; break; }
     VkMemoryAllocateInfo allocate_info={ .sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize=mem_reqs.size, .memoryTypeIndex=m_type };
     VULKAN_CALL(vkAllocateMemory(vk.device,&allocate_info,NULL,&vk.off_mem));
     VULKAN_CALL(vkBindImageMemory(vk.device,vk.off_img,vk.off_mem,0));
@@ -412,6 +466,7 @@ void vk_render_frame(u32 win_w, u32 win_h) {
     // swapchain
     static VkSwapchainKHR swapchain;
     static VkFormat swap_fmt;
+    static VkColorSpaceKHR swap_colorspace;
     static VkExtent2D swap_extent;
     static VkImage sc_img[FB_COUNT];
     static VkImageView sc_view[FB_COUNT];
@@ -427,11 +482,33 @@ void vk_render_frame(u32 win_w, u32 win_h) {
         // caps / extent
         VkSurfaceCapabilitiesKHR caps;
         VULKAN_CALL(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(vk.physical_device, vk.surface, &caps));
-        swap_fmt = TARGET_FORMAT;
-        VkPresentModeKHR pm = VK_PRESENT_MODE_FIFO_KHR; // vsync
+
+        // Choose surface format (prefer sRGB)
+        uint32_t fcount = 0;
+        VULKAN_CALL(vkGetPhysicalDeviceSurfaceFormatsKHR(vk.physical_device, vk.surface, &fcount, NULL));
+        VkSurfaceFormatKHR fmts[64];
+        if (fcount > 64) fcount = 64;
+        VULKAN_CALL(vkGetPhysicalDeviceSurfaceFormatsKHR(vk.physical_device, vk.surface, &fcount, fmts));
+        VkSurfaceFormatKHR chosen = fmts[0];
+        for (uint32_t i=0;i<fcount;i++) {
+            if ((fmts[i].format == VK_FORMAT_B8G8R8A8_SRGB || fmts[i].format == VK_FORMAT_R8G8B8A8_SRGB) &&
+                fmts[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) { chosen = fmts[i]; break; }
+        }
+        swap_fmt = chosen.format;
+        swap_colorspace = chosen.colorSpace;
+
+        // Present mode (prefer MAILBOX, fallback FIFO)
+        VkPresentModeKHR pm = VK_PRESENT_MODE_FIFO_KHR;
+        uint32_t pmCount=0; VULKAN_CALL(vkGetPhysicalDeviceSurfacePresentModesKHR(vk.physical_device, vk.surface, &pmCount, NULL));
+        VkPresentModeKHR modes[16]; if (pmCount > 16) pmCount = 16;
+        VULKAN_CALL(vkGetPhysicalDeviceSurfacePresentModesKHR(vk.physical_device, vk.surface, &pmCount, modes));
+        for (uint32_t i=0;i<pmCount;i++) if (modes[i]==VK_PRESENT_MODE_MAILBOX_KHR) { pm = VK_PRESENT_MODE_MAILBOX_KHR; break; }
+
+        // Extent
         if (caps.currentExtent.width != UINT32_MAX) swap_extent = caps.currentExtent; else swap_extent = (VkExtent2D){win_w, win_h};
         if (swap_extent.width==0 || swap_extent.height==0) return;
 
+        // Composite alpha selection
         const VkCompositeAlphaFlagBitsKHR order[] = {
             VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
             VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR, VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR
@@ -439,9 +516,14 @@ void vk_render_frame(u32 win_w, u32 win_h) {
         VkCompositeAlphaFlagBitsKHR alpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
         for (u32 i=0;i<sizeof(order)/sizeof(order[0]);i++) if (caps.supportedCompositeAlpha & order[i]) { alpha=order[i]; break; }
 
-        // swapchain (request exactly FB_COUNT images)
+        // Request a compliant image count but keep within FB_COUNT to match our static arrays
+        uint32_t minCount = FB_COUNT;
+        if (minCount < caps.minImageCount) minCount = caps.minImageCount;
+        if (caps.maxImageCount && minCount > caps.maxImageCount) minCount = caps.maxImageCount;
+
+        // swapchain
         VkSwapchainCreateInfoKHR sc_ci={ .sType=VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, .surface=vk.surface,
-            .minImageCount=FB_COUNT, .imageFormat=swap_fmt, .imageColorSpace=TARGET_COLOR_SPACE, .imageExtent=swap_extent,
+            .minImageCount=minCount, .imageFormat=swap_fmt, .imageColorSpace=swap_colorspace, .imageExtent=swap_extent,
             .imageArrayLayers=1, .imageUsage=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, .imageSharingMode=VK_SHARING_MODE_EXCLUSIVE,
             .preTransform=caps.currentTransform, .compositeAlpha=alpha, .presentMode=pm, .clipped=VK_TRUE, .oldSwapchain=swapchain };
         VULKAN_CALL(vkCreateSwapchainKHR(vk.device,&sc_ci,NULL,&swapchain));
@@ -496,7 +578,7 @@ void vk_render_frame(u32 win_w, u32 win_h) {
     static VkCommandPool frame_pool;
     static VkCommandBuffer frame_cb[FB_COUNT];
     static int recorded = 0;
-    // redo each frame
+    // per-frame sync
     static VkSemaphore sem_acquire, sem_render;
     static VkFence fence;
 
@@ -551,12 +633,17 @@ void vk_render_frame(u32 win_w, u32 win_h) {
         pf_timestamp("CREATE + RECORD COMMAND BUFFER");
     }
 
-    { // this part doesn't actually need the topmost swapchain variables, except the swapchain itself
+    {
         u32 next_image_index = 0;
         VULKAN_CALL(vkWaitForFences(vk.device,1,&fence,VK_TRUE,UINT64_MAX));
         VULKAN_CALL(vkResetFences(vk.device,1,&fence));
-        // --- THIS CALL BLOCKS THE CPU UNTIL WE GET TO THE NEXT FRAME (VSYNC, when using FIFO)
-        vkAcquireNextImageKHR(vk.device, swapchain,UINT64_MAX, sem_acquire, NULL, &next_image_index);
+
+        // Acquire next image (treat SUBOPTIMAL as success; assume no recreation)
+        VkResult acq = vkAcquireNextImageKHR(vk.device, (VkSwapchainKHR)swapchain, UINT64_MAX, sem_acquire, VK_NULL_HANDLE, &next_image_index);
+        if (acq != VK_SUCCESS && acq != VK_SUBOPTIMAL_KHR) {
+            printf("Acquire failed: %s\n", vk_result_str(acq)); _exit(1);
+        }
+
         VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
         VkSubmitInfo si = {
             .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .waitSemaphoreCount = 1, .pWaitSemaphores = &sem_acquire,
@@ -568,7 +655,10 @@ void vk_render_frame(u32 win_w, u32 win_h) {
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &sem_render,
             .swapchainCount = 1, .pSwapchains = &swapchain, .pImageIndices = &next_image_index
         };
-        vkQueuePresentKHR(vk.queue, &pi);
+        VkResult pr = vkQueuePresentKHR(vk.queue, &pi);
+        if (pr != VK_SUCCESS && pr != VK_SUBOPTIMAL_KHR) {
+            printf("Present failed: %s\n", vk_result_str(pr)); _exit(1);
+        }
         pf_timestamp("FRAME");
     }
 }
