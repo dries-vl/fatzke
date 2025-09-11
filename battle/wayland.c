@@ -11,12 +11,12 @@
 #include <xdg-shell-client-protocol.c>
 // sudo wayland-scanner client-header /usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml /usr/include/presentation-time-client-protocol.h
 // sudo wayland-scanner private-code /usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml /usr/include/presentation-time-client-protocol.c
-#include <presentation-time-client-protocol.h>
-#include <presentation-time-client-protocol.c>
+// #include <presentation-time-client-protocol.h>
+// #include <presentation-time-client-protocol.c>
 // sudo wayland-scanner client-header /usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml /usr/include/drm-lease-v1-client-protocol.h
 // sudo wayland-scanner private-code /usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml /usr/include/drm-lease-v1-client-protocol.c
-#include <drm-lease-v1-client-protocol.h>
-#include <drm-lease-v1-client-protocol.c>
+// #include <drm-lease-v1-client-protocol.h>
+// #include <drm-lease-v1-client-protocol.c>
 
 u64 now_ns(void){ struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts); return (u64)ts.tv_sec*1000000000ull+ts.tv_nsec; }
 u64 T0;
@@ -31,7 +31,7 @@ struct wayland_window {
     struct xdg_wm_base* xdg_wm_base;
     struct xdg_surface* xdg_surface;
     struct xdg_toplevel* xdg_toplevel;
-    struct wp_presentation* presentation;  /* global */
+    // struct wp_presentation* presentation;  /* global */
 
     /* Input */
     struct wl_seat* seat;
@@ -42,10 +42,10 @@ struct wayland_window {
     i32 win_w, win_h;
     i32 mouse_x, mouse_y;
 
-    bool vsync_ready;
+    int vsync_ready;
     int discard_streak;                    /* consecutive discarded frames */
-    bool active;                           /* xdg_toplevel state (ACTIVATED) */
-    bool minimized;                        /* configure(0,0) convention */
+    int active;                           /* xdg_toplevel state (ACTIVATED) */
+    int minimized;                        /* configure(0,0) convention */
 
     /* App callbacks */
     KEYBOARD_CB on_key;
@@ -176,7 +176,7 @@ const struct xdg_toplevel_listener* get_top_listener(void){
 void xsurf_conf(void* d, struct xdg_surface* s, u32 serial){
     struct wayland_window* w = (struct wayland_window*)d;
     xdg_surface_ack_configure(s, serial);
-    if (w){ w->vsync_ready = true; pf_timestamp("xdg_surface configure"); }
+    if (w){ w->vsync_ready = 1; pf_timestamp("xdg_surface configure"); }
 }
 const struct xdg_surface_listener* get_xsurf_listener(void){
     static const struct xdg_surface_listener xsurf_l = { .configure = xsurf_conf };
@@ -204,10 +204,11 @@ void reg_add(void* d, struct wl_registry* r, uint32_t name, const char* iface, u
     } else if (!strcmp(iface, wl_seat_interface.name)){
         u32 v = ver < 5 ? ver : 5; w->seat = wl_registry_bind(r, name, &wl_seat_interface, v);
         wl_seat_add_listener(w->seat, get_seat_listener(), w);
-    } else if (!strcmp(iface, wp_presentation_interface.name)) {
-        /* v1 is fine */
-        w->presentation = wl_registry_bind(r, name, &wp_presentation_interface, 1);
     }
+    // else if (!strcmp(iface, wp_presentation_interface.name)) {
+    //     /* v1 is fine */
+    //     w->presentation = wl_registry_bind(r, name, &wp_presentation_interface, 1);
+    // }
 }
 void reg_rem(void* d, struct wl_registry* r, u32 name){}
 
@@ -247,7 +248,7 @@ int pf_poll_events(void* win){
 void *pf_create_window(void *ud, KEYBOARD_CB key_cb, MOUSE_CB mouse_cb){
     pf_time_reset();
     struct wayland_window* w = calloc(1, sizeof(*w));
-    w->win_w = 0; w->win_h = 0; w->vsync_ready = false;
+    w->win_w = 0; w->win_h = 0; w->vsync_ready = 0;
     w->on_key = key_cb; w->on_mouse = mouse_cb; w->callback_data = ud;
 
     w->display = wl_display_connect(NULL);
@@ -271,7 +272,7 @@ void *pf_create_window(void *ud, KEYBOARD_CB key_cb, MOUSE_CB mouse_cb){
     xdg_toplevel_set_app_id(w->xdg_toplevel, "tri2");
     xdg_toplevel_set_fullscreen(w->xdg_toplevel, NULL);
     wl_surface_commit(w->surface);
-    bool *flag = &w->vsync_ready; // making sure here we've actually gone fullscreen before moving on
+    int *flag = &w->vsync_ready; // making sure here we've actually gone fullscreen before moving on
     while (!*flag) {
         wl_display_flush(w->display);
         if (wl_display_dispatch(w->display) < 0) _exit(1);

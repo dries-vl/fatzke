@@ -13,8 +13,8 @@ typedef long long isize;
 typedef unsigned long long usize;
 
 extern void _exit(int);
-extern int setenv (const char*,const char*,int);
 extern int printf(const char*,...);
+extern int snprintf(char*,__SIZE_TYPE__,const char*,...);
 extern void *memcpy(void *__restrict,const void*__restrict,__SIZE_TYPE__);
 extern int memcmp(const void*,const void*,__SIZE_TYPE__);
 extern int strcmp(const char*,const char*);

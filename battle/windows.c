@@ -13,8 +13,8 @@ struct win32_window {
     int running;
     int mouse_x;
     int mouse_y;
-    keyboard_cb on_key;
-    mouse_cb on_mouse;
+    KEYBOARD_CB on_key;
+    MOUSE_CB on_mouse;
     void* ud;
 };
 
@@ -101,13 +101,13 @@ static LRESULT CALLBACK pf_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
     return DefWindowProcW(h, m, w, l);
 }
 
-WINDOW pf_create_window(void* ud, keyboard_cb key_cb, mouse_cb mouse_cb) {
+WINDOW pf_create_window(void* ud, KEYBOARD_CB key_cb, MOUSE_CB mouse_cb) {
     pf_time_reset();
     HINSTANCE hinst = GetModuleHandleW(NULL);
     WNDCLASSW wc = {0};
     wc.lpfnWndProc   = pf_wndproc;
     wc.hInstance     = hinst;
-    wc.hCursor       = LoadCursorW(NULL, IDC_ARROW);
+    wc.hCursor       = LoadCursorW(NULL, (LPCWSTR) IDC_ARROW);
     wc.lpszClassName = L"tri2_cls";
     RegisterClassW(&wc);
     int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
@@ -142,11 +142,11 @@ int pf_window_height(void *w) {
 }
 
 void *pf_surface_or_hwnd(void *w) {
-    struct win32_window* win = w; return win->hwnd;
+    struct win32_window* win = w; return &win->hwnd;
 }
 
 void *pf_display_or_instance(void *w) {
-    struct win32_window* win = w; return win->hinst;
+    struct win32_window* win = w; return &win->hinst;
 }
 
 int pf_window_visible(void *w) {

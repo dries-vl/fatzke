@@ -4,6 +4,7 @@
 #define VK_USE_PLATFORM_WIN32_KHR
 #else
 #define VK_USE_PLATFORM_WAYLAND_KHR
+extern int putenv(char*);
 #endif
 #include <vulkan/vulkan.h>
 
@@ -58,24 +59,130 @@ struct VulkanState {
 
 } vk;
 
-#define VULKAN_CALL(x) do{ VkResult _r=(x); if(_r!=VK_SUCCESS){ printf("VULKAN CALL FAILED: %d on line @%s:%d\n",(int)_r,__FILE__,__LINE__); _exit(1);} }while(0)
+static const char* vk_result_str(VkResult r) {
+    switch (r) {
+    case VK_SUCCESS: return "VK_SUCCESS";
+    case VK_NOT_READY: return "VK_NOT_READY";
+    case VK_TIMEOUT: return "VK_TIMEOUT";
+    case VK_EVENT_SET: return "VK_EVENT_SET";
+    case VK_EVENT_RESET: return "VK_EVENT_RESET";
+    case VK_INCOMPLETE: return "VK_INCOMPLETE";
+    case VK_ERROR_OUT_OF_HOST_MEMORY: return "VK_ERROR_OUT_OF_HOST_MEMORY";
+    case VK_ERROR_OUT_OF_DEVICE_MEMORY: return "VK_ERROR_OUT_OF_DEVICE_MEMORY";
+    case VK_ERROR_INITIALIZATION_FAILED: return "VK_ERROR_INITIALIZATION_FAILED";
+    case VK_ERROR_DEVICE_LOST: return "VK_ERROR_DEVICE_LOST";
+    case VK_ERROR_MEMORY_MAP_FAILED: return "VK_ERROR_MEMORY_MAP_FAILED";
+    case VK_ERROR_LAYER_NOT_PRESENT: return "VK_ERROR_LAYER_NOT_PRESENT";
+    case VK_ERROR_EXTENSION_NOT_PRESENT: return "VK_ERROR_EXTENSION_NOT_PRESENT";
+    case VK_ERROR_FEATURE_NOT_PRESENT: return "VK_ERROR_FEATURE_NOT_PRESENT";
+    case VK_ERROR_INCOMPATIBLE_DRIVER: return "VK_ERROR_INCOMPATIBLE_DRIVER";
+    case VK_ERROR_TOO_MANY_OBJECTS: return "VK_ERROR_TOO_MANY_OBJECTS";
+    case VK_ERROR_FORMAT_NOT_SUPPORTED: return "VK_ERROR_FORMAT_NOT_SUPPORTED";
+    case VK_ERROR_FRAGMENTED_POOL: return "VK_ERROR_FRAGMENTED_POOL";
+    default: return "VK_RESULT_UNKNOWN";
+    }
+}
+#define VULKAN_CALL(x) do{ VkResult _r=(x); if(_r!=VK_SUCCESS){ printf("vulkan error: %s on line @%s:%d\n",vk_result_str(_r),__FILE__,__LINE__); _exit(1);} }while(0)
+
+#pragma region DEBUG
+static VKAPI_ATTR VkBool32 VKAPI_CALL vk_debug_cb(
+    VkDebugUtilsMessageSeverityFlagBitsEXT severity,
+    VkDebugUtilsMessageTypeFlagsEXT types,
+    const VkDebugUtilsMessengerCallbackDataEXT* data,
+    void* user_data)
+{
+    (void)types; (void)user_data;
+    const char* sev =
+        (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) ? "ERROR" :
+        (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) ? "WARN " :
+        (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT) ? "INFO " : "VERB ";
+    printf("[Vulkan][%s] %s\n", sev, data->pMessage);
+    return VK_FALSE; // don't abort calls
+}
+
+// Loader helpers (EXT functions are not core; fetch them)
+static VkResult CreateDebugUtilsMessengerEXT(
+    VkInstance inst, const VkDebugUtilsMessengerCreateInfoEXT* ci,
+    const VkAllocationCallbacks* alloc, VkDebugUtilsMessengerEXT* out)
+{
+    PFN_vkCreateDebugUtilsMessengerEXT fp =
+        (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(inst, "vkCreateDebugUtilsMessengerEXT");
+    return fp ? fp(inst, ci, alloc, out) : VK_ERROR_EXTENSION_NOT_PRESENT;
+}
+
+static void DestroyDebugUtilsMessengerEXT(
+    VkInstance inst, VkDebugUtilsMessengerEXT msgr, const VkAllocationCallbacks* alloc)
+{
+    PFN_vkDestroyDebugUtilsMessengerEXT fp =
+        (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(inst, "vkDestroyDebugUtilsMessengerEXT");
+    if (fp) fp(inst, msgr, alloc);
+}
+#pragma endregion
 
 #pragma region SETUP
 void vk_init(void* display_or_hinst, void* surface_or_hwnd) {
-#if (DEBUG == 1)
+#if (DEBUG == 1 && defined(__linux__))
     // we are picking the intel icd on a hardcoded path to avoid delaying startup time on nvidia icd json
-    setenv("VK_DRIVER_FILES","/usr/share/vulkan/icd.d/intel_icd.x86_64.json",1);
-    setenv("VK_ICD_FILENAMES","/usr/share/vulkan/icd.d/intel_icd.x86_64.json",1);
+    //putenv("VK_DRIVER_FILES=/usr/share/vulkan/icd.d/intel_icd.x86_64.json");
+    //putenv("VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/intel_icd.x86_64.json");
 #endif
+
+#ifdef DEBUG
+    const char* layers[] = { "VK_LAYER_KHRONOS_validation" };
+    const uint32_t layer_count = 1;
+#else
+    const char** layers = NULL; uint32_t layer_count = 0;
+#endif
+
     VkApplicationInfo ai = { .sType=VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName="tri2", .applicationVersion=1, .pEngineName="none", .apiVersion=VK_API_VERSION_1_1 };
 #if defined(_WIN32)
-    const char* exts[] = {"VK_KHR_surface","VK_KHR_win32_surface"};
+    const char* exts[] = {"VK_KHR_surface","VK_KHR_win32_surface","VK_EXT_debug_utils"};
 #else
-    const char* exts[] = {"VK_KHR_surface", "VK_KHR_wayland_surface"};
+    const char* exts[] = {"VK_KHR_surface","VK_KHR_wayland_surface","VK_EXT_debug_utils"};
 #endif
-    VkInstanceCreateInfo ci = { .sType=VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo=&ai, .enabledExtensionCount=2, .ppEnabledExtensionNames=exts };
+    const uint32_t ext_count = sizeof(exts)/sizeof(exts[0]);
+    // Optional: turn on extra validation goodies
+    VkValidationFeatureEnableEXT enables[] = {
+        VK_VALIDATION_FEATURE_ENABLE_BEST_PRACTICES_EXT,
+        VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_EXT,
+        VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT,
+        // VK_VALIDATION_FEATURE_ENABLE_DEBUG_PRINTF_EXT, // enable if you use debugPrintf in shaders
+    };
+    VkValidationFeaturesEXT vfeatures = {
+        .sType = VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT,
+        .enabledValidationFeatureCount = (uint32_t)(sizeof(enables)/sizeof(enables[0])),
+        .pEnabledValidationFeatures = enables,
+    };
+
+    // CreateInfo for the messenger (hooked into pNext so we catch messages during instance creation)
+    VkDebugUtilsMessengerCreateInfoEXT dbg_ci = {
+        .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+        .messageSeverity =
+            VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT |
+            VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+            VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT, // drop INFO/VERBOSE if too chatty
+        .messageType =
+            VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+            VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+            VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
+        .pfnUserCallback = vk_debug_cb,
+    };
+
+    VkInstanceCreateInfo ci = {
+        .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+        .pApplicationInfo = &ai,
+        .enabledExtensionCount = ext_count,
+        .ppEnabledExtensionNames = exts,
+        .enabledLayerCount = layer_count,
+        .ppEnabledLayerNames = layers,
+        .pNext = &dbg_ci
+    };
     VULKAN_CALL(vkCreateInstance(&ci, NULL, &vk.instance));  // -- ca. 20ms
     pf_timestamp("vkCreateInstance");
+#ifdef DEBUG
+    VkDebugUtilsMessengerEXT debug_msgr = VK_NULL_HANDLE;
+    VULKAN_CALL(CreateDebugUtilsMessengerEXT(vk.instance, &dbg_ci, NULL, &debug_msgr));
+#endif
 #ifdef __linux__
     VkWaylandSurfaceCreateInfoKHR sci = {
         .sType = VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR, .display = display_or_hinst, .surface = surface_or_hwnd
