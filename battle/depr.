@@ -341,16 +341,10 @@ int pf_poll_events(void* win){
     if(!w) return 0;
     wl_display_dispatch_pending(w->display); // dispatch all queued up events, don't block
     wl_display_flush(w->display);
-    while (w->in_flight_count > 1) {
-        printf("in flight: %d\n", w->in_flight_count);
-        wl_display_dispatch(w->display);
-        wl_display_flush(w->display);
-    }
     return 1;
 }
 
 void *pf_create_window(void *ud, KEYBOARD_CB key_cb, MOUSE_CB mouse_cb){
-    pf_time_reset();
     struct wayland_window* w = calloc(1, sizeof(*w));
     w->win_w = 0; w->win_h = 0; w->fullscreen_configured = 0; w->frame_done = 1;
     // set the input callbacks
@@ -364,11 +358,11 @@ void *pf_create_window(void *ud, KEYBOARD_CB key_cb, MOUSE_CB mouse_cb){
 
     w->display = wl_display_connect(NULL);
     if (!w->display){ printf("wl connect failed\n"); _exit(1); }
-    pf_timestamp("wl_display_connect");
 
     struct wl_registry* reg = wl_display_get_registry(w->display);
     wl_registry_add_listener(reg, get_registry_listener(), w);
     wl_display_roundtrip(w->display);
+    pf_time_reset(); // at this point the global clock used by presentation time is set, so we are synced right with it
     pf_timestamp("wl globals ready");
     if (!w->compositor || !w->xdg_wm_base){ printf("missing compositor/xdg\n"); _exit(1); }
 

@@ -17,7 +17,10 @@ extern int printf(const char*,...);
 extern int snprintf(char*,__SIZE_TYPE__,const char*,...);
 extern void *memcpy(void *__restrict,const void*__restrict,__SIZE_TYPE__);
 extern int memcmp(const void*,const void*,__SIZE_TYPE__);
+extern void *memset(void*,int,__SIZE_TYPE__);
 extern int strcmp(const char*,const char*);
+extern char *strdup(const char*);
+extern char *strstr(const char*,const char*);
 extern __SIZE_TYPE__ strlen (const char*);
 #define NULL ((void *)0)
 
@@ -30,6 +33,7 @@ typedef void (*KEYBOARD_CB)(void*,enum KEYBOARD_BUTTON,enum INPUT_STATE);
 typedef void (*MOUSE_CB)(void*,i32,i32,enum MOUSE_BUTTON,enum INPUT_STATE);
 u64 pf_ns_now(void);
 void pf_time_reset(void);
+u64 pf_ns_start(void);
 void pf_timestamp(char*);
 int pf_window_width(WINDOW);
 int pf_window_height(WINDOW);

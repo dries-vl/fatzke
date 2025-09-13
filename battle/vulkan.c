@@ -1,15 +1,13 @@
 #include "header.h"
 
 #if defined(_WIN32)
-#define VK_USE_PLATFORM_WIN32_KHR
+  #define VK_USE_PLATFORM_WIN32_KHR
+  #include <vulkan/vulkan_win32.h>
 #else
-#define VK_USE_PLATFORM_WAYLAND_KHR
-extern int putenv(char*);
+  #define VK_USE_PLATFORM_XLIB_KHR
+  extern int putenv(char*);
 #endif
 #include <vulkan/vulkan.h>
-#include <stdlib.h>
-#include <string.h>
-#include <stdio.h>
 
 extern const unsigned char font_atlas[];
 extern const unsigned char font_atlas_end[];
@@ -62,6 +60,23 @@ struct VulkanState {
     VkRenderPass rpA;
 } vk;
 
+static PFN_vkGetCalibratedTimestampsEXT  pfnGetCalibratedTimestampsEXT  = NULL;
+static PFN_vkWaitForPresentKHR           pfnWaitForPresentKHR           = NULL;
+
+/* -------- timing additions (global/static) ------------------------------ */
+static VkQueryPool g_qp = VK_NULL_HANDLE;
+static double g_timestamp_period_ns = 1.0;   /* ns per GPU tick */
+static uint64_t g_gpu_calib = 0;             /* device ticks at calibration */
+static uint64_t g_cpu_calib_ns = 0;          /* CLOCK_MONOTONIC ns at calibration */
+static uint32_t g_present_counter = 0;       /* monotonically increasing present IDs */
+
+/* Convert GPU ticks -> CLOCK_MONOTONIC ns using the calibration pair */
+static inline double gpu_ticks_to_cpu_ns(uint64_t gpu_ticks){
+    double gpu_calib_ns = (double)g_gpu_calib * g_timestamp_period_ns;
+    double gpu_ts_ns    = (double)gpu_ticks   * g_timestamp_period_ns;
+    return (double)g_cpu_calib_ns + (gpu_ts_ns - gpu_calib_ns);
+}
+
 static const char* vk_result_str(VkResult r) {
     switch (r) {
     case VK_SUCCESS: return "VK_SUCCESS";
@@ -70,6 +85,8 @@ static const char* vk_result_str(VkResult r) {
     case VK_EVENT_SET: return "VK_EVENT_SET";
     case VK_EVENT_RESET: return "VK_EVENT_RESET";
     case VK_INCOMPLETE: return "VK_INCOMPLETE";
+    case VK_SUBOPTIMAL_KHR: return "VK_SUBOPTIMAL_KHR";
+    case VK_ERROR_OUT_OF_DATE_KHR: return "VK_ERROR_OUT_OF_DATE_KHR";
     case VK_ERROR_OUT_OF_HOST_MEMORY: return "VK_ERROR_OUT_OF_HOST_MEMORY";
     case VK_ERROR_OUT_OF_DEVICE_MEMORY: return "VK_ERROR_OUT_OF_DEVICE_MEMORY";
     case VK_ERROR_INITIALIZATION_FAILED: return "VK_ERROR_INITIALIZATION_FAILED";
@@ -86,6 +103,34 @@ static const char* vk_result_str(VkResult r) {
     }
 }
 #define VULKAN_CALL(x) do{ VkResult _r=(x); if(_r!=VK_SUCCESS){ printf("vulkan error: %s on line @%s:%d\n",vk_result_str(_r),__FILE__,__LINE__); _exit(1);} }while(0)
+
+static void create_timestamps_and_calibrate()
+{
+    /* Query timestampPeriod for tick->ns conversion */
+    VkPhysicalDeviceProperties props;
+    vkGetPhysicalDeviceProperties(vk.physical_device, &props);
+    g_timestamp_period_ns = (double)props.limits.timestampPeriod;
+
+    /* Create a pool large enough for begin/end per swapchain image */
+    VkQueryPoolCreateInfo qpci = {
+        .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+        .queryType = VK_QUERY_TYPE_TIMESTAMP,
+        .queryCount = MAX_SC_IMG * 2
+    };
+    VULKAN_CALL(vkCreateQueryPool(vk.device, &qpci, NULL, &g_qp));
+
+    /* Calibrate GPU (device) vs CLOCK_MONOTONIC */
+    VkCalibratedTimestampInfoEXT infos[2] = {
+        { .sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT,
+          .timeDomain = VK_TIME_DOMAIN_DEVICE_EXT },
+        { .sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT,
+          .timeDomain = VK_TIME_DOMAIN_CLOCK_MONOTONIC_EXT },
+    };
+    uint64_t ts[2]; uint64_t maxDev = 0;
+    VULKAN_CALL(pfnGetCalibratedTimestampsEXT(vk.device, 2, infos, ts, &maxDev));
+    g_gpu_calib     = ts[0];
+    g_cpu_calib_ns  = ts[1];
+}
 
 #pragma region DEBUG
 static VKAPI_ATTR VkBool32 VKAPI_CALL vk_debug_cb(VkDebugUtilsMessageSeverityFlagBitsEXT severity,VkDebugUtilsMessageTypeFlagsEXT types,const VkDebugUtilsMessengerCallbackDataEXT* data, void* user_data) {
@@ -144,7 +189,7 @@ void vk_init(void* display_or_hinst, void* surface_or_hwnd) {
 #if defined(_WIN32)
     const char* exts[] = {"VK_KHR_surface","VK_KHR_win32_surface","VK_EXT_debug_utils"};
 #else
-    const char* exts[] = {"VK_KHR_surface","VK_KHR_wayland_surface","VK_EXT_debug_utils"};
+    const char* exts[] = {"VK_KHR_surface","VK_KHR_xlib_surface","VK_EXT_debug_utils"};
 #endif
     const uint32_t ext_count = sizeof(exts)/sizeof(exts[0]);
 
@@ -162,7 +207,7 @@ void vk_init(void* display_or_hinst, void* surface_or_hwnd) {
         .pUserData = NULL
     };
 
-    VkInstanceCreateInfo ci = {
+    VkInstanceCreateInfo ici = {
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         .pApplicationInfo = &ai,
         .enabledExtensionCount = ext_count,
@@ -171,7 +216,7 @@ void vk_init(void* display_or_hinst, void* surface_or_hwnd) {
         .ppEnabledLayerNames = layers,
         .pNext = &dbg_ci
     };
-    VULKAN_CALL(vkCreateInstance(&ci, NULL, &vk.instance));
+    VULKAN_CALL(vkCreateInstance(&ici, NULL, &vk.instance));
     pf_timestamp("vkCreateInstance");
 #ifdef DEBUG
     VkDebugUtilsMessengerEXT debug_msgr = VK_NULL_HANDLE;
@@ -179,11 +224,14 @@ void vk_init(void* display_or_hinst, void* surface_or_hwnd) {
 #endif
 
 #ifdef __linux__
-    VkWaylandSurfaceCreateInfoKHR sci = {
-        .sType = VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR,
-        .display = display_or_hinst, .surface = surface_or_hwnd
+    Display* dpy = (Display*)display_or_hinst;     // from pf_display_or_instance()
+    Window   win = (Window)(uintptr_t)surface_or_hwnd; // from pf_surface_or_hwnd()
+    VkXlibSurfaceCreateInfoKHR sci = {
+        .sType   = VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR,
+        .dpy     = dpy,
+        .window  = win
     };
-    VULKAN_CALL(vkCreateWaylandSurfaceKHR(vk.instance,&sci,NULL,&vk.surface));
+    VULKAN_CALL(vkCreateXlibSurfaceKHR(vk.instance,&sci,NULL,&vk.surface));
 #else
     VkWin32SurfaceCreateInfoKHR sci = {
         .sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
@@ -191,7 +239,7 @@ void vk_init(void* display_or_hinst, void* surface_or_hwnd) {
     };
     VULKAN_CALL(vkCreateWin32SurfaceKHR(vk.instance, &sci, NULL, &vk.surface));
 #endif
-    pf_timestamp("vkCreateWaylandSurfaceKHR");
+    pf_timestamp("created vk surface");
 
     // Pick physical device (simple: first available)
     uint32_t n=0; VULKAN_CALL(vkEnumeratePhysicalDevices(vk.instance,&n,NULL));
@@ -208,36 +256,74 @@ void vk_init(void* display_or_hinst, void* surface_or_hwnd) {
         .queueFamilyIndex = vk.queue_family_index, .queueCount = 1,
         .pQueuePriorities = &pr
     };
-    const char* device_exts[] = {"VK_KHR_swapchain"};
 
+    /* ---- enable required device extensions ---- */
+    const char* device_exts[] = {
+        "VK_KHR_swapchain",
+        "VK_KHR_present_id",
+        "VK_KHR_present_wait",
+        "VK_EXT_calibrated_timestamps",
+    };
+
+    /* ---- features chain ---- */
     VkPhysicalDeviceFeatures2 features = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
     VkPhysicalDeviceVulkan11Features v11 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES };
     VkPhysicalDeviceVulkan12Features v12 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
     VkPhysicalDeviceVulkan13Features v13 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
+    VkPhysicalDevicePresentIdFeaturesKHR presentIdFeat = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR,
+        .presentId = VK_TRUE
+    };
+    VkPhysicalDevicePresentWaitFeaturesKHR presentWaitFeat = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR,
+        .presentWait = VK_TRUE
+    };
     features.pNext = &v11; v11.pNext = &v12; v12.pNext = &v13;
+    v13.pNext = &presentIdFeat;
+    presentIdFeat.pNext = &presentWaitFeat;
+
     vkGetPhysicalDeviceFeatures2(vk.physical_device, &features);
-    // Required for SV_VertexID without extension noise
+
+    // QoL toggles (safe if supported)
     v11.shaderDrawParameters = VK_TRUE;
-    // Common quality-of-life you likely want anyway (all core in 1.2+)
     v12.timelineSemaphore           = VK_TRUE;
     v12.bufferDeviceAddress         = VK_TRUE;
-    v12.scalarBlockLayout           = VK_TRUE;   // safer layouts
-    v12.hostQueryReset              = VK_TRUE;   // optional
-    // 1.3 goodies (optional but harmless if present)
-    v13.synchronization2            = VK_TRUE;   // matches your use of *_2 barriers
-    v13.dynamicRendering            = VK_TRUE;   // if you ever ditch render passes
+    v12.scalarBlockLayout           = VK_TRUE;
+    v12.hostQueryReset              = VK_TRUE;
+    v13.synchronization2            = VK_TRUE;
+    v13.dynamicRendering            = VK_TRUE;
 
     VkDeviceCreateInfo dci = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &features,
         .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
-        .enabledExtensionCount = 1, .ppEnabledExtensionNames = device_exts
+        .enabledExtensionCount = (uint32_t)(sizeof(device_exts)/sizeof(device_exts[0])),
+        .ppEnabledExtensionNames = device_exts
     };
     VULKAN_CALL(vkCreateDevice(vk.physical_device,&dci,NULL,&vk.device));
     vkGetDeviceQueue(vk.device, vk.queue_family_index, 0, &vk.queue);
     pf_timestamp("vkCreateDevice");
+
+    /* fetch extension entry points (required for tcc / dynamic loaders) */
+    pfnGetCalibratedTimestampsEXT =
+        (PFN_vkGetCalibratedTimestampsEXT)vkGetDeviceProcAddr(vk.device, "vkGetCalibratedTimestampsEXT");
+    pfnWaitForPresentKHR =
+        (PFN_vkWaitForPresentKHR)vkGetDeviceProcAddr(vk.device, "vkWaitForPresentKHR");
+
+    if (!pfnGetCalibratedTimestampsEXT) {
+        printf("Fatal: VK_EXT_calibrated_timestamps not available at runtime.\n");
+        _exit(1);
+    }
+    if (!pfnWaitForPresentKHR) {
+        printf("Fatal: VK_KHR_present_wait not available at runtime.\n");
+        _exit(1);
+    }
+
+    /* Timestamp query pool + GPU/CPU calibration (EXT_calibrated_timestamps) */
+    create_timestamps_and_calibrate();
 }
 #pragma endregion
 
+/* ------------------------------- (rest of your resource setup unchanged) */
 struct KTX2Header{
     u8  identifier[12];                 /* «KTX 20»\r\n\x1A\n */
     u32 vkFormat;
@@ -259,7 +345,7 @@ void vk_create_resources(void) {
     VkFormat fmt = (VkFormat)hdr.vkFormat;
     if (!(fmt==VK_FORMAT_ASTC_12x12_UNORM_BLOCK || fmt==VK_FORMAT_ASTC_12x12_SRGB_BLOCK)) { printf("need ASTC 12x12\n"); _exit(1); }
 
-    // **Probe support before creating the image** (avoid confusing OOM later)
+    // **Probe support before creating the image**
     VkImageFormatProperties ifp;
     VkResult fr = vkGetPhysicalDeviceImageFormatProperties(
         vk.physical_device, fmt, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
@@ -440,6 +526,7 @@ void vk_create_resources(void) {
     pf_timestamp("created vulkan resources");
 }
 
+/* ---------------------------- per-frame rendering with accurate timing --- */
 void vk_render_frame(u32 win_w, u32 win_h) {
     // swapchain
     static VkSwapchainKHR swapchain;
@@ -456,14 +543,20 @@ void vk_render_frame(u32 win_w, u32 win_h) {
     static VkPipeline gpB;
     static VkRenderPass rpB;
 
-    // sync + CBs
+    // cmd pool + per-image command buffers (kept as-is)
     static VkCommandPool frame_pool;
     static VkCommandBuffer frame_cb[MAX_SC_IMG];
-    static VkSemaphore acquire_sem;          // single acquire semaphore is fine
-    static VkSemaphore sem_render[MAX_SC_IMG]; // per-image render semaphores (present waits on these)
-    static VkFence fence;                    // one frame in flight
+
+    // ---- sync (NUM_FRAMES CPU pacing; per-image renderFinished) ----
+    enum { NUM_FRAMES = 2 };
+    static VkSemaphore imageAvailable[NUM_FRAMES];     // per-frame acquire
+    static VkFence     inFlight[NUM_FRAMES];           // per-frame CPU pacing
+    static VkSemaphore renderFinished_img[MAX_SC_IMG]; // per-image present wait
+
+    static u32 curFrame = 0;
 
     static int built = 0;
+    static int built_sync = 0;
 
     if (!built)
     {
@@ -471,26 +564,23 @@ void vk_render_frame(u32 win_w, u32 win_h) {
         VkSurfaceCapabilitiesKHR caps;
         VULKAN_CALL(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(vk.physical_device, vk.surface, &caps));
 
-        // choose surface format: prefer the first one verbatim (driver/compositor's native)
+        // formats
         uint32_t fcount = 0;
         VULKAN_CALL(vkGetPhysicalDeviceSurfaceFormatsKHR(vk.physical_device, vk.surface, &fcount, NULL));
         if (fcount == 0) { printf("no surface formats\n"); _exit(1); }
-        VkSurfaceFormatKHR* fmts = (VkSurfaceFormatKHR*)malloc(sizeof(VkSurfaceFormatKHR)*fcount);
-        if (!fmts) { printf("oom\n"); _exit(1); }
+        VkSurfaceFormatKHR fmts[128];
         VkResult rf = vkGetPhysicalDeviceSurfaceFormatsKHR(vk.physical_device, vk.surface, &fcount, fmts);
         if (rf != VK_SUCCESS && rf != VK_INCOMPLETE) { printf("surface formats: %s\n", vk_result_str(rf)); _exit(1); }
-
-        // Most-native/lowest-latency: take the first pair as-is
         VkSurfaceFormatKHR chosen = fmts[0];
         swap_fmt = chosen.format;
         VkColorSpaceKHR swap_cs = chosen.colorSpace;
-        free(fmts);
 
-        // mailbox can discard the frame(s) that fill up the wayland swapchain framebuffers at startup
+        // present mode (FIFO is always available; prefer MAILBOX if you later probe it)
         VkPresentModeKHR pm = VK_PRESENT_MODE_FIFO_KHR;
 
         // extent
-        if (caps.currentExtent.width != UINT32_MAX) swap_extent = caps.currentExtent; else swap_extent = (VkExtent2D){win_w, win_h};
+        if (caps.currentExtent.width != UINT32_MAX) swap_extent = caps.currentExtent;
+        else swap_extent = (VkExtent2D){win_w, win_h};
         if (swap_extent.width==0 || swap_extent.height==0) return;
 
         // composite alpha
@@ -501,18 +591,18 @@ void vk_render_frame(u32 win_w, u32 win_h) {
         VkCompositeAlphaFlagBitsKHR alpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
         for (u32 i=0;i<sizeof(order)/sizeof(order[0]);i++) if (caps.supportedCompositeAlpha & order[i]) { alpha=order[i]; break; }
 
-        // request 2, clamp to device. Driver may return 3+; we’ll handle it.
+        // request 2, clamp to device
         uint32_t desired = 2;
         if (desired < caps.minImageCount) desired = caps.minImageCount;
         if (caps.maxImageCount && desired > caps.maxImageCount) desired = caps.maxImageCount;
-        printf("Got a swapchain with minimum %d images\n", desired);
+        printf("Got a swapchain with minimum %u images\n", desired);
 
         VkSwapchainCreateInfoKHR sc_ci = {
             .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
             .surface = vk.surface,
             .minImageCount = desired,
-            .imageFormat = swap_fmt,          // from chosen
-            .imageColorSpace = swap_cs,       // from chosen
+            .imageFormat = swap_fmt,
+            .imageColorSpace = swap_cs,
             .imageExtent = swap_extent,
             .imageArrayLayers = 1,
             .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
@@ -536,9 +626,9 @@ void vk_render_frame(u32 win_w, u32 win_h) {
             VULKAN_CALL(vkCreateImageView(vk.device,&vci,NULL,&sc_view[i]));
         }
 
-        // Render pass B with strong external dependency (silences WRITE_AFTER_READ)
+        // Render pass B
         VkAttachmentDescription aB = {
-            .format = swap_fmt,  // match swapchain exactly
+            .format = swap_fmt,
             .samples = VK_SAMPLE_COUNT_1_BIT,
             .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
             .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
@@ -587,7 +677,7 @@ void vk_render_frame(u32 win_w, u32 win_h) {
             VULKAN_CALL(vkCreateFramebuffer(vk.device,&fciB,NULL,&fb[i]));
         }
 
-        // command pool + per-image command buffers
+        // cmd pool + per-image CBs
         VkCommandPoolCreateInfo cp_create_info={ .sType=VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .queueFamilyIndex=vk.queue_family_index, .flags=VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT };
         VULKAN_CALL(vkCreateCommandPool(vk.device,&cp_create_info,NULL,&frame_pool));
         VkCommandBufferAllocateInfo cai={ .sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool=frame_pool, .level=VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount=sc_count };
@@ -597,7 +687,14 @@ void vk_render_frame(u32 win_w, u32 win_h) {
             VkCommandBufferBeginInfo bi={ .sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
             VULKAN_CALL(vkBeginCommandBuffer(frame_cb[i],&bi));
 
-            // Pass A: render to offscreen
+            /* GPU query indices for this image */
+            uint32_t qBegin = 2*i;
+            uint32_t qEnd   = 2*i+1;
+            vkCmdResetQueryPool(frame_cb[i], g_qp, qBegin, 2);
+            vkCmdWriteTimestamp(frame_cb[i],
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_qp, qBegin);
+
+            // Pass A -> offscreen
             VkClearValue clrA={ .color={{0.02f,0.02f,0.05f,1.0f}}};
             VkRenderPassBeginInfo rbiA={ .sType=VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass=vk.rpA, .framebuffer=vk.off_fb, .renderArea={{0,0},{OFF_W,OFF_H}}, .clearValueCount=1, .pClearValues=&clrA };
             vkCmdBeginRenderPass(frame_cb[i],&rbiA,VK_SUBPASS_CONTENTS_INLINE);
@@ -614,7 +711,7 @@ void vk_render_frame(u32 win_w, u32 win_h) {
                 .image=vk.off_img, .subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1}};
             vkCmdPipelineBarrier(frame_cb[i], VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0,NULL,0,NULL,1,&toSample);
 
-            // Pass B: blit to swapchain image i
+            // Pass B -> swapchain image i
             VkClearValue clrB={ .color={{0,0,0,1}}};
             VkRenderPassBeginInfo rbiB={ .sType=VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass=rpB, .framebuffer=fb[i], .renderArea={{0,0},{swap_extent.width,swap_extent.height}}, .clearValueCount=1, .pClearValues=&clrB };
             vkCmdBeginRenderPass(frame_cb[i],&rbiB,VK_SUBPASS_CONTENTS_INLINE);
@@ -625,43 +722,108 @@ void vk_render_frame(u32 win_w, u32 win_h) {
             vkCmdDraw(frame_cb[i],3,1,0,0);
             vkCmdEndRenderPass(frame_cb[i]);
 
+            vkCmdWriteTimestamp(frame_cb[i],
+                VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_qp, qEnd);
+
             VULKAN_CALL(vkEndCommandBuffer(frame_cb[i]));
         }
-
-        // semaphores & fence
-        VkSemaphoreCreateInfo s_ci={ .sType=VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
-        VULKAN_CALL(vkCreateSemaphore(vk.device,&s_ci,NULL,&acquire_sem));       // single acquire semaphore
-        for (u32 i=0;i<sc_count;i++) VULKAN_CALL(vkCreateSemaphore(vk.device,&s_ci,NULL,&sem_render[i])); // per-image present semaphores
-        VkFenceCreateInfo f_ci={ .sType=VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags=VK_FENCE_CREATE_SIGNALED_BIT };
-        VULKAN_CALL(vkCreateFence(vk.device,&f_ci,NULL,&fence));
 
         built = 1;
         pf_timestamp("CREATE SWAPCHAIN");
     }
 
-    // ---- frame (one in flight) ----
-    VULKAN_CALL(vkWaitForFences(vk.device,1,&fence,VK_TRUE,UINT64_MAX));
-    VULKAN_CALL(vkResetFences(vk.device,1,&fence));
+    // build sync objects once we know sc_count
+    if (!built_sync) {
+        VkSemaphoreCreateInfo s_ci={ .sType=VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+        VkFenceCreateInfo f_ci={ .sType=VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags=VK_FENCE_CREATE_SIGNALED_BIT };
+
+        for (u32 i=0;i<NUM_FRAMES;i++){
+            VULKAN_CALL(vkCreateSemaphore(vk.device,&s_ci,NULL,&imageAvailable[i])); // per-frame acquire sem
+            VULKAN_CALL(vkCreateFence    (vk.device,&f_ci,NULL,&inFlight[i]));       // per-frame fence
+        }
+        for (u32 i=0;i<sc_count;i++){
+            VULKAN_CALL(vkCreateSemaphore(vk.device,&s_ci,NULL,&renderFinished_img[i])); // per-image present sem
+        }
+        built_sync = 1;
+    }
+
+    // ---- frame (NUM_FRAMES in flight) ----
+    VULKAN_CALL(vkWaitForFences(vk.device,1,&inFlight[curFrame],VK_TRUE,UINT64_MAX));
+    VULKAN_CALL(vkResetFences(vk.device,1,&inFlight[curFrame]));
 
     u32 image_index = 0;
-    VULKAN_CALL(vkAcquireNextImageKHR(vk.device, swapchain, UINT64_MAX, acquire_sem, VK_NULL_HANDLE, &image_index));
+    VkResult ar = vkAcquireNextImageKHR(vk.device, swapchain, UINT64_MAX,
+                                        imageAvailable[curFrame], VK_NULL_HANDLE, &image_index);
+    if (ar == VK_ERROR_OUT_OF_DATE_KHR) { /* TODO: recreate swapchain */ return; }
+    if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) { printf("Acquire failed: %s\n", vk_result_str(ar)); _exit(1); }
+
     if (image_index >= sc_count) { printf("bad image index\n"); _exit(1); }
 
     VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     VkSubmitInfo si = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-        .waitSemaphoreCount = 1, .pWaitSemaphores = &acquire_sem,
+        .waitSemaphoreCount = 1, .pWaitSemaphores = &imageAvailable[curFrame],
         .pWaitDstStageMask = &waitStage,
         .commandBufferCount = 1, .pCommandBuffers = &frame_cb[image_index],
-        .signalSemaphoreCount = 1, .pSignalSemaphores = &sem_render[image_index]
+        .signalSemaphoreCount = 1, .pSignalSemaphores = &renderFinished_img[image_index] // <-- per-image!
     };
-    VULKAN_CALL(vkQueueSubmit(vk.queue,1,&si,fence));
+    VULKAN_CALL(vkQueueSubmit(vk.queue,1,&si,inFlight[curFrame]));
+
+    /* ---- present with ID + wait for visibility ---- */
+    uint64_t present_id = ++g_present_counter;
+
+    VkPresentIdKHR pid = {
+        .sType = VK_STRUCTURE_TYPE_PRESENT_ID_KHR,
+        .swapchainCount = 1,
+        .pPresentIds = &present_id
+    };
 
     VkPresentInfoKHR pi = {
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-        .waitSemaphoreCount = 1, .pWaitSemaphores = &sem_render[image_index],
+        .pNext = &pid,
+        .waitSemaphoreCount = 1, .pWaitSemaphores = &renderFinished_img[image_index],
         .swapchainCount = 1, .pSwapchains = &swapchain, .pImageIndices = &image_index
     };
+
+    /* CPU timestamp immediately before present call (CLOCK_MONOTONIC domain) */
+    uint64_t cpu_present_call_ns = pf_ns_now();
+
     VkResult pr = vkQueuePresentKHR(vk.queue, &pi);
-    if (pr != VK_SUCCESS && pr != VK_SUBOPTIMAL_KHR) { printf("Present failed: %s\n", vk_result_str(pr)); _exit(1); }
+    // if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR) {
+    //     /* TODO: recreate swapchain */
+    //     return;
+    // } else if (pr != VK_SUCCESS) {
+    //     printf("Present failed: %s\n", vk_result_str(pr)); _exit(1);
+    // }
+
+    /* Wait for THIS present ID to become visible (close to first-pixel) */
+    VkResult wr = pfnWaitForPresentKHR(vk.device, swapchain, present_id, UINT64_MAX);
+    if (wr != VK_SUCCESS && wr != VK_ERROR_OUT_OF_DATE_KHR) {
+        printf("vkWaitForPresentKHR failed: %s\n", vk_result_str(wr)); _exit(1);
+    }
+
+    uint64_t cpu_present_visible_ns = pf_ns_now();
+
+    /* ---- pull GPU timestamps for this image (convert to CLOCK_MONOTONIC ns) ---- */
+    uint64_t ticks[2] = {0,0};
+    VkResult qr = vkGetQueryPoolResults(
+        vk.device, g_qp, 2*image_index, 2, sizeof(ticks), ticks,
+        sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+
+    double gpu_begin_ns = 0.0, gpu_end_ns = 0.0, gpu_time_ms = 0.0;
+    if (qr == VK_SUCCESS) {
+        gpu_begin_ns = gpu_ticks_to_cpu_ns(ticks[0]);
+        gpu_end_ns   = gpu_ticks_to_cpu_ns(ticks[1]);
+        gpu_time_ms  = (gpu_end_ns - gpu_begin_ns) / 1e6;
+    }
+
+    double submit_to_visible_ms = (cpu_present_visible_ns - cpu_present_call_ns) / 1e6;
+    double gpuend_to_visible_ms = (qr == VK_SUCCESS) ? (cpu_present_visible_ns - gpu_end_ns)/1e6 : -1.0;
+
+    printf("Frame %llu | gpu=%.3f ms | submit→visible=%.3f ms | gpuend→visible=%.3f ms | visible @ %.3f ms\n",
+           (unsigned long long)present_id,
+           gpu_time_ms, submit_to_visible_ms, gpuend_to_visible_ms,
+           (cpu_present_visible_ns - pf_ns_start())/1e6);
+
+    curFrame = (curFrame + 1) % NUM_FRAMES;
 }

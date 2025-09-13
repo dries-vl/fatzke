@@ -45,4 +45,4 @@ VSOutBlit VS_Blit(uint vid: SV_VertexID) {
 }
 
 [shader("pixel")]
-float4 PS_Blit(VSOutBlit i) : SV_Target { return uTex.Sample(uSamp, i.uv); }
+float4 PS_Blit(VSOutBlit i) : SV_Target { return uTex.Sample(uSamp, i.uv) + float4(float2(getRealtimeClock()) / 1000.0 % 0.1, 0.0, 0.0); }
