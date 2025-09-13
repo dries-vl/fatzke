@@ -1,10 +1,8 @@
 // WINDOWS: scoop install main/vulkan (for slangc)
 // WINDOWS: scoop install main/ktx-software (for toktx/ktx)
 // ARCH: yay -S ktx-software-bin (for toktx/ktx)
-// source ~/Downloads/1.4.321.1/setup-env.sh (vulkan sdk on linux, for slangc)
-/* slangc shaders.slang -entry VS_Tri -entry PS_Tri -entry VS_Blit
--entry PS_Blit -target spirv -fvk-use-entrypoint-name -o static/shaders.spv; */
-// xxd -i static/shaders.spv > static/shaders.h; rm static/shaders.spv
+// ARCH: add the setup/bins to .profile or something
+// WINDOWS: set $env:VK_LAYER_PATH "path/to/vulkan/current/Bin" (Powershell)
 struct VOutA {
   float4 pos : SV_Position;
   float2 uv : TEXCOORD0;

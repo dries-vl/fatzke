@@ -18,6 +18,7 @@ extern int snprintf(char*,__SIZE_TYPE__,const char*,...);
 extern void *memcpy(void *__restrict,const void*__restrict,__SIZE_TYPE__);
 extern int memcmp(const void*,const void*,__SIZE_TYPE__);
 extern int strcmp(const char*,const char*);
+extern __SIZE_TYPE__ strlen (const char*);
 #define NULL ((void *)0)
 
 #pragma region PLATFORM
@@ -27,7 +28,8 @@ enum KEYBOARD_BUTTON { KEYBOARD_ESCAPE, KEYBOARD_BUTTON_UNKNOWN };
 enum INPUT_STATE { RELEASED, PRESSED };
 typedef void (*KEYBOARD_CB)(void*,enum KEYBOARD_BUTTON,enum INPUT_STATE);
 typedef void (*MOUSE_CB)(void*,i32,i32,enum MOUSE_BUTTON,enum INPUT_STATE);
-void pf_time_reset();
+u64 pf_ns_now(void);
+void pf_time_reset(void);
 void pf_timestamp(char*);
 int pf_window_width(WINDOW);
 int pf_window_height(WINDOW);
@@ -36,6 +38,7 @@ void *pf_display_or_instance(WINDOW);
 int pf_window_visible(WINDOW);
 int pf_poll_events(WINDOW);
 WINDOW pf_create_window(void*,KEYBOARD_CB,MOUSE_CB);
+void pf_request_present_feedback(WINDOW,u64);
 #pragma endregion
 
 #pragma region VULKAN
@@ -45,5 +48,6 @@ void vk_render_frame(u32,u32);
 #pragma endregion
 
 #pragma region SETTINGS
+#define APP_NAME "Battle: work in progress"
 #define DEBUG 1
 #pragma endregion

@@ -11,12 +11,14 @@ void mouse_input_callback(void* ud, i32 x, i32 y, enum MOUSE_BUTTON button, enum
 int main(void){
     WINDOW w = pf_create_window(NULL, key_input_callback,mouse_input_callback);
 
-    // todo: can we not just init everything vulkan at once?
     vk_init(pf_display_or_instance(w), pf_surface_or_hwnd(w));
     vk_create_resources();
 
-    while (1) {
-        pf_poll_events(w);
+    static u64 frame = 0;
+
+    while (pf_poll_events(w)) {
+        // if (!pf_window_visible(w) && frame != 0) {continue;}
+        pf_request_present_feedback(w, ++frame);
         vk_render_frame(pf_window_width(w), pf_window_height(w));
     }
     return 0;
