@@ -1,14 +1,13 @@
 // build (example): cc x11_wgpu.c -o x11_wgpu -lX11 -lwgpu_native
+#include "header.h"
+#include "wgpu.h" // todo: conditionally only include webgpu.h for wasm/web
+
 #include <X11/Xlib.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-
-#include "wgpu.h"
-
-typedef uint8_t u8;typedef uint16_t u16;typedef uint32_t u32;typedef uint64_t u64;typedef int8_t i8;typedef int16_t i16;typedef int32_t i32;typedef int64_t i64;typedef float f32;typedef double f64;
 
 enum {WIDTH = 800, HEIGHT = 600, DISCRETE_GPU = 0, HDR = 0, MAX_VERTICES=3*256, MAX_INSTANCES=3*256};
 const char *BACKENDS[] = {"NA","NULL","WebGPU","D3D11","D3D12","Metal","Vulkan","OpenGL","GLES"};
@@ -24,43 +23,46 @@ void my_error_cb(WGPUErrorType type, const char* message, void* user_data){fprin
 static inline WGPUStringView WGPUSTRING(const char* s){return (WGPUStringView){ .data = s, .length = strlen(s)};}
 WGPUBuffer mkbuf(const char*label,WGPUDevice d,i64 s,WGPUBufferUsage u){WGPUBufferDescriptor desc={.size=s,.label=WGPUSTRING(label),.usage=u};return wgpuDeviceCreateBuffer(d,&desc);}
 
-static clockid_t clockid = CLOCK_MONOTONIC;
-u64 pf_ns_now(void){
-  struct timespec ts; clock_gettime(clockid, &ts);
-  return (uint64_t)ts.tv_sec*1000000000ull + (uint64_t)ts.tv_nsec;
+void key_input_callback(void* ud, enum KEYBOARD_BUTTON key, enum INPUT_STATE state)
+{
+  if (key == KEYBOARD_ESCAPE) {_exit(0);}
 }
-u64 T0;
-void pf_time_reset() {T0=pf_ns_now();}
-u64 pf_ns_start() {return T0;};
-void pf_timestamp(char *msg) {u64 _t=pf_ns_now(); printf("[+%7.3f ms] %s\n",(_t-T0)/1e6,(msg));}
+void mouse_input_callback(void* ud, i32 x, i32 y, enum MOUSE_BUTTON button, enum INPUT_STATE state)
+{
+}
 
 int main(void){
   pf_time_reset();
-  /* ---------- X11 WINDOW ---------- */
-  Display*dpy=XOpenDisplay(NULL); if(!dpy){fprintf(stderr,"no X11\n");return 1;}
-  int scr=DefaultScreen(dpy);
-  XSetWindowAttributes swa={.event_mask=StructureNotifyMask|ExposureMask|KeyPressMask};
-  Window win=XCreateWindow(dpy,RootWindow(dpy,scr),0,0,WIDTH,HEIGHT,0,CopyFromParent,InputOutput,CopyFromParent,CWEventMask,&swa);
-  Atom WM_DELETE=XInternAtom(dpy,"WM_DELETE_WINDOW",False); XSetWMProtocols(dpy,win,&WM_DELETE,1);
-  XStoreName(dpy,win,"webgpu.c"); XMapWindow(dpy,win);
-  XWindowAttributes xwa; XGetWindowAttributes(dpy,win,&xwa);
+  WINDOW w = pf_create_window(NULL, key_input_callback,mouse_input_callback);
   pf_timestamp("X window created");
 
   // set env
-  if (!DISCRETE_GPU) putenv((char*)"VK_DRIVER_FILES=/usr/share/vulkan/icd.d/intel_icd.x86_64.json");
-  if (!DISCRETE_GPU) putenv((char*)"VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/intel_icd.x86_64.json");
+  if (!DISCRETE_GPU) { // todo: && __linux__
+    putenv((char*)"VK_DRIVER_FILES=/usr/share/vulkan/icd.d/intel_icd.x86_64.json");
+    putenv((char*)"VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/intel_icd.x86_64.json");
+    putenv("VK_INSTANCE_LAYERS=");        // empty disables implicit layers
+    putenv("VK_LOADER_LAYERS_ENABLE=");   // empty disables loader scanning layers
+    putenv("VK_LOADER_DEBUG=");           // make sure no loader logging slows things
+    putenv("WGPU_BACKEND=vk");              // force vulkan
+    putenv("WGPU_ADAPTER_NAME=intel");      // string match against adapter name
+    putenv("WGPU_POWER_PREF=low");          // or "high" if you want discrete
+    putenv("WGPU_DEBUG=0");
+    putenv("WGPU_VALIDATION=0");
+    putenv("WGPU_GPU_BASED_VALIDATION=0");
+  }
 
   /* ---------- INSTANCE & SURFACE (X11) ---------- */
   WGPUInstance ins=wgpuCreateInstance(&(WGPUInstanceDescriptor){.nextInChain=(const WGPUChainedStruct*)&(WGPUInstanceExtras){
-    .chain.sType=WGPUSType_SurfaceSourceXlibWindow,.backends=WGPUInstanceBackend_All,
-    .flags=WGPUInstanceFlag_DiscardHalLabels,.gles3MinorVersion=WGPUGles3MinorVersion_Automatic}});
+    .backends=WGPUInstanceBackend_Vulkan,
+    .flags=0,.gles3MinorVersion=WGPUGles3MinorVersion_Version0}});
+  pf_timestamp("Instance created");
   WGPUSurfaceSourceXlibWindow xsd = {
     .chain.sType = WGPUSType_SurfaceSourceXlibWindow,
-    .display = dpy, .window = win
+    .display = pf_display_or_instance(w), .window = (u64) pf_surface_or_hwnd(w)
   };
   WGPUSurfaceDescriptor sdesc = {.nextInChain = &xsd.chain};
   WGPUSurface surface = wgpuInstanceCreateSurface(ins, &sdesc);
-  pf_timestamp("Instance and surface created");
+  pf_timestamp("Surface created");
 
   /* ---------- ADAPTER & DEVICE ---------- */
   WGPUAdapter adapter=NULL;
@@ -76,7 +78,7 @@ int main(void){
   /* ---------- SURFACE CONFIG ---------- */
   WGPUTextureFormat fmt= HDR?WGPUTextureFormat_RGBA16Float:WGPUTextureFormat_BGRA8UnormSrgb; // HDR uncommon on X11; keep off by default
   WGPUSurfaceConfiguration cfg={.device=dev,.format=fmt,.usage=WGPUTextureUsage_RenderAttachment,
-    .width=(u32)xwa.width,.height=(u32)xwa.height,.presentMode=WGPUPresentMode_Fifo};
+    .width=(u32)pf_window_width(w),.height=(u32)pf_window_height(w),.presentMode=WGPUPresentMode_Fifo};
   wgpuSurfaceConfigure(surface,&cfg);
   pf_timestamp("Surface configured");
 
@@ -86,9 +88,7 @@ int main(void){
 
   /* ---------- GPU buffers ---------- */
   WGPUBuffer VERTICES=mkbuf("vertices",dev,sizeof vertices,WGPUBufferUsage_Storage|WGPUBufferUsage_CopyDst);
-  wgpuQueueWriteBuffer(q,VERTICES,0,vertices,sizeof vertices);
   WGPUBuffer INSTANCES=mkbuf("instances", dev,sizeof instances,WGPUBufferUsage_Storage|WGPUBufferUsage_CopyDst);
-  wgpuQueueWriteBuffer(q,INSTANCES,0,&instances,sizeof instances);
   WGPUBuffer VISIBLE = mkbuf("visible",dev,256*sizeof(i32),WGPUBufferUsage_Storage);
   WGPUBuffer COUNTERS = mkbuf("counters",dev,5*sizeof(i32),WGPUBufferUsage_Storage|WGPUBufferUsage_Indirect|WGPUBufferUsage_CopyDst);
   WGPUBuffer VARYINGS = mkbuf("varyings",dev,MAX_VERTICES*sizeof(f32)*2,WGPUBufferUsage_Storage|WGPUBufferUsage_Vertex);
@@ -133,14 +133,9 @@ int main(void){
   pf_timestamp("Pipelines created");
 
   /* ---------- event/render loop ---------- */
-  int running=1;
-  while(running){
-    while(XPending(dpy)) {
-      XEvent e; XNextEvent(dpy,&e);
-      if(e.type==ClientMessage && (Atom)e.xclient.data.l[0]==WM_DELETE) running=0;
-      if(e.type==ConfigureNotify){XGetWindowAttributes(dpy,win,&xwa);
-        cfg.width=xwa.width; cfg.height=xwa.height; wgpuSurfaceConfigure(surface,&cfg);}
-    }
+  wgpuQueueWriteBuffer(q,VERTICES,0,vertices,sizeof vertices);
+  wgpuQueueWriteBuffer(q,INSTANCES,0,&instances,sizeof instances);
+  while(pf_poll_events(w)){
     u32 zero[5]={0,0,0,0,0}; wgpuQueueWriteBuffer(q,COUNTERS,0,zero,sizeof zero);
     WGPUCommandEncoder enc=wgpuDeviceCreateCommandEncoder(dev,NULL);
 
@@ -166,5 +161,5 @@ int main(void){
     wgpuSurfacePresent(surface); wgpuTextureViewRelease(tv);
     pf_timestamp("Submit frame");
   }
-  XDestroyWindow(dpy,win); XCloseDisplay(dpy); return 0;
+  return 0;
 }

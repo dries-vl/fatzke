@@ -192,7 +192,6 @@ void vk_init(void* display_or_hinst, void* surface_or_hwnd) {
     const char* exts[] = {"VK_KHR_surface","VK_KHR_xlib_surface","VK_EXT_debug_utils"};
 #endif
     const uint32_t ext_count = sizeof(exts)/sizeof(exts[0]);
-
     VkDebugUtilsMessengerCreateInfoEXT dbg_ci = {
         .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
         .messageSeverity =
@@ -206,7 +205,6 @@ void vk_init(void* display_or_hinst, void* surface_or_hwnd) {
         .pfnUserCallback = vk_debug_cb,
         .pUserData = NULL
     };
-
     VkInstanceCreateInfo ici = {
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         .pApplicationInfo = &ai,
@@ -265,33 +263,26 @@ void vk_init(void* display_or_hinst, void* surface_or_hwnd) {
         "VK_EXT_calibrated_timestamps",
     };
 
-    /* ---- features chain ---- */
+    // enable a bunch of features
     VkPhysicalDeviceFeatures2 features = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
     VkPhysicalDeviceVulkan11Features v11 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES };
+    v11.shaderDrawParameters = 1;
     VkPhysicalDeviceVulkan12Features v12 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
+    v12.timelineSemaphore = 1;v12.bufferDeviceAddress = 1;v12.scalarBlockLayout = 1;v12.hostQueryReset = 1;
     VkPhysicalDeviceVulkan13Features v13 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
+    v13.synchronization2 = 1; v13.dynamicRendering = 1;
     VkPhysicalDevicePresentIdFeaturesKHR presentIdFeat = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR,
-        .presentId = VK_TRUE
+        .presentId = 1
     };
     VkPhysicalDevicePresentWaitFeaturesKHR presentWaitFeat = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR,
-        .presentWait = VK_TRUE
+        .presentWait = 1
     };
     features.pNext = &v11; v11.pNext = &v12; v12.pNext = &v13;
     v13.pNext = &presentIdFeat;
     presentIdFeat.pNext = &presentWaitFeat;
-
     vkGetPhysicalDeviceFeatures2(vk.physical_device, &features);
-
-    // QoL toggles (safe if supported)
-    v11.shaderDrawParameters = VK_TRUE;
-    v12.timelineSemaphore           = VK_TRUE;
-    v12.bufferDeviceAddress         = VK_TRUE;
-    v12.scalarBlockLayout           = VK_TRUE;
-    v12.hostQueryReset              = VK_TRUE;
-    v13.synchronization2            = VK_TRUE;
-    v13.dynamicRendering            = VK_TRUE;
 
     VkDeviceCreateInfo dci = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &features,
@@ -610,7 +601,7 @@ void vk_render_frame(u32 win_w, u32 win_h) {
             .preTransform = caps.currentTransform,
             .compositeAlpha = alpha,
             .presentMode = pm,
-            .clipped = VK_TRUE,
+            .clipped = 1,
             .oldSwapchain = VK_NULL_HANDLE
         };
         VULKAN_CALL(vkCreateSwapchainKHR(vk.device,&sc_ci,NULL,&swapchain));
@@ -748,7 +739,7 @@ void vk_render_frame(u32 win_w, u32 win_h) {
     }
 
     // ---- frame (NUM_FRAMES in flight) ----
-    VULKAN_CALL(vkWaitForFences(vk.device,1,&inFlight[curFrame],VK_TRUE,UINT64_MAX));
+    VULKAN_CALL(vkWaitForFences(vk.device,1,&inFlight[curFrame],1,UINT64_MAX));
     VULKAN_CALL(vkResetFences(vk.device,1,&inFlight[curFrame]));
 
     u32 image_index = 0;

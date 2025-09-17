@@ -4,4 +4,4 @@
 tcc *.c static/win32/*.obj -luser32 -lgdi32 -lvulkan-1 -I"%VULKAN_SDK%\Include" -L"%VULKAN_SDK%\Lib" -run
 goto :eof
 '
-tcc *.c -run -lX11 -lXrandr -lXi -lXpresent -lrt -lwgpu_native -L.
+tcc *.c -run -lX11 -lXrandr -lXi -lXpresent -lvulkan -L.

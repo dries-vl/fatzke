@@ -33,3 +33,13 @@ else()
     target_link_directories(webgpu PRIVATE "${CMAKE_SOURCE_DIR}/../webgpu")
     target_link_libraries(webgpu PRIVATE X11 wgpu_native)
 endif()
+
+# vk
+file(GLOB SRC "${CMAKE_SOURCE_DIR}/../vk/*.c")
+add_executable(vk ${SRC})
+if(WIN32)
+    target_include_directories(battle PRIVATE "$ENV{VULKAN_SDK}/Include")
+    target_link_libraries(vk PRIVATE user32 gdi32 wgpu_native)
+else()
+    target_link_libraries(vk PRIVATE X11 wgpu_native)
+endif()
