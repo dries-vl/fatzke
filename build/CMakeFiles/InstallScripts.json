@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/dries/dev/fatzke/build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

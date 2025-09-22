@@ -49,11 +49,7 @@ struct Renderer {
 
 void* map_entire_allocation(VkDevice device, VkDeviceMemory memory, VkDeviceSize size_bytes) {
     void* data = NULL;
-    VkResult res = vkMapMemory(device, memory, 0, size_bytes, 0, &data);
-    if (res != VK_SUCCESS) {
-        printf("vkMapMemory failed: %d\n", res);
-        _exit(0);
-    }
+    VK_CHECK(vkMapMemory(device, memory, 0, size_bytes, 0, &data));
     return data;
 }
 
@@ -151,31 +147,33 @@ int main(void)
     // setup vulkan on the machine
     struct Machine machine = create_machine(window);
     struct Swapchain swapchain = create_swapchain(&machine,window);
-
-    /* -------- Render Pass -------- */
     struct Renderer renderer = {0};
-    VkAttachmentDescription color_attachment = { // -> can be moved to swapchain as constant
-        .format         = swapchain.swapchain_format,
-        .samples        = VK_SAMPLE_COUNT_1_BIT,
-        .loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR,
-        .storeOp        = VK_ATTACHMENT_STORE_OP_STORE,
-        .initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED,
-        .finalLayout    = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
-    };
-    VkAttachmentReference color_ref = { .attachment = 0, .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
-    VkSubpassDescription subpass = {
-        .pipelineBindPoint    = VK_PIPELINE_BIND_POINT_GRAPHICS,
-        .colorAttachmentCount = 1,
-        .pColorAttachments    = &color_ref
-    };
-    VkRenderPassCreateInfo render_pass_info = {
-        .sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-        .attachmentCount = 1,
-        .pAttachments    = &color_attachment,
-        .subpassCount    = 1,
-        .pSubpasses      = &subpass
-    };
-    VK_CHECK(vkCreateRenderPass(machine.device, &render_pass_info, NULL, &renderer.render_pass));
+
+    // pure boilerplate with some obvious settings
+    {
+        VkAttachmentDescription color_attachment = { // -> can be moved to swapchain as constant
+            .format         = swapchain.swapchain_format,
+            .samples        = VK_SAMPLE_COUNT_1_BIT,
+            .loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR,
+            .storeOp        = VK_ATTACHMENT_STORE_OP_STORE,
+            .initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED,
+            .finalLayout    = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+        };
+        VkAttachmentReference color_ref = { .attachment = 0, .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+        VkSubpassDescription subpass = {
+            .pipelineBindPoint    = VK_PIPELINE_BIND_POINT_GRAPHICS,
+            .colorAttachmentCount = 1,
+            .pColorAttachments    = &color_ref
+        };
+        VkRenderPassCreateInfo render_pass_info = {
+            .sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+            .attachmentCount = 1,
+            .pAttachments    = &color_attachment,
+            .subpassCount    = 1,
+            .pSubpasses      = &subpass
+        };
+        VK_CHECK(vkCreateRenderPass(machine.device, &render_pass_info, NULL, &renderer.render_pass));
+    }
 
     /* -------- Descriptor Set Layout (compute) --------
        Bindings:
@@ -370,10 +368,12 @@ int main(void)
         struct { float x, y; } initial_instances[] = {
             { -0.5f, -0.5f }, { 0.5f, -0.5f }, { -0.5f, 0.5f }, { 0.5f, 0.5f }
         };
-        memcpy(map_entire_allocation(machine.device, renderer.memory_vertices, size_vertices),
-               initial_vertices, sizeof(initial_vertices));
-        memcpy(map_entire_allocation(machine.device, renderer.memory_instances, size_instances),
-               initial_instances, sizeof(initial_instances));
+        void* vertices_mapping = NULL;
+        VK_CHECK(vkMapMemory(machine.device, renderer.memory_vertices, 0, size_vertices, 0, &vertices_mapping));
+        memcpy(vertices_mapping, initial_vertices, sizeof(initial_vertices));
+        void* instances_mapping = NULL;
+        VK_CHECK(vkMapMemory(machine.device, renderer.memory_instances, 0, size_instances, 0, &instances_mapping));
+        memcpy(instances_mapping, initial_instances, sizeof(initial_instances));
     }
 
     /* -------- Descriptor Pool & Set -------- */

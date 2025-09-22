@@ -1,0 +1,38 @@
+[
+{
+  "directory": "/home/dries/dev/fatzke/build",
+  "command": "/usr/bin/gcc -g -std=gnu99 -o CMakeFiles/fatzke.dir/home/dries/dev/fatzke/fatzke/main.c.o -c /home/dries/dev/fatzke/fatzke/main.c",
+  "file": "/home/dries/dev/fatzke/fatzke/main.c",
+  "output": "CMakeFiles/fatzke.dir/home/dries/dev/fatzke/fatzke/main.c.o"
+},
+{
+  "directory": "/home/dries/dev/fatzke/build",
+  "command": "/usr/bin/gcc -g -std=gnu99 -o CMakeFiles/battle.dir/home/dries/dev/fatzke/battle/battle.c.o -c /home/dries/dev/fatzke/battle/battle.c",
+  "file": "/home/dries/dev/fatzke/battle/battle.c",
+  "output": "CMakeFiles/battle.dir/home/dries/dev/fatzke/battle/battle.c.o"
+},
+{
+  "directory": "/home/dries/dev/fatzke/build",
+  "command": "/usr/bin/gcc -g -std=gnu99 -o CMakeFiles/battle.dir/home/dries/dev/fatzke/battle/main.c.o -c /home/dries/dev/fatzke/battle/main.c",
+  "file": "/home/dries/dev/fatzke/battle/main.c",
+  "output": "CMakeFiles/battle.dir/home/dries/dev/fatzke/battle/main.c.o"
+},
+{
+  "directory": "/home/dries/dev/fatzke/build",
+  "command": "/usr/bin/gcc -g -std=gnu99 -o CMakeFiles/battle.dir/home/dries/dev/fatzke/battle/vulkan.c.o -c /home/dries/dev/fatzke/battle/vulkan.c",
+  "file": "/home/dries/dev/fatzke/battle/vulkan.c",
+  "output": "CMakeFiles/battle.dir/home/dries/dev/fatzke/battle/vulkan.c.o"
+},
+{
+  "directory": "/home/dries/dev/fatzke/build",
+  "command": "/usr/bin/gcc -g -std=gnu99 -o CMakeFiles/battle.dir/home/dries/dev/fatzke/battle/wayland.c.o -c /home/dries/dev/fatzke/battle/wayland.c",
+  "file": "/home/dries/dev/fatzke/battle/wayland.c",
+  "output": "CMakeFiles/battle.dir/home/dries/dev/fatzke/battle/wayland.c.o"
+},
+{
+  "directory": "/home/dries/dev/fatzke/build",
+  "command": "/usr/bin/gcc -g -std=gnu99 -o CMakeFiles/battle.dir/home/dries/dev/fatzke/battle/windows.c.o -c /home/dries/dev/fatzke/battle/windows.c",
+  "file": "/home/dries/dev/fatzke/battle/windows.c",
+  "output": "CMakeFiles/battle.dir/home/dries/dev/fatzke/battle/windows.c.o"
+}
+]
