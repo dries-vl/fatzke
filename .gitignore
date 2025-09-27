@@ -4,5 +4,6 @@
 *.exe
 config/Cargo.lock
 target
+build
 cmake-*
 NUL

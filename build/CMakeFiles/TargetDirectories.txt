@@ -1,4 +1,0 @@
-/home/dries/dev/fatzke/build/CMakeFiles/fatzke.dir
-/home/dries/dev/fatzke/build/CMakeFiles/battle.dir
-/home/dries/dev/fatzke/build/CMakeFiles/edit_cache.dir
-/home/dries/dev/fatzke/build/CMakeFiles/rebuild_cache.dir
