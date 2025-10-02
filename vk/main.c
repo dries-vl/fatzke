@@ -9,6 +9,8 @@
 // todo: create vk_shader (to have one big shader with multiple entrypoints, have shader hot reloading, ...)
 // todo: create vk_texture (loading textures, maybe hot reloading textures, ...)
 
+#define MAX_FRAMES_IN_FLIGHT 2
+
 struct Renderer {
     // Render pass & graphics pipeline
     VkRenderPass              render_pass;
@@ -34,9 +36,11 @@ struct Renderer {
     // Commands & synchronization
     VkCommandPool             command_pool_graphics;
     VkCommandBuffer*          command_buffers_per_image;
-    VkSemaphore               semaphore_image_available;
-    VkSemaphore               semaphore_render_finished;
-    VkFence*                  fence_inflight_per_image;
+
+    VkSemaphore               image_available[MAX_FRAMES_IN_FLIGHT];
+    VkSemaphore               render_finished[MAX_FRAMES_IN_FLIGHT];
+    VkFence                   in_flight[MAX_FRAMES_IN_FLIGHT];
+    uint32_t                  current_frame;
 
 };
 
@@ -94,7 +98,7 @@ find_memory_type_index(VkPhysicalDevice physical_device,
         if (supported && has_props) return i;
     }
     printf("Failed to find suitable memory type.\n");
-    _exit(0);
+    _exit(0); return 0;
 }
 
 void create_buffer_and_memory(VkDevice device, VkPhysicalDevice phys,
@@ -149,7 +153,7 @@ int main(void)
     struct Swapchain swapchain = create_swapchain(&machine,window);
     struct Renderer renderer = {0};
 
-    // pure boilerplate with some obvious settings
+    // create render pass with some obvious settings
     {
         VkAttachmentDescription color_attachment = { // -> can be moved to swapchain as constant
             .format         = swapchain.swapchain_format,
@@ -173,6 +177,21 @@ int main(void)
             .pSubpasses      = &subpass
         };
         VK_CHECK(vkCreateRenderPass(machine.device, &render_pass_info, NULL, &renderer.render_pass));
+    }
+    
+    swapchain.framebuffers = (VkFramebuffer*)malloc(sizeof(VkFramebuffer) * swapchain.swapchain_image_count);
+    for (uint32_t i = 0; i < swapchain.swapchain_image_count; ++i) {
+        VkImageView attachments[1] = { swapchain.swapchain_views[i] };
+        VkFramebufferCreateInfo fb_info = {
+            .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+            .renderPass = renderer.render_pass,
+            .attachmentCount = 1,
+            .pAttachments = attachments,
+            .width  = swapchain.swapchain_extent.width,
+            .height = swapchain.swapchain_extent.height,
+            .layers = 1
+        };
+        VK_CHECK(vkCreateFramebuffer(machine.device, &fb_info, NULL, &swapchain.framebuffers[i]));
     }
 
     /* -------- Descriptor Set Layout (compute) --------
@@ -434,15 +453,15 @@ int main(void)
     };
     VK_CHECK(vkAllocateCommandBuffers(machine.device, &cmd_alloc_info, renderer.command_buffers_per_image));
 
+    // create semaphores etc.
     VkSemaphoreCreateInfo semaphore_info = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
-    VK_CHECK(vkCreateSemaphore(machine.device, &semaphore_info, NULL, &renderer.semaphore_image_available));
-    VK_CHECK(vkCreateSemaphore(machine.device, &semaphore_info, NULL, &renderer.semaphore_render_finished));
-
-    renderer.fence_inflight_per_image = (VkFence*)calloc(swapchain.swapchain_image_count, sizeof(VkFence));
-    for (uint32_t i = 0; i < swapchain.swapchain_image_count; ++i) {
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        VK_CHECK(vkCreateSemaphore(machine.device, &semaphore_info, NULL, &renderer.image_available[i]));
+        VK_CHECK(vkCreateSemaphore(machine.device, &semaphore_info, NULL, &renderer.render_finished[i]));
         VkFenceCreateInfo fence_info = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT };
-        VK_CHECK(vkCreateFence(machine.device, &fence_info, NULL, &renderer.fence_inflight_per_image[i]));
+        VK_CHECK(vkCreateFence(machine.device, &fence_info, NULL, &renderer.in_flight[i]));
     }
+    renderer.current_frame = 0;
 
     /* ----------------------------- Frame Loop ----------------------------- */
     while (pf_poll_events(window)) {
@@ -452,20 +471,28 @@ int main(void)
         if (!counters_mapping) counters_mapping = map_entire_allocation(machine.device, renderer.memory_counters, size_counters);
         memcpy(counters_mapping, zeroed_counters, sizeof(zeroed_counters));
 
-        // Acquire next swapchain image
+        // (A) throttle CPU to <= 1 frame ahead
+        VK_CHECK(vkWaitForFences(machine.device, 1, &renderer.in_flight[renderer.current_frame], VK_TRUE, UINT64_MAX));
+        VK_CHECK(vkResetFences(machine.device, 1, &renderer.in_flight[renderer.current_frame]));
+
+        // (B) Acquire swapchain image, signaling per-frame semaphore
         uint32_t swap_image_index = 0;
-        VkResult acquire_res = vkAcquireNextImageKHR(machine.device, swapchain.swapchain, UINT64_MAX,
-                                                     renderer.semaphore_image_available, VK_NULL_HANDLE, &swap_image_index);
-        if (acquire_res == VK_ERROR_OUT_OF_DATE_KHR) { destroy_swapchain(&machine,&renderer,&swapchain);swapchain=create_swapchain(&machine,window); continue; }
+        VkResult acquire_res = vkAcquireNextImageKHR(
+            machine.device, swapchain.swapchain, UINT64_MAX,
+            renderer.image_available[renderer.current_frame], VK_NULL_HANDLE,
+            &swap_image_index);
+
+        if (acquire_res == VK_ERROR_OUT_OF_DATE_KHR) { // window resized, etc.
+            recreate_swapchain(&machine, &renderer, &swapchain, window);
+            continue;
+        }
         if (acquire_res != VK_SUCCESS && acquire_res != VK_SUBOPTIMAL_KHR) {
             printf("vkAcquireNextImageKHR failed: %d\n", acquire_res);
             break;
         }
 
-        VK_CHECK(vkWaitForFences(machine.device, 1, &renderer.fence_inflight_per_image[swap_image_index], VK_TRUE, UINT64_MAX));
-        VK_CHECK(vkResetFences(machine.device, 1, &renderer.fence_inflight_per_image[swap_image_index]));
+        // (C) Record command buffer for this swapchain image
         VK_CHECK(vkResetCommandBuffer(renderer.command_buffers_per_image[swap_image_index], 0));
-
         VkCommandBufferBeginInfo begin_info = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
         VK_CHECK(vkBeginCommandBuffer(renderer.command_buffers_per_image[swap_image_index], &begin_info));
 
@@ -491,7 +518,7 @@ int main(void)
         VkMemoryBarrier2 mem_barrier = {
             .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
             .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
             .dstStageMask  = VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
                              VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT |
                              VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -503,30 +530,14 @@ int main(void)
         VkDependencyInfo dep_info = { .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mem_barrier };
         vkCmdPipelineBarrier2(renderer.command_buffers_per_image[swap_image_index], &dep_info);
 
-        // Render pass
+        // --- render pass (use persistent framebuffer) ---
         VkClearValue clear_color = { .color = {{0, 0, 0, 1}} };
-
-        // Create framebuffer for the swapchain image view (simple approach)
-        VkImageView attachments[1] = { swapchain.swapchain_views[swap_image_index] };
-        VkFramebufferCreateInfo framebuffer_info = {
-            .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-            .renderPass = renderer.render_pass,
-            .attachmentCount = 1,
-            .pAttachments = attachments,
-            .width  = swapchain.swapchain_extent.width,
-            .height = swapchain.swapchain_extent.height,
-            .layers = 1
-        };
-        VkFramebuffer framebuffer;
-        VK_CHECK(vkCreateFramebuffer(machine.device, &framebuffer_info, NULL, &framebuffer));
-
         VkRenderPassBeginInfo render_begin = {
             .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
             .renderPass = renderer.render_pass,
-            .framebuffer = framebuffer,
+            .framebuffer = swapchain.framebuffers[swap_image_index], // <-- persistent
             .renderArea = { .offset = {0,0}, .extent = swapchain.swapchain_extent },
-            .clearValueCount = 1,
-            .pClearValues = &clear_color
+            .clearValueCount = 1, .pClearValues = &clear_color
         };
         vkCmdBeginRenderPass(renderer.command_buffers_per_image[swap_image_index], &render_begin, VK_SUBPASS_CONTENTS_INLINE);
 
@@ -537,31 +548,35 @@ int main(void)
         vkCmdDrawIndexedIndirect(renderer.command_buffers_per_image[swap_image_index], renderer.buffer_counters, 0, 1, sizeof(VkDrawIndexedIndirectCommand));
 
         vkCmdEndRenderPass(renderer.command_buffers_per_image[swap_image_index]);
-        vkDestroyFramebuffer(machine.device, framebuffer, NULL);
 
         VK_CHECK(vkEndCommandBuffer(renderer.command_buffers_per_image[swap_image_index]));
 
-        // Submit and present
+        // (D) Submit: wait on acquire, signal render-finished, fence per-frame
         VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
         VkSubmitInfo submit_info = {
             .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-            .waitSemaphoreCount = 1, .pWaitSemaphores = &renderer.semaphore_image_available, .pWaitDstStageMask = &wait_stage,
+            .waitSemaphoreCount = 1, .pWaitSemaphores = &renderer.image_available[renderer.current_frame],
+            .pWaitDstStageMask  = &wait_stage,
             .commandBufferCount = 1, .pCommandBuffers = &renderer.command_buffers_per_image[swap_image_index],
-            .signalSemaphoreCount = 1, .pSignalSemaphores = &renderer.semaphore_render_finished
+            .signalSemaphoreCount = 1, .pSignalSemaphores = &renderer.render_finished[renderer.current_frame]
         };
-        VK_CHECK(vkQueueSubmit(machine.queue_graphics, 1, &submit_info, renderer.fence_inflight_per_image[swap_image_index]));
+        VK_CHECK(vkQueueSubmit(machine.queue_graphics, 1, &submit_info, renderer.in_flight[renderer.current_frame]));
 
+        // (E) Present: wait on render-finished
         VkPresentInfoKHR present_info = {
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-            .waitSemaphoreCount = 1, .pWaitSemaphores = &renderer.semaphore_render_finished,
+            .waitSemaphoreCount = 1, .pWaitSemaphores = &renderer.render_finished[renderer.current_frame],
             .swapchainCount = 1, .pSwapchains = &swapchain.swapchain, .pImageIndices = &swap_image_index
         };
         VkResult present_res = vkQueuePresentKHR(machine.queue_present, &present_info);
         if (present_res == VK_ERROR_OUT_OF_DATE_KHR || present_res == VK_SUBOPTIMAL_KHR) {
-            destroy_swapchain(&machine, &renderer, &swapchain);
-            create_swapchain(&machine,window);
+            recreate_swapchain(&machine, &renderer, &swapchain, window);
+        } else if (present_res != VK_SUCCESS) {
+            printf("vkQueuePresentKHR failed: %d\n", present_res);
+            break;
         }
 
+        renderer.current_frame = (renderer.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
         pf_timestamp("Frame submitted");
     }
 
