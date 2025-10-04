@@ -171,7 +171,10 @@ struct Machine create_machine(WINDOW x11_window)
     vkGetPhysicalDeviceFeatures2(machine.physical_device, &features);
 
     static const char* kRequiredDeviceExtensions[] = {
-        VK_KHR_SWAPCHAIN_EXTENSION_NAME
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+        VK_KHR_PRESENT_ID_EXTENSION_NAME,
+        VK_KHR_PRESENT_WAIT_EXTENSION_NAME,
+        VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME
     };
     VkDeviceCreateInfo device_info = {
         .pNext = &features,
