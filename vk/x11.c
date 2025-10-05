@@ -259,7 +259,6 @@ int pf_window_visible(void *p) { struct x11_window* w = p; return w ? w->visible
 /* Non-blocking pump */
 int pf_poll_events(void* p){
     struct x11_window* w = p; if (!w) return 0;
-
     while (XPending(w->dpy)){
         XEvent ev; XNextEvent(w->dpy, &ev);
         switch (ev.type){

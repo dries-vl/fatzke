@@ -512,7 +512,6 @@ int main(void)
         VK_CHECK(vkResetFences(machine.device, 1, &renderer.fe_in_flight[renderer.frame_slot])); // set unsignaled again
 
         #if DEBUG == 1
-        f32 frame_start_time = (f32) (pf_ns_now() - pf_ns_start()) / 1e6;
         for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
             uint64_t presented_frame_id = presented_frame_ids[i];
             if (!presented_frame_id) continue;
@@ -579,6 +578,7 @@ int main(void)
         if (acquire_result != VK_SUCCESS && acquire_result != VK_SUBOPTIMAL_KHR) { printf("vkAcquireNextImageKHR failed: %d\n", acquire_result); break; }
 
         // start recording for this frame's command buffer
+        f32 frame_start_time = (f32) (pf_ns_now() - pf_ns_start()) / 1e6;
         VK_CHECK(vkResetCommandBuffer(swapchain.command_buffers_per_image[swap_image_index], 0));
         VkCommandBufferBeginInfo begin_info = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
         VK_CHECK(vkBeginCommandBuffer(swapchain.command_buffers_per_image[swap_image_index], &begin_info));
@@ -760,9 +760,6 @@ int main(void)
             uint64_t gpu_now_ticks = ts[0];
             uint64_t cpu_now_ns    = ts[1]; // on Linux MONOTONIC is ns
         }
-        f32 submit_time = (f32) (pf_ns_now() - pf_ns_start()) / 1e6;
-        printf("[%llu] cpu time %.3fms - %.3fms [%.3fms]\n",renderer.frame_id_counter, frame_start_time, submit_time,
-            submit_time - frame_start_time);
         #endif
         VK_CHECK(vkEndCommandBuffer(swapchain.command_buffers_per_image[swap_image_index]));
 
@@ -802,6 +799,10 @@ int main(void)
             break;
         }
 
+        #if DEBUG == 1
+        f32 frame_end_time = (f32) (pf_ns_now() - pf_ns_start()) / 1e6;
+        printf("[%llu] cpu time %.3fms - %.3fms [%.3fms]\n",renderer.frame_id_counter, frame_start_time, frame_end_time, frame_end_time - frame_start_time);
+        #endif
         swapchain.previous_frame_image_index[renderer.frame_slot] = swap_image_index;
         renderer.frame_slot = (renderer.frame_slot + 1) % MAX_FRAMES_IN_FLIGHT;
     }
