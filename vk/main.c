@@ -13,8 +13,8 @@
 // todo: create vk_shader (to have one big shader with multiple entrypoints, have shader hot reloading, ...)
 // todo: create vk_texture (loading textures, maybe hot reloading textures, ...)
 
-#define MAX_FRAMES_IN_FLIGHT 2
-VkExtent2D lowres_extent = { 128, 72 };
+#define MAX_FRAMES_IN_FLIGHT 1
+VkExtent2D OFFSCREEN_EXTENT = { 128, 72 };
 
 struct Renderer {
     // render pipeline
@@ -42,16 +42,15 @@ struct Renderer {
     VkImageView               offscreen_view;
     VkFramebuffer             offscreen_fb;
     // sync
-    uint32_t                  current_frame;
-    VkSemaphore               image_available[MAX_FRAMES_IN_FLIGHT];
-    VkFence                   in_flight[MAX_FRAMES_IN_FLIGHT];
+    uint32_t                  frame_slot;
+    VkSemaphore               sem_image_available[MAX_FRAMES_IN_FLIGHT];
+    VkFence                   fe_in_flight[MAX_FRAMES_IN_FLIGHT];
     // debug
     #if DEBUG == 1
     double      gpu_ticks_to_ns;
     uint64_t    frame_id_counter;
     uint64_t    frame_id_per_slot[MAX_FRAMES_IN_FLIGHT];
-    uint64_t    cpu_start_ns[MAX_FRAMES_IN_FLIGHT];
-    uint64_t    cpu_end_ns  [MAX_FRAMES_IN_FLIGHT];
+    f32         start_time_per_slot[MAX_FRAMES_IN_FLIGHT];
     #endif
 };
 
@@ -59,6 +58,7 @@ struct Renderer {
 #include "vk_machine.h"
 #include "vk_swapchain.h"
 
+#pragma region HELPER
 void* map_entire_allocation(VkDevice device, VkDeviceMemory memory, VkDeviceSize size_bytes) {
     void* data = NULL;
     VK_CHECK(vkMapMemory(device, memory, 0, size_bytes, 0, &data));
@@ -123,6 +123,7 @@ void create_buffer_and_memory(VkDevice device, VkPhysicalDevice phys,
     VK_CHECK(vkBindBufferMemory(device, *out_buf, *out_mem, 0));
 }
 
+#pragma region MAIN
 void key_input_callback(void* ud, enum KEYBOARD_BUTTON key, enum INPUT_STATE state) {
     if (key == KEYBOARD_ESCAPE) {_exit(0);}
 }
@@ -147,12 +148,13 @@ int main(void)
     struct Swapchain swapchain = create_swapchain(&machine,window);
     struct Renderer renderer = {0};
     
+    #pragma region OFFSCREEN
     // create intermediary target image
     VkImageCreateInfo ci = {
         .sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
         .imageType     = VK_IMAGE_TYPE_2D,
         .format        = swapchain.swapchain_format,
-        .extent        = { lowres_extent.width, lowres_extent.height, 1 },
+        .extent        = { OFFSCREEN_EXTENT.width, OFFSCREEN_EXTENT.height, 1 },
         .mipLevels     = 1,
         .arrayLayers   = 1,
         .samples       = VK_SAMPLE_COUNT_1_BIT,
@@ -216,14 +218,16 @@ int main(void)
         .renderPass      = renderer.offscreen_render_pass,
         .attachmentCount = 1,
         .pAttachments    = off_attachments,
-        .width  = lowres_extent.width,
-        .height = lowres_extent.height,
+        .width  = OFFSCREEN_EXTENT.width,
+        .height = OFFSCREEN_EXTENT.height,
         .layers = 1
     };
     VK_CHECK(vkCreateFramebuffer(machine.device, &fb_ci, NULL, &renderer.offscreen_fb));
+    #pragma endregion
     
+    VkShaderModule shader_module = create_shader_module_from_spirv(machine.device, "static/shaders.spv");
 
-    // BEGIN OF RENDERER STUFF
+    #pragma region COMPUTE PIPELINE
     /* -------- Descriptor Set Layout (compute) --------
        Bindings:
         0 INSTANCES (readonly), 1 VISIBLE (read_write),
@@ -259,27 +263,23 @@ int main(void)
     VK_CHECK(vkCreatePipelineLayout(machine.device, &graphics_pl_info, NULL, &renderer.graphics_pipeline_layout));
 
     /* -------- Compute Pipelines -------- */
-    VkShaderModule sm_cs_instance = create_shader_module_from_spirv(machine.device, "static/cs_instance.spv");
-    VkShaderModule sm_cs_prepare  = create_shader_module_from_spirv(machine.device, "static/cs_prepare.spv");
-    VkShaderModule sm_cs_meshlet  = create_shader_module_from_spirv(machine.device, "static/cs_meshlet.spv");
-
     VkComputePipelineCreateInfo compute_infos[3] = {
         {
             .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
             .stage  = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                        .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = sm_cs_instance, .pName = "main" },
+                        .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = shader_module, .pName = "cs_instance" },
             .layout = renderer.compute_pipeline_layout
         },
         {
             .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
             .stage  = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                        .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = sm_cs_prepare,  .pName = "main"  },
+                        .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = shader_module,  .pName = "cs_prepare"  },
             .layout = renderer.compute_pipeline_layout
         },
         {
             .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
             .stage  = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                        .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = sm_cs_meshlet,  .pName = "main"  },
+                        .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = shader_module,  .pName = "cs_meshlet"  },
             .layout = renderer.compute_pipeline_layout
         }
     };
@@ -295,17 +295,12 @@ int main(void)
     renderer.pipeline_cs_instance = pipelines[0];
     renderer.pipeline_cs_prepare  = pipelines[1];
     renderer.pipeline_cs_meshlet  = pipelines[2];
-    vkDestroyShaderModule(machine.device, sm_cs_instance, NULL);
-    vkDestroyShaderModule(machine.device, sm_cs_prepare,  NULL);
-    vkDestroyShaderModule(machine.device, sm_cs_meshlet,  NULL);
+    #pragma endregion
 
-    /* -------- Graphics Pipeline -------- */
-    VkShaderModule sm_vs = create_shader_module_from_spirv(machine.device, "static/tri.vert.spv");
-    VkShaderModule sm_fs = create_shader_module_from_spirv(machine.device, "static/tri.frag.spv");
-
+    #pragma region GRAPHICS PIPELINE
     VkPipelineShaderStageCreateInfo shader_stages[2] = {
-        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT,   .module = sm_vs, .pName = "main" },
-        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = sm_fs, .pName = "main" }
+        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT,   .module = shader_module, .pName = "vs_main" },
+        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = shader_module, .pName = "fs_main" }
     };
 
     // Vertex: vec2 position at location=0
@@ -372,9 +367,12 @@ int main(void)
         .subpass             = 0
     };
     VK_CHECK(vkCreateGraphicsPipelines(machine.device, VK_NULL_HANDLE, 1, &graphics_info, NULL, &renderer.graphics_pipeline));
-    vkDestroyShaderModule(machine.device, sm_vs, NULL);
-    vkDestroyShaderModule(machine.device, sm_fs, NULL);
+    #pragma endregion
 
+    // destroy the shader module after using it
+    vkDestroyShaderModule(machine.device, shader_module,  NULL);
+
+    #pragma region BUFFERS
     /* -------- Buffers (host-visible for simplicity) -------- */
     const VkDeviceSize size_vertices = sizeof(float) * 6;             // 3 * vec2
     const VkDeviceSize size_instances = sizeof(float) * 2 * 4;        // 4 instances (vec2 offsets)
@@ -472,53 +470,62 @@ int main(void)
     vkUpdateDescriptorSets(machine.device, 7, writes, 0, NULL);
     pf_timestamp("Descriptors created");
 
-    // create semaphores etc.
-    VkSemaphoreCreateInfo semaphore_info = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
-    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-        VK_CHECK(vkCreateSemaphore(machine.device, &semaphore_info, NULL, &renderer.image_available[i]));
-        VkFenceCreateInfo fence_info = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT };
-        VK_CHECK(vkCreateFence(machine.device, &fence_info, NULL, &renderer.in_flight[i]));
-    }
-
-    renderer.current_frame = 0;
-
+    #pragma region FRAME LOOP
     #if DEBUG == 1
     renderer.frame_id_counter = 1;
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
         renderer.frame_id_per_slot[i]   = 0;
-        renderer.cpu_start_ns[i] = 0;
-        renderer.cpu_end_ns[i]   = 0;
     }
     PFN_vkGetCalibratedTimestampsEXT vkGetCalibratedTimestampsEXT =
     (PFN_vkGetCalibratedTimestampsEXT)vkGetDeviceProcAddr(machine.device, "vkGetCalibratedTimestampsEXT");
+    if (!vkGetCalibratedTimestampsEXT) {
+        printf("vkGetCalibratedTimestampsEXT not available — vkGetCalibratedTimestampsEXT not supported.\n");
+    }
     VkPhysicalDeviceProperties props;
     vkGetPhysicalDeviceProperties(machine.physical_device, &props);
     renderer.gpu_ticks_to_ns = props.limits.timestampPeriod; // 1 tick == this many ns
+
+    PFN_vkWaitForPresentKHR vkWaitForPresentKHR =
+    (PFN_vkWaitForPresentKHR)vkGetDeviceProcAddr(machine.device, "vkWaitForPresentKHR");
+    if (!vkWaitForPresentKHR) {
+        printf("vkWaitForPresentKHR not available — VK_KHR_present_wait not supported.\n");
+    }
+    uint64_t presented_frame_ids[MAX_FRAMES_IN_FLIGHT] = {0};
     #endif
 
+    // create semaphore linked to swapchain image (for gpu to wait for this swapchain image to be released) 
+    // create fence (for cpu to wait for one of the command buffers to finish on the gpu)
+    VkSemaphoreCreateInfo semaphore_info = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+    VkFenceCreateInfo fence_info = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT }; // start signaled so first frame doesn't block
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        VK_CHECK(vkCreateSemaphore(machine.device, &semaphore_info, NULL, &renderer.sem_image_available[i]));
+        VK_CHECK(vkCreateFence(machine.device, &fence_info, NULL, &renderer.fe_in_flight[i]));
+    }
+
+    renderer.frame_slot = 0;
     while (pf_poll_events(window)) {
-        // (A) throttle CPU to <= 1 frame ahead
-        VK_CHECK(vkWaitForFences(machine.device, 1, &renderer.in_flight[renderer.current_frame], VK_TRUE, UINT64_MAX));
-        VK_CHECK(vkResetFences(machine.device, 1, &renderer.in_flight[renderer.current_frame]));
+        // block on the fence here to avoid having to many frames queued up (latency)
+        VK_CHECK(vkWaitForFences(machine.device, 1, &renderer.fe_in_flight[renderer.frame_slot], VK_TRUE, UINT64_MAX));
+        VK_CHECK(vkResetFences(machine.device, 1, &renderer.fe_in_flight[renderer.frame_slot])); // set unsignaled again
+
         #if DEBUG == 1
-        // this slot just finished a frame last time we used it – print that CPU duration now
-        if (renderer.cpu_start_ns[renderer.current_frame] && renderer.cpu_end_ns[renderer.current_frame]
-            && renderer.cpu_end_ns[renderer.current_frame] >= renderer.cpu_start_ns[renderer.current_frame]) {
-
-            uint64_t fid = renderer.frame_id_per_slot[renderer.current_frame];
-            double cpu_ms = (double)(renderer.cpu_end_ns[renderer.current_frame] -
-                                     renderer.cpu_start_ns[renderer.current_frame]) / 1e6;
-
-            printf("REPORT: [fid=%llu slot=%u] CPU frame: %.3f ms\n",
-                   (unsigned long long)fid, renderer.current_frame,cpu_ms);
+        f32 frame_start_time = (f32) (pf_ns_now() - pf_ns_start()) / 1e6;
+        for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+            uint64_t presented_frame_id = presented_frame_ids[i];
+            if (!presented_frame_id) continue;
+            VkResult r = vkWaitForPresentKHR(machine.device, swapchain.swapchain, presented_frame_id, 0); // timeout zero for non-blocking
+            if (r == VK_SUCCESS || r == VK_ERROR_DEVICE_LOST) { // -4 device lost instead of success somehow...
+                f32 present_time = (f32) (pf_ns_now() - pf_ns_start()) / 1e6;
+                printf("[%llu] presented at %.3f ms\n",presented_frame_id, present_time);
+                presented_frame_ids[i] = 0; // clear slot
+                f32 latency = present_time - renderer.start_time_per_slot[i];
+                printf("[%llu] latency %.3f ms\n", presented_frame_id, latency);
+            };
         }
-        // start stamp for the NEW frame we’re about to build in this slot
-        struct timespec cpu_start; clock_gettime(1, &cpu_start);
-        renderer.cpu_start_ns[renderer.current_frame] =
-            (uint64_t)cpu_start.tv_sec * 1000000000ull + (uint64_t)cpu_start.tv_nsec;
-        uint32_t img = swapchain.previous_frame_image_index[renderer.current_frame];
-        if (img != UINT32_MAX) {
-            uint32_t q_first = img * QUERIES_PER_IMAGE;
+        uint64_t last_frame_id = renderer.frame_id_per_slot[renderer.frame_slot];
+        uint32_t image = swapchain.previous_frame_image_index[renderer.frame_slot];
+        if (image != UINT32_MAX) {
+            uint32_t q_first = image * QUERIES_PER_IMAGE;
             uint32_t q_last  = q_first + 1;
             uint64_t ticks[2] = {0,0};
             // calibrated sample
@@ -535,7 +542,6 @@ int main(void)
                 double gpu_now_ns = (double)ts[0] * renderer.gpu_ticks_to_ns;
                 double cpu_now_ns = (double)ts[1];
                 offset_ns = cpu_now_ns - gpu_now_ns;  // add this to any GPU ns to place on CPU timeline
-                // (optional) store maxDev if you want an error bar
             }
             // Now read the two GPU timestamps for that image (they’re done because we waited the fence)
             VkResult qr = vkGetQueryPoolResults(
@@ -550,49 +556,34 @@ int main(void)
                 double gpu_begin_ns = (double)ticks[0] * renderer.gpu_ticks_to_ns;
                 double gpu_end_ns   = (double)ticks[1] * renderer.gpu_ticks_to_ns;
                 double gpu_dur_ms   = (gpu_end_ns - gpu_begin_ns) * 1e-6;
-
                 // CPU mapping
                 double cpu_mapped_begin_ms = (offset_ns + gpu_begin_ns - pf_ns_start()) * 1e-6;
                 double cpu_mapped_end_ms   = (offset_ns + gpu_end_ns   - pf_ns_start()) * 1e-6;
-
-                uint64_t fid = renderer.frame_id_per_slot[renderer.current_frame];
-
-                printf("REPORT: [fid=%llu slot=%u img=%u] GPU: %.3f ms | CPU-mapped: begin=%.3f end=%.3f ms\n",
-                       (unsigned long long)fid, renderer.current_frame, img,
-                       gpu_dur_ms, cpu_mapped_begin_ms, cpu_mapped_end_ms);
+                printf("[%llu] past fence at %.3fms\n", (unsigned long long)last_frame_id, (f32) (pf_ns_now() - pf_ns_start()) / 1e6);
+                printf("[%llu] gpu time %.3fms - %.3fms [%.3fms]\n",(unsigned long long)last_frame_id, cpu_mapped_begin_ms, cpu_mapped_end_ms, gpu_dur_ms);
             }
             // Clear slot so we don’t read twice
-            swapchain.previous_frame_image_index[renderer.current_frame] = UINT32_MAX;
+            swapchain.previous_frame_image_index[renderer.frame_slot] = UINT32_MAX;
         }
         #endif
 
-        // (B) Acquire swapchain image, signaling per-frame semaphore
+        // get the next swapchain image (block until one is available)
         uint32_t swap_image_index = 0;
-        VkResult acquire_res = vkAcquireNextImageKHR(
-            machine.device, swapchain.swapchain, UINT64_MAX,
-            renderer.image_available[renderer.current_frame], VK_NULL_HANDLE,
-            &swap_image_index);
-        if (acquire_res == VK_ERROR_OUT_OF_DATE_KHR) { // window resized, etc.
-            recreate_swapchain(&machine, &renderer, &swapchain, window);
-            continue;
-        }
-        if (acquire_res != VK_SUCCESS && acquire_res != VK_SUBOPTIMAL_KHR) {
-            printf("vkAcquireNextImageKHR failed: %d\n", acquire_res);
-            break;
-        }
+        VkResult acquire_result = vkAcquireNextImageKHR(machine.device, swapchain.swapchain, UINT64_MAX, renderer.sem_image_available[renderer.frame_slot], VK_NULL_HANDLE, &swap_image_index);
+        // recreate the swapchain if the window resized
+        if (acquire_result == VK_ERROR_OUT_OF_DATE_KHR) { recreate_swapchain(&machine, &renderer, &swapchain, window); continue; }
+        if (acquire_result != VK_SUCCESS && acquire_result != VK_SUBOPTIMAL_KHR) { printf("vkAcquireNextImageKHR failed: %d\n", acquire_result); break; }
 
-        // (C) Record command buffer for this swapchain image
+        // start recording for this frame's command buffer
         VK_CHECK(vkResetCommandBuffer(swapchain.command_buffers_per_image[swap_image_index], 0));
         VkCommandBufferBeginInfo begin_info = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
         VK_CHECK(vkBeginCommandBuffer(swapchain.command_buffers_per_image[swap_image_index], &begin_info));
         #if DEBUG == 1
         uint32_t query0 = swap_image_index * QUERIES_PER_IMAGE + 0; // begin
-        uint32_t query1 = query0 + 1;                                            // end
+        uint32_t query1 = query0 + 1; // end
         // Reset just the two queries for this image before writing them
-        vkCmdResetQueryPool(swapchain.command_buffers_per_image[swap_image_index],
-                            swapchain.query_pool, query0, QUERIES_PER_IMAGE);
-        vkCmdWriteTimestamp(swapchain.command_buffers_per_image[swap_image_index],
-            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, swapchain.query_pool, query0);
+        vkCmdResetQueryPool(swapchain.command_buffers_per_image[swap_image_index], swapchain.query_pool, query0, QUERIES_PER_IMAGE);
+        vkCmdWriteTimestamp(swapchain.command_buffers_per_image[swap_image_index], VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, swapchain.query_pool, query0);
         #endif
         
         // Zero the counters on GPU
@@ -651,7 +642,7 @@ int main(void)
             .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
             .renderPass = renderer.offscreen_render_pass,
             .framebuffer = renderer.offscreen_fb,
-            .renderArea = { .offset = {0,0}, .extent = lowres_extent },
+            .renderArea = { .offset = {0,0}, .extent = OFFSCREEN_EXTENT },
             .clearValueCount = 1, .pClearValues = &clear_color
         };
         vkCmdBeginRenderPass(swapchain.command_buffers_per_image[swap_image_index], &render_begin, VK_SUBPASS_CONTENTS_INLINE);
@@ -659,11 +650,11 @@ int main(void)
         // set the resolution of the intermediary pass
         VkViewport vp = {
             .x = 0, .y = 0,
-            .width  = (float)lowres_extent.width,
-            .height = (float)lowres_extent.height,
+            .width  = (float)OFFSCREEN_EXTENT.width,
+            .height = (float)OFFSCREEN_EXTENT.height,
             .minDepth = 0.f, .maxDepth = 1.f
         };
-        VkRect2D sc = { .offset = {0,0}, .extent = lowres_extent };
+        VkRect2D sc = { .offset = {0,0}, .extent = OFFSCREEN_EXTENT };
         vkCmdSetViewport(swapchain.command_buffers_per_image[swap_image_index], 0, 1, &vp);
         vkCmdSetScissor (swapchain.command_buffers_per_image[swap_image_index], 0, 1, &sc);
 
@@ -675,7 +666,7 @@ int main(void)
 
         vkCmdEndRenderPass(swapchain.command_buffers_per_image[swap_image_index]);
         
-        // blit
+        #pragma region BLIT
         // B) Transition offscreen to TRANSFER_SRC, swapchain image to TRANSFER_DST
         VkImageMemoryBarrier2 off_to_src = {
           .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
@@ -713,8 +704,8 @@ int main(void)
           .dstSubresource = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1 },
         };
         region.srcOffsets[0] = (VkOffset3D){0, 0, 0};
-        region.srcOffsets[1] = (VkOffset3D){ (int)lowres_extent.width,
-                                             (int)lowres_extent.height, 1 };
+        region.srcOffsets[1] = (VkOffset3D){ (int)OFFSCREEN_EXTENT.width,
+                                             (int)OFFSCREEN_EXTENT.height, 1 };
         region.dstOffsets[0] = (VkOffset3D){0, 0, 0};
         region.dstOffsets[1] = (VkOffset3D){ (int)swapchain.swapchain_extent.width,
                                              (int)swapchain.swapchain_extent.height, 1 };
@@ -725,7 +716,7 @@ int main(void)
           .dstImage = swapchain.swapchain_images[swap_image_index],
           .dstImageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
           .regionCount = 1, .pRegions = &region,
-          .filter = VK_FILTER_NEAREST // or VK_FILTER_LINEAR
+          .filter = VK_FILTER_LINEAR // or VK_FILTER_NEAREST
         };
         vkCmdBlitImage2(swapchain.command_buffers_per_image[swap_image_index], &blit);
         // D) Swapchain back to PRESENT
@@ -749,43 +740,11 @@ int main(void)
 
         #if DEBUG == 1
         vkCmdWriteTimestamp(swapchain.command_buffers_per_image[swap_image_index],VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, swapchain.query_pool, query1);
-        #endif
-        VK_CHECK(vkEndCommandBuffer(swapchain.command_buffers_per_image[swap_image_index]));
-
-        // (D) Submit: wait on acquire, signal render-finished, fence per-frame
-        VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        VkSemaphore present_ready = swapchain.present_ready_per_image[swap_image_index];
-        VkSubmitInfo submit_info = {
-            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-            .waitSemaphoreCount = 1, .pWaitSemaphores = &renderer.image_available[renderer.current_frame],
-            .pWaitDstStageMask  = &wait_stage,
-            .commandBufferCount = 1, .pCommandBuffers = &swapchain.command_buffers_per_image[swap_image_index],
-            .signalSemaphoreCount = 1, .pSignalSemaphores = &present_ready
-        };
-        VK_CHECK(vkQueueSubmit(machine.queue_graphics, 1, &submit_info, renderer.in_flight[renderer.current_frame]));
-
-        // (E) Present: wait on render-finished
-        VkPresentInfoKHR present_info = {
-            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-            .waitSemaphoreCount = 1, .pWaitSemaphores = &present_ready,
-            .swapchainCount = 1, .pSwapchains = &swapchain.swapchain, .pImageIndices = &swap_image_index
-        };
-        VkResult present_res = vkQueuePresentKHR(machine.queue_present, &present_info);
-        if (present_res == VK_ERROR_OUT_OF_DATE_KHR || present_res == VK_SUBOPTIMAL_KHR) {
-            recreate_swapchain(&machine, &renderer, &swapchain, window);
-        } else if (present_res != VK_SUCCESS) {
-            printf("vkQueuePresentKHR failed: %d\n", present_res);
-            break;
-        }
-        #if DEBUG == 1
-        // end-of-frame CPU stamp (optional)
-        struct timespec cpu_end; clock_gettime(1, &cpu_end);
-        renderer.cpu_end_ns[renderer.current_frame] =
-            (uint64_t)cpu_end.tv_sec * 1000000000ull + (uint64_t)cpu_end.tv_nsec;
         // bump counters, then advance slot
         renderer.frame_id_counter++;
-        double cpu_ms = (cpu_end.tv_sec - cpu_start.tv_sec) * 1000.0 +
-                        (cpu_end.tv_nsec - cpu_start.tv_nsec) / 1e6;
+        presented_frame_ids[renderer.frame_slot] = renderer.frame_id_counter;
+        renderer.start_time_per_slot[renderer.frame_slot] = frame_start_time;
+        renderer.frame_id_per_slot[renderer.frame_slot] = renderer.frame_id_counter;
         // Calibrated CPU+GPU now
         uint64_t ts[2], maxDev = 0;
         if (vkGetCalibratedTimestampsEXT) {
@@ -796,20 +755,51 @@ int main(void)
             vkGetCalibratedTimestampsEXT(machine.device, 2, infos, ts, &maxDev);
             uint64_t gpu_now_ticks = ts[0];
             uint64_t cpu_now_ns    = ts[1]; // on Linux MONOTONIC is ns
-            (void)maxDev; // jitter in nanoseconds
-            // store these if you want to compute offsets
         }
-        printf("SUBMIT: Frame info: [fid=%llu slot=%u img=%u] submitted\n",
-               (unsigned long long)renderer.frame_id_counter,
-               renderer.current_frame,
-               swap_image_index);
+        f32 submit_time = (f32) (pf_ns_now() - pf_ns_start()) / 1e6;
+        printf("[%llu] cpu time %.3fms - %.3fms [%.3fms]\n",renderer.frame_id_counter, frame_start_time, submit_time,
+            submit_time - frame_start_time);
         #endif
+        VK_CHECK(vkEndCommandBuffer(swapchain.command_buffers_per_image[swap_image_index]));
 
-        swapchain.previous_frame_image_index[renderer.current_frame] = swap_image_index;
-        renderer.frame_id_per_slot[renderer.current_frame]           = renderer.frame_id_counter;
-        renderer.current_frame = (renderer.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
-        pf_timestamp("SUBMIT: Frame submitted");
-        printf("SUBMIT: Frame: swapchain image %d [0-%d], frame %d [0-%d]\n", swap_image_index, swapchain.swapchain_image_count-1, renderer.current_frame, MAX_FRAMES_IN_FLIGHT-1);
+        // (D) Submit: wait on acquire, signal render-finished, fence per-frame
+        VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        VkSemaphore present_ready = swapchain.present_ready_per_image[swap_image_index];
+        VkSubmitInfo submit_info = {
+            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            .waitSemaphoreCount = 1, .pWaitSemaphores = &renderer.sem_image_available[renderer.frame_slot],
+            .pWaitDstStageMask  = &wait_stage,
+            .commandBufferCount = 1, .pCommandBuffers = &swapchain.command_buffers_per_image[swap_image_index],
+            .signalSemaphoreCount = 1, .pSignalSemaphores = &present_ready
+        };
+        VK_CHECK(vkQueueSubmit(machine.queue_graphics, 1, &submit_info, renderer.fe_in_flight[renderer.frame_slot]));
+
+        // (E) Present: wait on render-finished
+        VkPresentInfoKHR present_info = {
+            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+            .waitSemaphoreCount = 1, .pWaitSemaphores = &present_ready,
+            .swapchainCount = 1, .pSwapchains = &swapchain.swapchain, .pImageIndices = &swap_image_index
+        };
+        #if DEBUG == 1
+        VkPresentIdKHR present_id_info = {
+            .sType          = VK_STRUCTURE_TYPE_PRESENT_ID_KHR,
+            .pNext          = NULL,
+            .swapchainCount = 1,
+            .pPresentIds    = &renderer.frame_id_counter,
+        };
+        present_info.pNext = &present_id_info;
+        #endif
+        VkResult present_res = vkQueuePresentKHR(machine.queue_present, &present_info);
+        if (present_res == VK_ERROR_OUT_OF_DATE_KHR || present_res == VK_SUBOPTIMAL_KHR) {
+            recreate_swapchain(&machine, &renderer, &swapchain, window);
+            continue;
+        } else if (present_res != VK_SUCCESS) {
+            printf("vkQueuePresentKHR failed: %d\n", present_res);
+            break;
+        }
+
+        swapchain.previous_frame_image_index[renderer.frame_slot] = swap_image_index;
+        renderer.frame_slot = (renderer.frame_slot + 1) % MAX_FRAMES_IN_FLIGHT;
     }
 
     return 0;

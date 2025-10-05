@@ -16,7 +16,6 @@ struct Swapchain {
     VkSemaphore*              present_ready_per_image; // nr. of swapchain images
     // remember which swapchain image the previous frame used
     uint32_t                  previous_frame_image_index[MAX_FRAMES_IN_FLIGHT];
-    // debug
     #if DEBUG == 1
     #define QUERIES_PER_IMAGE 2
     VkQueryPool query_pool; // GPU timestamps
@@ -69,7 +68,7 @@ struct Swapchain create_swapchain(const struct Machine *machine, WINDOW w) {
         .imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
         .preTransform     = capabilities.currentTransform,
         .compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-        .presentMode      = VK_PRESENT_MODE_FIFO_KHR,
+        .presentMode      = VK_PRESENT_MODE_IMMEDIATE_KHR,
         .clipped          = VK_TRUE
     };
 
