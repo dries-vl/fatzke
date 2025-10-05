@@ -68,7 +68,7 @@ struct Swapchain create_swapchain(const struct Machine *machine, WINDOW w) {
         .imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
         .preTransform     = capabilities.currentTransform,
         .compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-        .presentMode      = VK_PRESENT_MODE_IMMEDIATE_KHR,
+        .presentMode      = VK_PRESENT_MODE_FIFO_KHR,
         .clipped          = VK_TRUE
     };
 

@@ -13,6 +13,9 @@
 // todo: create vk_shader (to have one big shader with multiple entrypoints, have shader hot reloading, ...)
 // todo: create vk_texture (loading textures, maybe hot reloading textures, ...)
 
+// 1 for double buffering (one of ours, two of present engine) (technically triple buffered, but modern apis don't seem to do actual double buffering)
+// one is being scanned out, one is done and waiting (this one is also considered 'presented' but not scanned out yet)
+// and one of ours being rendered (this is this 1 frame that is 'in flight')
 #define MAX_FRAMES_IN_FLIGHT 1
 VkExtent2D OFFSCREEN_EXTENT = { 128, 72 };
 
@@ -519,7 +522,8 @@ int main(void)
                 printf("[%llu] presented at %.3f ms\n",presented_frame_id, present_time);
                 presented_frame_ids[i] = 0; // clear slot
                 f32 latency = present_time - renderer.start_time_per_slot[i];
-                printf("[%llu] latency %.3f ms\n", presented_frame_id, latency);
+                // presented means its ready to be scanned out, still has to wait up to 16ms for vsync for actual scanout
+                printf("[%llu] latency until 'present' %.3f ms\n", presented_frame_id, latency);
             };
         }
         uint64_t last_frame_id = renderer.frame_id_per_slot[renderer.frame_slot];
