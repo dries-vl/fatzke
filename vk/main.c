@@ -504,10 +504,19 @@ int main(void)
         VK_CHECK(vkCreateSemaphore(machine.device, &semaphore_info, NULL, &renderer.sem_image_available[i]));
         VK_CHECK(vkCreateFence(machine.device, &fence_info, NULL, &renderer.fe_in_flight[i]));
     }
+    
+    // take out two of the four images to have only two images in use
+    // this way we only ever render a third frame when we're sure the first has been scanned out
+    VkSemaphore parking_semaphores[3];
+    uint32_t parked_images[3];
+    for (uint32_t i = 0; i < swapchain.swapchain_image_count - MAX_FRAMES_IN_FLIGHT - 1; ++i) {
+        VK_CHECK(vkCreateSemaphore(machine.device, &semaphore_info, NULL, &parking_semaphores[i]));
+        VkResult parking_result = vkAcquireNextImageKHR(machine.device, swapchain.swapchain, UINT64_MAX, parking_semaphores[i], VK_NULL_HANDLE, &parked_images[i]);
+    }
 
     renderer.frame_slot = 0;
     while (pf_poll_events(window)) {
-        // block on the fence here to avoid having to many frames queued up (latency)
+        // block on the fence here to avoid having too many frames in flight
         VK_CHECK(vkWaitForFences(machine.device, 1, &renderer.fe_in_flight[renderer.frame_slot], VK_TRUE, UINT64_MAX));
         VK_CHECK(vkResetFences(machine.device, 1, &renderer.fe_in_flight[renderer.frame_slot])); // set unsignaled again
 
@@ -572,7 +581,7 @@ int main(void)
 
         // get the next swapchain image (block until one is available)
         uint32_t swap_image_index = 0;
-        VkResult acquire_result = vkAcquireNextImageKHR(machine.device, swapchain.swapchain, UINT64_MAX, renderer.sem_image_available[renderer.frame_slot], VK_NULL_HANDLE, &swap_image_index);
+        VkResult acquire_result = vkAcquireNextImageKHR(machine.device, swapchain.swapchain, UINT64_MAX-1, renderer.sem_image_available[renderer.frame_slot], VK_NULL_HANDLE, &swap_image_index);
         // recreate the swapchain if the window resized
         if (acquire_result == VK_ERROR_OUT_OF_DATE_KHR) { recreate_swapchain(&machine, &renderer, &swapchain, window); continue; }
         if (acquire_result != VK_SUCCESS && acquire_result != VK_SUBOPTIMAL_KHR) { printf("vkAcquireNextImageKHR failed: %d\n", acquire_result); break; }
