@@ -1,4 +1,3 @@
-// ======= Common =======
 struct Counters {
     uint index_count;
     uint instance_count;
@@ -10,7 +9,6 @@ struct Counters {
 static const uint kVertsPerMesh = 192;
 static const uint kIdxPerMesh   = 1116;
 
-// ======= Fixed 3D camera =======
 // Simple right-handed look-at (eye at 0,2,-5 looking toward +Z, up +Y)
 // Perspective: 60° vertical FOV, 16:9 aspect, near 0.1, far 100.0
 static const float4x4 g_ViewProj = {
@@ -20,11 +18,7 @@ static const float4x4 g_ViewProj = {
     0.0000000f,  0.64326752f,  0.92940610f,  0.092940610f,
     0.0000000f,  0.0000000f,   4.3905554f,   0.53905553f
 };
-// This matrix corresponds to: 
-//   proj = perspective(60°,16/9,0.1,100)
-//   view = lookAt(float3(0,2,-5), float3(0,0,0), float3(0,1,0))
 
-// ======= Packing helpers =======
 float3 unpackA2B10G10R10_SNORM(uint p) {
     int r = (int)( p        & 0x3FF);
     int g = (int)((p >> 10) & 0x3FF);
@@ -41,17 +35,15 @@ float2 decodeXZ(uint packed0) {
 float  decodeYaw(uint packed1)   { return (float(packed1 & 0xFFu) * (2.0f*3.14159265359f)) / 255.0f; }
 uint   decodeMeshId(uint packed1){ return packed1 >> 8; }
 
-// ======= Bindings (set = 0) =======
-[[vk::binding(0,0)]] StructuredBuffer<uint2> INSTANCES;
-[[vk::binding(1,0)]] RWStructuredBuffer<uint2> VISIBLE_PACKED;
-[[vk::binding(2,0)]] RWStructuredBuffer<Counters> COUNTERS;
-[[vk::binding(3,0)]] StructuredBuffer<uint> POSITIONS;
-[[vk::binding(4,0)]] StructuredBuffer<uint> NORMALS;
+[[vk::binding(0,0)]] StructuredBuffer<uint2>        INSTANCES;
+[[vk::binding(1,0)]] RWStructuredBuffer<uint2>      VISIBLE_PACKED;
+[[vk::binding(2,0)]] RWStructuredBuffer<Counters>   COUNTERS;
+[[vk::binding(3,0)]] StructuredBuffer<uint>         POSITIONS; // todo: 8bit compressed texture
+[[vk::binding(4,0)]] StructuredBuffer<uint>         NORMALS;   // todo: 8bit compressed texture
 
 // ======= Compute: build visible (no culling yet) =======
 [shader("compute")] [numthreads(64,1,1)]
-void cs_build_visible(uint3 dtid : SV_DispatchThreadID)
-{
+void cs_build_visible(uint3 dtid : SV_DispatchThreadID) {
     uint gid = dtid.x;
     uint numInst, stride;
     INSTANCES.GetDimensions(numInst, stride);
@@ -64,8 +56,7 @@ void cs_build_visible(uint3 dtid : SV_DispatchThreadID)
 
 // ======= Compute: prepare indirect draw =======
 [shader("compute")] [numthreads(1,1,1)]
-void cs_prepare_indirect()
-{
+void cs_prepare_indirect() {
     COUNTERS[0].index_count    = kIdxPerMesh;
     COUNTERS[0].first_index    = 0;
     COUNTERS[0].base_vertex    = 0;

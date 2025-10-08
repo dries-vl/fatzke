@@ -502,6 +502,7 @@ int main(void) {
         VkResult parking_result = vkAcquireNextImageKHR(machine.device, swapchain.swapchain, UINT64_MAX, parking_semaphores[i], VK_NULL_HANDLE, &parked_images[i]);
     }
 
+    // TODO: ADD MORE QUERIES TO TIME; COMPUTE, GRAPHICS, BLIT
     renderer.frame_slot = 0;
     while (pf_poll_events(window)) {
         // block on the fence here to avoid having too many frames in flight
