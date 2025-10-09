@@ -3,14 +3,19 @@
 #include "mesh.h" // todo: remove
 
 #ifdef _WIN32
+#define VK_USE_PLATFORM_WIN32_KHR
+#define WIN32_LEAN_AND_MEAN
 #else
-#include <X11/Xlib.h>
+#define VK_USE_PLATFORM_XLIB_KHR
 #include <time.h>
 #endif
 #include <vulkan/vulkan.h>
+#undef VkResult
+#define VkResult int
 
-#include <stdlib.h> // todo: get rid of this and all calloc/malloc/free
-#include <stdio.h> // todo: get rid of this and link with compiled spv as object
+extern const unsigned char shaders[];
+extern const unsigned char shaders_end[];
+#define shaders_len ((size_t)(shaders_end - shaders))
 
 // todo: create vk_shader (to have one big shader with multiple entrypoints, have shader hot reloading, ...)
 // todo: create vk_texture (loading textures, maybe hot reloading textures, ...)
@@ -66,30 +71,6 @@ void* map_entire_allocation(VkDevice device, VkDeviceMemory memory, VkDeviceSize
     VK_CHECK(vkMapMemory(device, memory, 0, size_bytes, 0, &data));
     return data;
 }
-static VkShaderModule create_shader_module_from_spirv(VkDevice device, const char* file_path) {
-    FILE* file = fopen(file_path, "rb");
-    if (!file) {
-        printf("Failed to open shader file: %s\n", file_path);
-        _exit(0);
-    }
-    fseek(file, 0, SEEK_END);
-    long file_size = ftell(file);
-    rewind(file);
-
-    uint32_t* code = (uint32_t*)malloc((size_t)file_size);
-    fread(code, 1, (size_t)file_size, file);
-    fclose(file);
-
-    VkShaderModuleCreateInfo create_info = {
-        .sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-        .codeSize = (size_t)file_size,
-        .pCode    = code
-    };
-    VkShaderModule module;
-    VK_CHECK(vkCreateShaderModule(device, &create_info, NULL, &module));
-    free(code);
-    return module;
-}
 static uint32_t find_memory_type_index(VkPhysicalDevice physical_device,uint32_t memory_type_bits,VkMemoryPropertyFlags required_properties) {
     VkPhysicalDeviceMemoryProperties mem_props;
     vkGetPhysicalDeviceMemoryProperties(physical_device, &mem_props);
@@ -137,18 +118,24 @@ void key_input_callback(void* ud, enum KEYBOARD_BUTTON key, enum INPUT_STATE sta
 }
 void mouse_input_callback(void* ud, i32 x, i32 y, enum MOUSE_BUTTON button, enum INPUT_STATE state) {}
 int main(void) {
-    // setup window
+    // setup with X11
     pf_time_reset();
     WINDOW window = pf_create_window(NULL, key_input_callback,mouse_input_callback);
-    pf_timestamp("Create window");
+    pf_timestamp("Created platform window");
 
+#if defined(_WIN32) && DEBUG == 1
+    // set env to point to vk layer path to allow finding
+    const char* sdk = getenv("VULKAN_SDK");
+    char buf[1024];
+    snprintf(buf, sizeof buf, "VK_LAYER_PATH=%s/Bin", sdk);
+    putenv(strdup(buf));
+#endif
+#if USE_DISCRETE_GPU == 0 && !defined(_WIN32)
     // set env to avoid loading nvidia icd (1000ms)
-    if (!USE_DISCRETE_GPU) {
-        //extern int putenv(char*);
-        putenv((char*)"VK_DRIVER_FILES=/usr/share/vulkan/icd.d/intel_icd.x86_64.json");
-        putenv((char*)"VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/intel_icd.x86_64.json");
-        pf_timestamp("Setup environment");
-    }
+    putenv((char*)"VK_DRIVER_FILES=/usr/share/vulkan/icd.d/intel_icd.x86_64.json");
+    putenv((char*)"VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/intel_icd.x86_64.json");
+    pf_timestamp("Setup environment");
+#endif
 
     // setup vulkan on the machine
     struct Machine machine = create_machine(window);
@@ -232,7 +219,8 @@ int main(void) {
     VK_CHECK(vkCreateFramebuffer(machine.device, &fb_ci, NULL, &renderer.offscreen_fb));
     #pragma endregion
     
-    VkShaderModule shader_module = create_shader_module_from_spirv(machine.device, "static/shaders.spv");
+    VkShaderModuleCreateInfo smci={ .sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize=shaders_len, .pCode=(const u32*)shaders };
+    VkShaderModule shader_module; VK_CHECK(vkCreateShaderModule(machine.device,&smci,NULL,&shader_module));
 
     #pragma region COMPUTE PIPELINE
     #define BINDINGS 5
@@ -495,11 +483,13 @@ int main(void) {
     
     // take out two of the four images to have only two images in use
     // this way we only ever render a third frame when we're sure the first has been scanned out
-    VkSemaphore parking_semaphores[3];
-    uint32_t parked_images[3];
+    #if DEBUG == 1
+    printf("SWAPCHAIN IMAGE COUNT: %d\n", swapchain.swapchain_image_count);
+    #endif
+    VkSemaphore parking_semaphores[3]; uint32_t parked_images[3];
     for (uint32_t i = 0; i < swapchain.swapchain_image_count - MAX_FRAMES_IN_FLIGHT - 1; ++i) {
         VK_CHECK(vkCreateSemaphore(machine.device, &semaphore_info, NULL, &parking_semaphores[i]));
-        VkResult parking_result = vkAcquireNextImageKHR(machine.device, swapchain.swapchain, UINT64_MAX, parking_semaphores[i], VK_NULL_HANDLE, &parked_images[i]);
+        vkAcquireNextImageKHR(machine.device, swapchain.swapchain, UINT64_MAX, parking_semaphores[i], VK_NULL_HANDLE, &parked_images[i]);
     }
 
     // TODO: ADD MORE QUERIES TO TIME; COMPUTE, GRAPHICS, BLIT
@@ -510,18 +500,20 @@ int main(void) {
         VK_CHECK(vkResetFences(machine.device, 1, &renderer.fe_in_flight[renderer.frame_slot])); // set unsignaled again
 
         #if DEBUG == 1
-        for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
-            uint64_t presented_frame_id = presented_frame_ids[i];
-            if (!presented_frame_id) continue;
-            VkResult r = vkWaitForPresentKHR(machine.device, swapchain.swapchain, presented_frame_id, 0); // timeout zero for non-blocking
-            if (r == VK_SUCCESS || r == VK_ERROR_DEVICE_LOST) { // -4 device lost instead of success somehow...
-                f32 present_time = (f32) (pf_ns_now() - pf_ns_start()) / 1e6;
-                printf("[%llu] presented at %.3f ms\n",presented_frame_id, present_time);
-                presented_frame_ids[i] = 0; // clear slot
-                f32 latency = present_time - renderer.start_time_per_slot[i];
-                // presented means its ready to be scanned out, still has to wait up to 16ms for vsync for actual scanout
-                printf("[%llu] latency until 'present' %.3f ms\n", presented_frame_id, latency);
-            };
+        if (vkWaitForPresentKHR) {
+            for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+                uint64_t presented_frame_id = presented_frame_ids[i];
+                if (!presented_frame_id) continue;
+                VkResult r = vkWaitForPresentKHR(machine.device, swapchain.swapchain, presented_frame_id, 0); // timeout zero for non-blocking
+                if (r == VK_SUCCESS || r == VK_ERROR_DEVICE_LOST) { // -4 device lost instead of success somehow...
+                    f32 present_time = (f32) (pf_ns_now() - pf_ns_start()) / 1e6;
+                    printf("[%llu] presented at %.3f ms\n",presented_frame_id, present_time);
+                    presented_frame_ids[i] = 0; // clear slot
+                    f32 latency = present_time - renderer.start_time_per_slot[i];
+                    // presented means its ready to be scanned out, still has to wait up to 16ms for vsync for actual scanout
+                    printf("[%llu] latency until 'present' %.3f ms\n", presented_frame_id, latency);
+                }
+            }
         }
         uint64_t last_frame_id = renderer.frame_id_per_slot[renderer.frame_slot];
         uint32_t image = swapchain.previous_frame_image_index[renderer.frame_slot];
@@ -535,21 +527,28 @@ int main(void) {
             if (vkGetCalibratedTimestampsEXT) {
                 VkCalibratedTimestampInfoEXT infos[2] = {
                     { .sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT, .timeDomain = VK_TIME_DOMAIN_DEVICE_EXT },
+#ifdef _WIN32
+                    { .sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT, .timeDomain = VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_EXT }
+#else
                     { .sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT, .timeDomain = VK_TIME_DOMAIN_CLOCK_MONOTONIC_EXT }
+#endif
                 };
                 // Take the sample as close as possible to the read
                 vkGetCalibratedTimestampsEXT(machine.device, 2, infos, ts, &maxDev);
                 // Map GPU ticks -> CPU ns using your device period
                 double gpu_now_ns = (double)ts[0] * renderer.gpu_ticks_to_ns;
                 double cpu_now_ns = (double)ts[1];
+                #ifdef _WIN32
+                cpu_now_ns = (double) pf_ticks_to_ns(cpu_now_ns);
+                #endif
                 offset_ns = cpu_now_ns - gpu_now_ns;  // add this to any GPU ns to place on CPU timeline
             }
             // Now read the two GPU timestamps for that image (they’re done because we waited the fence)
             VkResult qr = vkGetQueryPoolResults(
                 machine.device,
                 swapchain.query_pool,
-                q_first,  /* firstQuery */
-                2,        /* queryCount */
+                q_first, /* firstQuery */
+                2, /* queryCount */
                 sizeof(ticks), ticks,
                 sizeof(uint64_t),
                 VK_QUERY_RESULT_64_BIT /* WAIT_BIT not needed after fence wait */);
@@ -570,7 +569,7 @@ int main(void) {
 
         // get the next swapchain image (block until one is available)
         uint32_t swap_image_index = 0;
-        VkResult acquire_result = vkAcquireNextImageKHR(machine.device, swapchain.swapchain, UINT64_MAX-1, renderer.sem_image_available[renderer.frame_slot], VK_NULL_HANDLE, &swap_image_index);
+        VkResult acquire_result = vkAcquireNextImageKHR(machine.device, swapchain.swapchain, 100000000, renderer.sem_image_available[renderer.frame_slot], VK_NULL_HANDLE, &swap_image_index);
         // recreate the swapchain if the window resized
         if (acquire_result == VK_ERROR_OUT_OF_DATE_KHR) { recreate_swapchain(&machine, &renderer, &swapchain, window); continue; }
         if (acquire_result != VK_SUCCESS && acquire_result != VK_SUBOPTIMAL_KHR) { printf("vkAcquireNextImageKHR failed: %d\n", acquire_result); break; }
@@ -696,7 +695,7 @@ int main(void) {
         VkDependencyInfo depA = {
           .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
           .imageMemoryBarrierCount = 2,
-          .pImageMemoryBarriers = (VkImageMemoryBarrier2[]){ off_to_src, pres_to_dst }
+          .pImageMemoryBarriers = (VkImageMemoryBarrier2[2]){ off_to_src, pres_to_dst }
         };
         vkCmdPipelineBarrier2(cmd, &depA);
         // C) Blit low-res → swapchain (nearest or linear)
@@ -752,7 +751,11 @@ int main(void) {
         if (vkGetCalibratedTimestampsEXT) {
             VkCalibratedTimestampInfoEXT infos[2] = {
                 { .sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT, .timeDomain = VK_TIME_DOMAIN_DEVICE_EXT },
-                { .sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT, .timeDomain = VK_TIME_DOMAIN_CLOCK_MONOTONIC_EXT }
+#ifdef _WIN32
+                    { .sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT, .timeDomain = VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_EXT }
+#else
+                    { .sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT, .timeDomain = VK_TIME_DOMAIN_CLOCK_MONOTONIC_EXT }
+#endif
             };
             vkGetCalibratedTimestampsEXT(machine.device, 2, infos, ts, &maxDev);
             uint64_t gpu_now_ticks = ts[0];
@@ -780,13 +783,15 @@ int main(void) {
             .swapchainCount = 1, .pSwapchains = &swapchain.swapchain, .pImageIndices = &swap_image_index
         };
         #if DEBUG == 1
-        VkPresentIdKHR present_id_info = {
-            .sType          = VK_STRUCTURE_TYPE_PRESENT_ID_KHR,
-            .pNext          = NULL,
-            .swapchainCount = 1,
-            .pPresentIds    = &renderer.frame_id_counter,
-        };
-        present_info.pNext = &present_id_info;
+        if (vkWaitForPresentKHR) {
+            VkPresentIdKHR present_id_info = {
+                .sType          = VK_STRUCTURE_TYPE_PRESENT_ID_KHR,
+                .pNext          = NULL,
+                .swapchainCount = 1,
+                .pPresentIds    = &renderer.frame_id_counter,
+            };
+            present_info.pNext = &present_id_info;
+        }
         #endif
         VkResult present_res = vkQueuePresentKHR(machine.queue_present, &present_info);
         if (present_res == VK_ERROR_OUT_OF_DATE_KHR || present_res == VK_SUBOPTIMAL_KHR) {

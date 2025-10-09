@@ -1,17 +1,6 @@
 #ifdef __linux__
 #include "header.h"
 
-/* ============================================================================
-   X11 low-latency backend matching the Wayland pf_* public contract
-   - Fullscreen, borderless window
-   - Opt-out of compositor via _NET_WM_BYPASS_COMPOSITOR + _NET_WM_STATE_FULLSCREEN
-   - XInput2 for input (falls back to core)
-   - XPresent for vblank-aligned feedback (NotifyMSC + CompleteNotify)
-   - Maintains same pf_* surface as your Wayland module
-   Build deps (Debian/Ubuntu): libx11-dev libxrandr-dev libxi-dev libxpresent-dev
-   Link: -lX11 -lXrandr -lXi -lXpresent -lrt
-   ========================================================================== */
-
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
 #include <X11/keysym.h>
@@ -20,15 +9,12 @@
 #include <X11/extensions/XInput2.h>
 #include <X11/extensions/Xpresent.h>
 
-
 #include <time.h>
 #include <unistd.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-
-/* -------- time base ------------------------------------------------------ */
 
 static clockid_t clockid;
 u64 pf_ns_now(void){
@@ -39,8 +25,6 @@ u64 T0;
 void pf_time_reset() {T0=pf_ns_now();}
 u64 pf_ns_start() {return T0;};
 void pf_timestamp(char *msg) {u64 _t=pf_ns_now(); printf("[+%7.3f ms] %s\n",(_t-T0)/1e6,(msg));}
-
-/* -------- window/state --------------------------------------------------- */
 
 struct x11_window {
     /* X11 surface */
@@ -94,10 +78,7 @@ struct Pending {
     struct Pending* next;
 };
 
-/* -------- helpers -------------------------------------------------------- */
-
 static uint64_t ust_to_ns(uint64_t ust_us){ return ust_us * 1000ull; }
-
 static void pending_add(struct x11_window* w, uint32_t token, struct FBUserData* ud){
     struct Pending* p = (struct Pending*)malloc(sizeof *p);
     p->token = token; p->ud = ud; p->next = w->pending; w->pending = p;
@@ -114,7 +95,6 @@ static struct FBUserData* pending_take(struct x11_window* w, uint32_t token){
     }
     return NULL;
 }
-
 static int x11_get_primary_screen_size(Display* dpy, int* out_w, int* out_h, double* out_hz){
     int scr = DefaultScreen(dpy);
     Window root = RootWindow(dpy, scr);

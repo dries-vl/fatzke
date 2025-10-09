@@ -1,7 +1,5 @@
 #pragma once
 
-#include <vulkan/vulkan_xlib.h>
-
 struct Machine
 {
     VkInstance                instance;
@@ -16,18 +14,22 @@ struct Machine
     VkQueue                   queue_present;
 };
 
-struct Machine create_machine(WINDOW x11_window)
-{
+struct Machine create_machine(WINDOW window) {
     // Create instance (with optional debug mode enabled)
     struct Machine machine = {0};
     VkApplicationInfo app_info = {
         .sType              = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+        .pEngineName = APP_NAME,
         .pApplicationName   = APP_NAME,
         .apiVersion         = VK_API_VERSION_1_3
     };
     static const char* extensions[8]; int extension_count = 0;
     extensions[0] = VK_KHR_SURFACE_EXTENSION_NAME; extension_count++;
+#ifdef _WIN32
+    extensions[1] = VK_KHR_WIN32_SURFACE_EXTENSION_NAME; extension_count++;
+#else
     extensions[1] = VK_KHR_XLIB_SURFACE_EXTENSION_NAME; extension_count++;
+#endif
 #if DEBUG == 1
     extensions[2] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME; extension_count++;
     const char* layers[] = { "VK_LAYER_KHRONOS_validation" };
@@ -57,21 +59,30 @@ struct Machine create_machine(WINDOW x11_window)
         .ppEnabledLayerNames = layers,
         .pNext = debugCreateInfo
     };
+
     VK_CHECK(vkCreateInstance(&instance_info, NULL, &machine.instance));
 #if DEBUG == 1
     VkDebugUtilsMessengerEXT debug_msgr = VK_NULL_HANDLE;
     VK_CHECK(CreateDebugUtilsMessengerEXT(machine.instance, debugCreateInfo, NULL, &debug_msgr));
 #endif
     pf_timestamp("Vulkan instance created");
-
-    // Create surface
+#ifdef _WIN32
+    VkWin32SurfaceCreateInfoKHR surface_info = {
+        .sType  = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
+        .hwnd = (HWND)pf_surface_or_hwnd(window),
+        .hinstance = (HINSTANCE)pf_display_or_instance(window)
+    };
+    VK_CHECK(vkCreateWin32SurfaceKHR(machine.instance, &surface_info, NULL, &machine.surface));
+    pf_timestamp("Win32 surface created");
+#else
     VkXlibSurfaceCreateInfoKHR surface_info = {
         .sType  = VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR,
-        .dpy    = (Display*)pf_display_or_instance(x11_window),
-        .window = (Window)pf_surface_or_hwnd(x11_window)
+        .dpy    = (Display*)pf_display_or_instance(window),
+        .window = (Window)pf_surface_or_hwnd(window)
     };
     VK_CHECK(vkCreateXlibSurfaceKHR(machine.instance, &surface_info, NULL, &machine.surface));
     pf_timestamp("Xlib surface created");
+#endif
 
     /* -------- Physical Device & Logical Device -------- */
     uint32_t device_count = 0;

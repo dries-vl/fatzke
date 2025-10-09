@@ -13,8 +13,9 @@ typedef long long isize;
 typedef unsigned long long usize;
 
 extern void _exit(int);
-extern int printf(const char*,...);
-extern int snprintf(char*,__SIZE_TYPE__,const char*,...);
+#include <stdio.h>
+// extern int printf(const char*,...);
+// extern int snprintf(char*,__SIZE_TYPE__,const char*,...);
 extern void *memcpy(void *__restrict,const void*__restrict,__SIZE_TYPE__);
 extern int memcmp(const void*,const void*,__SIZE_TYPE__);
 extern void *memset(void*,int,__SIZE_TYPE__);
@@ -32,6 +33,9 @@ enum INPUT_STATE { RELEASED, PRESSED };
 typedef void (*KEYBOARD_CB)(void*,enum KEYBOARD_BUTTON,enum INPUT_STATE);
 typedef void (*MOUSE_CB)(void*,i32,i32,enum MOUSE_BUTTON,enum INPUT_STATE);
 u64 pf_ns_now(void);
+#ifdef _WIN32
+u64 pf_ticks_to_ns(u64);
+#endif
 void pf_time_reset(void);
 u64 pf_ns_start(void);
 void pf_timestamp(char*);
