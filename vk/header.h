@@ -14,8 +14,11 @@ typedef unsigned long long usize;
 
 extern void _exit(int);
 #include <stdio.h>
+#include <stdlib.h>
 // extern int printf(const char*,...);
 // extern int snprintf(char*,__SIZE_TYPE__,const char*,...);
+#define assert(expr) ((expr) ? (void)0 : __assert_fail(#expr, __FILE__, __LINE__, __func__))
+extern int putenv(char*);
 extern void *memcpy(void *__restrict,const void*__restrict,__SIZE_TYPE__);
 extern int memcmp(const void*,const void*,__SIZE_TYPE__);
 extern void *memset(void*,int,__SIZE_TYPE__);
@@ -46,17 +49,16 @@ void *pf_display_or_instance(WINDOW);
 int pf_window_visible(WINDOW);
 int pf_poll_events(WINDOW);
 WINDOW pf_create_window(void*,KEYBOARD_CB,MOUSE_CB);
-void pf_request_present_feedback(WINDOW,u64);
 #pragma endregion
 
 #pragma region VULKAN
 #define USE_DISCRETE_GPU 0
 #define ENABLE_HDR 0
-#define MAX_VERTICES (3 * 256)
-#define MAX_INSTANCES (3 * 256)
 #pragma endregion
 
 #pragma region SETTINGS
 #define APP_NAME "Battle: work in progress"
-#define DEBUG 1
+#define DEBUG_VULKAN 0
+#define DEBUG_APP 0
+#define DEBUG_CPU 1
 #pragma endregion

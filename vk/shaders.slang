@@ -32,8 +32,12 @@ float2 decodeXZ(uint packed0) {
     int z16 = (int)((packed0 >> 16) & 0xFFFF); z16 = (z16 << 16) >> 16;
     return float2(float(x16), float(z16));
 }
-float  decodeYaw(uint packed1)   { return (float(packed1 & 0xFFu) * (2.0f*3.14159265359f)) / 255.0f; }
-uint   decodeMeshId(uint packed1){ return packed1 >> 8; }
+float decodeYaw(uint packed1) {
+    return (float(packed1 & 0xFFu) * (2.0f * 3.14159265359f)) / 255.0f;
+}
+uint decodeMeshId(uint packed1) {
+    return (packed1 >> 8) & 0xFFu;
+}
 
 [[vk::binding(0,0)]] StructuredBuffer<uint2>        INSTANCES;
 [[vk::binding(1,0)]] RWStructuredBuffer<uint2>      VISIBLE_PACKED;
@@ -67,6 +71,7 @@ void cs_prepare_indirect() {
 struct VSOut {
     float4 pos : SV_Position;
     float2 uv  : TEXCOORD0;
+    float3 normal : TEXCOORD1;
 };
 
 // VS inputs:
@@ -74,14 +79,15 @@ struct VSOut {
 // - packed: two uints for this visible instance (R32G32_UINT) at location=0
 // - in_uv : per-vertex UV (R16G16_UNORM) at location=1
 [shader("vertex")]
-VSOut vs_main(uint vid : SV_VertexID, [[vk::location(0)]] uint2 packed, [[vk::location(1)]] float2 in_uv) {
-    float2 xz  = decodeXZ(packed.x);
-    float  yaw = decodeYaw(packed.y);
-    uint   mesh= decodeMeshId(packed.y);
+VSOut vs_main(uint vid : SV_VertexID, [[vk::location(0)]] uint2 instance, [[vk::location(1)]] float2 uv) {
+    float2 xz  = decodeXZ(instance.x);
+    float  yaw = decodeYaw(instance.y);
+    uint   mesh= decodeMeshId(instance.y);
 
     uint vIndex = mesh * kVertsPerMesh + vid;
 
     float3 p = unpackA2B10G10R10_SNORM(POSITIONS[vIndex]);
+    float3 normal = unpackA2B10G10R10_SNORM(NORMALS[vIndex]);
 
     float c = cos(yaw), s = sin(yaw);
     float3 pr;
@@ -93,11 +99,35 @@ VSOut vs_main(uint vid : SV_VertexID, [[vk::location(0)]] uint2 packed, [[vk::lo
 
     VSOut o;
     o.pos = mul(g_ViewProj, float4(pr, 1.0));
-    o.uv  = in_uv;
+    o.uv  = uv;
+    o.normal = normal;
     return o;
 }
 
 [shader("fragment")]
 float4 fs_main(VSOut i) : SV_Target0 {
-    return float4(1.0, i.uv.x, i.uv.y, 1.0);
+    return float4(i.normal.x, i.normal.y, i.normal.z, 1.0);
+}
+
+struct vs_out_blit {
+    float4 pos : SV_Position;
+    float2 uv  : TEXCOORD0;
+};
+[shader("vertex")]
+vs_out_blit vs_blit(uint vid : SV_VertexID) {
+    float2 pos[3] = {
+        float2(-1.0, -3.0),
+        float2(-1.0,  1.0),
+        float2( 3.0,  1.0)
+    };
+    float2 uv[3] = {
+        float2(0.0, 2.0),
+        float2(0.0, 0.0),
+        float2(2.0, 0.0)
+    };
+
+    vs_out_blit o;
+    o.pos = float4(pos[vid], 0.0, 1.0);
+    o.uv  = uv[vid];
+    return o;
 }

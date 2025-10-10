@@ -6,7 +6,7 @@
 #define VK_USE_PLATFORM_WIN32_KHR
 #define WIN32_LEAN_AND_MEAN
 #else
-#define VK_USE_PLATFORM_XLIB_KHR
+#define VK_USE_PLATFORM_WAYLAND_KHR
 #include <time.h>
 #endif
 #include <vulkan/vulkan.h>
@@ -24,13 +24,11 @@ extern const unsigned char shaders_end[];
 // one is being scanned out, one is done and waiting (this one is also considered 'presented' but not scanned out yet)
 // and one of ours being rendered (this is this 1 frame that is 'in flight')
 #define MAX_FRAMES_IN_FLIGHT 1
-VkExtent2D OFFSCREEN_EXTENT = { 1280, 720 };
+#define MAX_SWAPCHAIN_IMAGES 5
 
 struct Renderer {
-    // render pipeline
-    VkPipeline                graphics_pipeline;
     // compute pipelines
-    VkDescriptorSetLayout     compute_set_layout;
+    VkDescriptorSetLayout     common_set_layout;
     VkPipelineLayout          common_pipeline_layout;
     VkPipeline                compute_pipelines[2];
     VkDescriptorPool          descriptor_pool;
@@ -43,23 +41,34 @@ struct Renderer {
     VkBuffer                  buffer_normals;    VkDeviceMemory memory_normals;
     VkBuffer                  buffer_uvs;        VkDeviceMemory memory_uvs;
     VkBuffer                  buffer_index_ib;   VkDeviceMemory memory_index_ib;
-    // render to offscreen image
-    VkRenderPass              offscreen_render_pass;
-    VkImage                   offscreen_image;   VkDeviceMemory offscreen_memory;
-    VkImageView               offscreen_view;
-    VkFramebuffer             offscreen_fb;
+    // main rendering
+    VkPipeline                main_pipeline;
     // sync
     uint32_t                  frame_slot;
     VkSemaphore               sem_image_available[MAX_FRAMES_IN_FLIGHT];
-    VkFence                   fe_in_flight[MAX_FRAMES_IN_FLIGHT];
     // debug
-    #if DEBUG == 1
+    #if DEBUG_APP == 1
     double      gpu_ticks_to_ns;
     uint64_t    frame_id_counter;
     uint64_t    frame_id_per_slot[MAX_FRAMES_IN_FLIGHT];
     f32         start_time_per_slot[MAX_FRAMES_IN_FLIGHT];
     #endif
 };
+
+#if DEBUG_APP == 1
+enum {
+    Q_BEGIN = 0,             // start of frame (already have)
+    Q_AFTER_ZERO,            // after vkCmdFillBuffer
+    Q_AFTER_COMP_BUILD,      // after compute build visible
+    Q_AFTER_COMP_INDIRECT,   // after prepare indirect
+    Q_AFTER_COMP_TO_GFX,     // after compute->graphics barrier
+    Q_BEFORE_RENDERPASS,     // just before vkCmdBeginRenderPass
+    Q_AFTER_RENDERPASS,      // just after vkCmdEndRenderPass
+    Q_AFTER_BLIT,            // after vkCmdBlitImage2 + transition to PRESENT
+    Q_END,                   // end of cmdbuf (already have)
+    QUERIES_PER_IMAGE       // nr of queries
+};
+#endif
 
 #include "vk_util.h"
 #include "vk_machine.h"
@@ -142,83 +151,10 @@ int main(void) {
     struct Swapchain swapchain = create_swapchain(&machine,window);
     struct Renderer renderer = {0};
     
-    #pragma region OFFSCREEN
-    // create intermediary target image
-    VkImageCreateInfo ci = {
-        .sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-        .imageType     = VK_IMAGE_TYPE_2D,
-        .format        = swapchain.swapchain_format,
-        .extent        = { OFFSCREEN_EXTENT.width, OFFSCREEN_EXTENT.height, 1 },
-        .mipLevels     = 1,
-        .arrayLayers   = 1,
-        .samples       = VK_SAMPLE_COUNT_1_BIT,
-        .tiling        = VK_IMAGE_TILING_OPTIMAL,
-        .usage         = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-        .sharingMode   = VK_SHARING_MODE_EXCLUSIVE,
-        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED
-    };
-    VK_CHECK(vkCreateImage(machine.device, &ci, NULL, &renderer.offscreen_image));
-    VkMemoryRequirements req;
-    vkGetImageMemoryRequirements(machine.device, renderer.offscreen_image, &req);
-    VkMemoryAllocateInfo ai = {
-        .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        .allocationSize  = req.size,
-        .memoryTypeIndex = find_memory_type_index(machine.physical_device, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
-    };
-    VK_CHECK(vkAllocateMemory(machine.device, &ai, NULL, &renderer.offscreen_memory));
-    VK_CHECK(vkBindImageMemory(machine.device, renderer.offscreen_image, renderer.offscreen_memory, 0));
-    VkImageViewCreateInfo view_ci = {
-        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-        .image = renderer.offscreen_image,
-        .viewType = VK_IMAGE_VIEW_TYPE_2D,
-        .format = swapchain.swapchain_format,
-        .subresourceRange = {
-            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-            .baseMipLevel = 0, .levelCount = 1,
-            .baseArrayLayer = 0, .layerCount = 1
-        }
-    };
-    VK_CHECK(vkCreateImageView(machine.device, &view_ci, NULL, &renderer.offscreen_view));
-    
-    // create intermediary render pass and framebuffer
-    VkAttachmentDescription color = {
-        .format         = swapchain.swapchain_format,
-        .samples        = VK_SAMPLE_COUNT_1_BIT,
-        .loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR,
-        .storeOp        = VK_ATTACHMENT_STORE_OP_STORE,
-        .stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-        .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-        .initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED,
-        .finalLayout    = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-    };
-    VkAttachmentReference color_ref = {
-        .attachment = 0,
-        .layout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-    };
-    VkSubpassDescription subpass = {
-        .pipelineBindPoint    = VK_PIPELINE_BIND_POINT_GRAPHICS,
-        .colorAttachmentCount = 1,
-        .pColorAttachments    = &color_ref
-    };
-    VkRenderPassCreateInfo rp = {
-        .sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-        .attachmentCount = 1, .pAttachments = &color,
-        .subpassCount    = 1, .pSubpasses  = &subpass
-    };
-    VK_CHECK(vkCreateRenderPass(machine.device, &rp, NULL, &renderer.offscreen_render_pass));
-    VkImageView off_attachments[1] = { renderer.offscreen_view };
-    VkFramebufferCreateInfo fb_ci = {
-        .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-        .renderPass      = renderer.offscreen_render_pass,
-        .attachmentCount = 1,
-        .pAttachments    = off_attachments,
-        .width  = OFFSCREEN_EXTENT.width,
-        .height = OFFSCREEN_EXTENT.height,
-        .layers = 1
-    };
-    VK_CHECK(vkCreateFramebuffer(machine.device, &fb_ci, NULL, &renderer.offscreen_fb));
-    #pragma endregion
-    
+    printf("SCREEN SIZE: %d, %d\n", swapchain.swapchain_extent.width, swapchain.swapchain_extent.height);
+    printf("WINDOW SIZE: %d, %d\n", pf_window_width(window), pf_window_height(window));
+
+    // create shader module
     VkShaderModuleCreateInfo smci={ .sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize=shaders_len, .pCode=(const u32*)shaders };
     VkShaderModule shader_module; VK_CHECK(vkCreateShaderModule(machine.device,&smci,NULL,&shader_module));
 
@@ -238,13 +174,13 @@ int main(void) {
         .bindingCount = BINDINGS,
         .pBindings    = bindings
     };
-    VK_CHECK(vkCreateDescriptorSetLayout(machine.device, &set_layout_info, NULL, &renderer.compute_set_layout));
+    VK_CHECK(vkCreateDescriptorSetLayout(machine.device, &set_layout_info, NULL, &renderer.common_set_layout));
 
     /* -------- Pipeline Layouts -------- */
     VkPipelineLayoutCreateInfo common_pipeline_info = {
         .sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .setLayoutCount = 1,
-        .pSetLayouts    = &renderer.compute_set_layout
+        .pSetLayouts    = &renderer.common_set_layout
     };
     VK_CHECK(vkCreatePipelineLayout(machine.device, &common_pipeline_info, NULL, &renderer.common_pipeline_layout));
 
@@ -271,7 +207,6 @@ int main(void) {
         { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT,   .module = shader_module, .pName = "vs_main" },
         { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = shader_module, .pName = "fs_main" }
     };
-
     VkVertexInputBindingDescription bindings_vi[2] = {
         { .binding = 0, .stride = sizeof(uint32_t)*2,    .inputRate = VK_VERTEX_INPUT_RATE_INSTANCE },
         { .binding = 1, .stride = sizeof(uint16_t)*2,    .inputRate = VK_VERTEX_INPUT_RATE_VERTEX   }
@@ -290,14 +225,15 @@ int main(void) {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
         .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
     };
-    VkViewport viewport = { // -> can be moved to swapchain as constant
-        .x = 0, .y = 0,
+    VkViewport viewport = {
+        .x = 0,
+        .y = (float)swapchain.swapchain_extent.height,   // flip Y
         .width  = (float)swapchain.swapchain_extent.width,
-        .height = (float)swapchain.swapchain_extent.height,
+        .height = -(float)swapchain.swapchain_extent.height, // negative to flip
         .minDepth = 0.f, .maxDepth = 1.f
     };
     VkRect2D scissor = { .offset = {0,0}, .extent = swapchain.swapchain_extent };
-    VkPipelineViewportStateCreateInfo viewport_state = { // -> can be moved to swapchain as constant
+    VkPipelineViewportStateCreateInfo viewport_state = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
         .viewportCount = 1, .pViewports = &viewport,
         .scissorCount  = 1, .pScissors  = &scissor
@@ -305,7 +241,7 @@ int main(void) {
     VkPipelineRasterizationStateCreateInfo raster = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
         .polygonMode = VK_POLYGON_MODE_FILL,
-        .cullMode    = VK_CULL_MODE_NONE,
+        .cullMode    = VK_CULL_MODE_BACK_BIT,
         .frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE,
         .lineWidth   = 1.0f
     };
@@ -319,12 +255,6 @@ int main(void) {
         .attachmentCount = 1,
         .pAttachments    = &color_blend_attachment
     };
-    VkDynamicState dyn_states[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
-    VkPipelineDynamicStateCreateInfo dyn = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-        .dynamicStateCount = 2,
-        .pDynamicStates = dyn_states
-    };
     VkGraphicsPipelineCreateInfo graphics_info = {
         .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         .stageCount          = 2,
@@ -335,12 +265,17 @@ int main(void) {
         .pRasterizationState = &raster,
         .pMultisampleState   = &multisample,
         .pColorBlendState    = &color_blend,
-        .layout              = renderer.common_pipeline_layout,
-        .renderPass          = renderer.offscreen_render_pass,
-        .pDynamicState       = &dyn,
-        .subpass             = 0
+        .layout              = renderer.common_pipeline_layout
     };
-    VK_CHECK(vkCreateGraphicsPipelines(machine.device, VK_NULL_HANDLE, 1, &graphics_info, NULL, &renderer.graphics_pipeline));
+    VkPipelineRenderingCreateInfo pr = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+        .colorAttachmentCount = 1,
+        .pColorAttachmentFormats = (VkFormat[]){ swapchain.swapchain_format },
+        // .depthAttachmentFormat = VK_FORMAT_UNDEFINED,
+        // .stencilAttachmentFormat = VK_FORMAT_UNDEFINED,
+    };
+    graphics_info.pNext = &pr;
+    VK_CHECK(vkCreateGraphicsPipelines(machine.device, VK_NULL_HANDLE, 1, &graphics_info, NULL, &renderer.main_pipeline));
     #pragma endregion
 
     // destroy the shader module after using it
@@ -401,22 +336,25 @@ int main(void) {
     pf_timestamp("Buffers created");
 
     // upload the data for: uvs, positions, normals, indices, instances
+    struct Instance {short x, y; char yaw, mesh_id; char padding[2];};
     {
         upload_to_buffer(machine.device, renderer.memory_positions, sizeof(uint32_t)*kVertsPerMesh, g_positions_mesh);
         upload_to_buffer(machine.device, renderer.memory_normals,   sizeof(uint32_t)*kVertsPerMesh, g_normals_mesh);
         upload_to_buffer(machine.device, renderer.memory_uvs,       sizeof(uint16_t)*2*kVertsPerMesh, g_uvs_mesh);
         upload_to_buffer(machine.device, renderer.memory_index_ib,  sizeof(uint32_t)*kIdxPerMesh, g_indices_mesh);
-        uint64_t instance_zeroed = 0;
+        struct Instance instance_zeroed = (struct Instance) {.x=0,.y=0,.yaw=32,.mesh_id=0};
         upload_to_buffer(machine.device, renderer.memory_instances, sizeof(uint64_t)*1, &instance_zeroed);
     }
 
     /* -------- Descriptor Pool & Set -------- */
-    VkDescriptorPoolSize pool_size = { .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = BINDINGS };
+    VkDescriptorPoolSize pool_sizes[] = {
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,  BINDINGS }, // your existing
+        { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,   1 },
+        { VK_DESCRIPTOR_TYPE_SAMPLER,         1 },
+    };
     VkDescriptorPoolCreateInfo pool_info = {
-        .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .maxSets       = 1,
-        .poolSizeCount = 1,
-        .pPoolSizes    = &pool_size
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .maxSets = 2, .poolSizeCount = 3, .pPoolSizes = pool_sizes
     };
     VK_CHECK(vkCreateDescriptorPool(machine.device, &pool_info, NULL, &renderer.descriptor_pool));
 
@@ -424,7 +362,7 @@ int main(void) {
         .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
         .descriptorPool     = renderer.descriptor_pool,
         .descriptorSetCount = 1,
-        .pSetLayouts        = &renderer.compute_set_layout
+        .pSetLayouts        = &renderer.common_set_layout
     };
     VK_CHECK(vkAllocateDescriptorSets(machine.device, &set_alloc_info, &renderer.descriptor_set));
 
@@ -448,9 +386,19 @@ int main(void) {
     }
     vkUpdateDescriptorSets(machine.device, BINDINGS, writes, 0, NULL);
     pf_timestamp("Descriptors created");
+    
+    VkSemaphoreTypeCreateInfo type_info = {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
+        .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE,
+        .initialValue  = 0
+    };
+    VkSemaphoreCreateInfo tsci = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = &type_info };
+    VkSemaphore render_timeline;
+    VK_CHECK(vkCreateSemaphore(machine.device, &tsci, NULL, &render_timeline));
+    uint64_t timeline_value = 0;
 
     #pragma region FRAME LOOP
-    #if DEBUG == 1
+    #if DEBUG_APP == 1
     renderer.frame_id_counter = 1;
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
         renderer.frame_id_per_slot[i]   = 0;
@@ -475,31 +423,36 @@ int main(void) {
     // create semaphore linked to swapchain image (for gpu to wait for this swapchain image to be released) 
     // create fence (for cpu to wait for one of the command buffers to finish on the gpu)
     VkSemaphoreCreateInfo semaphore_info = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
-    VkFenceCreateInfo fence_info = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT }; // start signaled so first frame doesn't block
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
         VK_CHECK(vkCreateSemaphore(machine.device, &semaphore_info, NULL, &renderer.sem_image_available[i]));
-        VK_CHECK(vkCreateFence(machine.device, &fence_info, NULL, &renderer.fe_in_flight[i]));
     }
     
     // take out two of the four images to have only two images in use
     // this way we only ever render a third frame when we're sure the first has been scanned out
-    #if DEBUG == 1
+    #if DEBUG_APP == 1
     printf("SWAPCHAIN IMAGE COUNT: %d\n", swapchain.swapchain_image_count);
     #endif
     VkSemaphore parking_semaphores[3]; uint32_t parked_images[3];
     for (uint32_t i = 0; i < swapchain.swapchain_image_count - MAX_FRAMES_IN_FLIGHT - 1; ++i) {
+        printf("parking an image\n");
         VK_CHECK(vkCreateSemaphore(machine.device, &semaphore_info, NULL, &parking_semaphores[i]));
         vkAcquireNextImageKHR(machine.device, swapchain.swapchain, UINT64_MAX, parking_semaphores[i], VK_NULL_HANDLE, &parked_images[i]);
     }
 
-    // TODO: ADD MORE QUERIES TO TIME; COMPUTE, GRAPHICS, BLIT
     renderer.frame_slot = 0;
     while (pf_poll_events(window)) {
-        // block on the fence here to avoid having too many frames in flight
-        VK_CHECK(vkWaitForFences(machine.device, 1, &renderer.fe_in_flight[renderer.frame_slot], VK_TRUE, UINT64_MAX));
-        VK_CHECK(vkResetFences(machine.device, 1, &renderer.fe_in_flight[renderer.frame_slot])); // set unsignaled again
+        uint64_t wait_value = timeline_value; // for MAX_FRAMES_IN_FLIGHT == 1
+        // If you ever increase MAX_FRAMES_IN_FLIGHT to N, use:
+        // uint64_t wait_value = renderer.timeline_value - (MAX_FRAMES_IN_FLIGHT - 1);
+        VkSemaphoreWaitInfo wi = {
+            .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
+            .semaphoreCount = 1,
+            .pSemaphores = &render_timeline,
+            .pValues     = &wait_value
+        };
+        VK_CHECK(vkWaitSemaphores(machine.device, &wi, UINT64_MAX));
 
-        #if DEBUG == 1
+        #if DEBUG_APP == 1
         if (vkWaitForPresentKHR) {
             for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
                 uint64_t presented_frame_id = presented_frame_ids[i];
@@ -544,24 +497,29 @@ int main(void) {
                 offset_ns = cpu_now_ns - gpu_now_ns;  // add this to any GPU ns to place on CPU timeline
             }
             // Now read the two GPU timestamps for that image (they’re done because we waited the fence)
-            VkResult qr = vkGetQueryPoolResults(
-                machine.device,
-                swapchain.query_pool,
-                q_first, /* firstQuery */
-                2, /* queryCount */
-                sizeof(ticks), ticks,
-                sizeof(uint64_t),
-                VK_QUERY_RESULT_64_BIT /* WAIT_BIT not needed after fence wait */);
+            uint64_t t[QUERIES_PER_IMAGE] = {0};
+            VkResult qr = vkGetQueryPoolResults(machine.device, swapchain.query_pool,
+                                    q_first, QUERIES_PER_IMAGE, sizeof(t), t,
+                                    sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
             if (qr == VK_SUCCESS) {
-                double gpu_begin_ns = (double)ticks[0] * renderer.gpu_ticks_to_ns;
-                double gpu_end_ns   = (double)ticks[1] * renderer.gpu_ticks_to_ns;
-                double gpu_dur_ms   = (gpu_end_ns - gpu_begin_ns) * 1e-6;
-                // CPU mapping
-                double cpu_mapped_begin_ms = (offset_ns + gpu_begin_ns - pf_ns_start()) * 1e-6;
-                double cpu_mapped_end_ms   = (offset_ns + gpu_end_ns   - pf_ns_start()) * 1e-6;
-                printf("[%llu] past fence at %.3fms\n", (unsigned long long)last_frame_id, (f32) (pf_ns_now() - pf_ns_start()) / 1e6);
-                printf("[%llu] gpu time %.3fms - %.3fms [%.3fms]\n",(unsigned long long)last_frame_id, cpu_mapped_begin_ms, cpu_mapped_end_ms, gpu_dur_ms);
-            }
+                double ns[QUERIES_PER_IMAGE];
+                for (int i=0;i<QUERIES_PER_IMAGE;i++) ns[i] = (double)t[i] * renderer.gpu_ticks_to_ns;
+                // Stage durations (ms)
+                double ms_zero          = (ns[Q_AFTER_ZERO]          - ns[Q_BEGIN])             * 1e-6;
+                double ms_comp_build    = (ns[Q_AFTER_COMP_BUILD]    - ns[Q_AFTER_ZERO])        * 1e-6;
+                double ms_comp_indirect = (ns[Q_AFTER_COMP_INDIRECT] - ns[Q_AFTER_COMP_BUILD])  * 1e-6;
+                double ms_barrier_gfx   = (ns[Q_AFTER_COMP_TO_GFX]   - ns[Q_AFTER_COMP_INDIRECT])*1e-6;
+                double ms_renderpass    = (ns[Q_AFTER_RENDERPASS]    - ns[Q_BEFORE_RENDERPASS]) * 1e-6;
+                double ms_blit          = (ns[Q_AFTER_BLIT]          - ns[Q_AFTER_RENDERPASS])  * 1e-6;
+                double ms_tail          = (ns[Q_END]                 - ns[Q_AFTER_BLIT])        * 1e-6; // usually tiny
+                // (Optional) map to CPU timeline using your calibrated offset
+                double cpu_ms[QUERIES_PER_IMAGE];
+                for (int i=0;i<QUERIES_PER_IMAGE;i++) cpu_ms[i] = (offset_ns + ns[i] - pf_ns_start()) * 1e-6;
+                printf("[%llu] gpu time %.3fms - %.3fms : zero=%.3f, comp_build=%.3f, comp_indirect=%.3f, barrier=%.3f, render=%.3f, blit=%.3f, tail=%.3f, [%.3f]\n",
+                       (unsigned long long)last_frame_id, cpu_ms[Q_BEGIN], cpu_ms[Q_END],
+                       ms_zero, ms_comp_build, ms_comp_indirect, ms_barrier_gfx, ms_renderpass, ms_blit, ms_tail,
+                       (ns[Q_END]-ns[Q_BEGIN]) * 1e-6);
+            } else {printf("ERROR: %s\n", vk_result_str(qr));}
             // Clear slot so we don’t read twice
             swapchain.previous_frame_image_index[renderer.frame_slot] = UINT32_MAX;
         }
@@ -577,170 +535,138 @@ int main(void) {
         // start recording for this frame's command buffer
         f32 frame_start_time = (f32) (pf_ns_now() - pf_ns_start()) / 1e6;
         VkCommandBuffer cmd = swapchain.command_buffers_per_image[swap_image_index];
-        VK_CHECK(vkResetCommandBuffer(cmd, 0));
-        VkCommandBufferBeginInfo begin_info = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
-        VK_CHECK(vkBeginCommandBuffer(cmd, &begin_info));
-        #if DEBUG == 1
-        uint32_t query0 = swap_image_index * QUERIES_PER_IMAGE + 0; // begin
-        uint32_t query1 = query0 + 1; // end
-        // Reset just the two queries for this image before writing them
-        vkCmdResetQueryPool(cmd, swapchain.query_pool, query0, QUERIES_PER_IMAGE);
-        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, swapchain.query_pool, query0);
-        #endif
-        
-        // Zero the counters on GPU
-        vkCmdFillBuffer(cmd, renderer.buffer_counters, 0, size_counters, 0);
-        
-        // Make the TRANSFER writes visible to COMPUTE (and later INDIRECT/vertex input)
-        VkMemoryBarrier2 xfer_to_compute = {
-            .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
-            .srcStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-            .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-            .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT
-        };
-        VkDependencyInfo dep0 = { .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-                                  .memoryBarrierCount = 1, .pMemoryBarriers = &xfer_to_compute };
-        vkCmdPipelineBarrier2(cmd, &dep0);
+        if (!swapchain.command_buffers_recorded[swap_image_index]) {
+            // VK_CHECK(vkResetCommandBuffer(cmd, 0)); // don't need to reset if recorded once and reused
+            VkCommandBufferBeginInfo begin_info = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+            VK_CHECK(vkBeginCommandBuffer(cmd, &begin_info));
+            #if DEBUG_APP == 1
+            uint32_t q0 = swap_image_index * QUERIES_PER_IMAGE + 0; // index of the first query of this frame
+            // Reset the time queries for frame
+            vkCmdResetQueryPool(cmd, swapchain.query_pool, q0, QUERIES_PER_IMAGE);
+            // Start timing
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, swapchain.query_pool, q0 + Q_BEGIN);
+            #endif
+            
+            // Zero the counters on GPU
+            vkCmdFillBuffer(cmd, renderer.buffer_counters, 0, size_counters, 0);
+            // Make the writes visible to COMPUTE
+            VkMemoryBarrier2 xfer_to_compute = {
+                .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+                .srcStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT
+            };
+            VkDependencyInfo dep0 = { .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &xfer_to_compute };
+            vkCmdPipelineBarrier2(cmd, &dep0);
+            #if DEBUG_APP == 1
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, swapchain.query_pool, q0 + Q_AFTER_ZERO);
+            #endif
 
-        // --- Compute passes ---
-        vkCmdBindDescriptorSets(cmd,
-                                VK_PIPELINE_BIND_POINT_COMPUTE,
-                                renderer.common_pipeline_layout,
-                                0, 1, &renderer.descriptor_set, 0, NULL);
+            // --- Compute passes ---
+            vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,renderer.common_pipeline_layout, 0, 1, &renderer.descriptor_set, 0, NULL);
+            // Build visible (no culling): instanceCount = numInstances
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, renderer.compute_pipelines[0]);
+            vkCmdDispatch(cmd, (numInstances+63)/64, 1, 1);
+            #if DEBUG_APP == 1
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, swapchain.query_pool, q0 + Q_AFTER_COMP_BUILD);
+            #endif
 
-        // Build visible (no culling): instanceCount = numInstances
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, renderer.compute_pipelines[0]);
-        vkCmdDispatch(cmd, (numInstances+63)/64, 1, 1);
+            // Prepare indirect
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, renderer.compute_pipelines[1]);
+            vkCmdDispatch(cmd, 1, 1, 1);
+            #if DEBUG_APP == 1
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, swapchain.query_pool, q0 + Q_AFTER_COMP_INDIRECT);
+            #endif
+            // Barrier: make compute writes visible to graphics/indirect stages
+            VkMemoryBarrier2 mb = {
+              .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+              .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+              .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+              .dstStageMask  = VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
+                               VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+                               VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
+              .dstAccessMask = VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT |
+                               VK_ACCESS_2_SHADER_READ_BIT |
+                               VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT
+            };
+            vkCmdPipelineBarrier2(cmd, &(VkDependencyInfo){ .sType=VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount=1, .pMemoryBarriers=&mb });
+            #if DEBUG_APP == 1
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, swapchain.query_pool, q0 + Q_AFTER_COMP_TO_GFX);
+            #endif
 
-        // Prepare indirect
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, renderer.compute_pipelines[1]);
-        vkCmdDispatch(cmd, 1, 1, 1);
+            // --- render pass (use persistent framebuffer) ---
+            VkImageMemoryBarrier2 to_color = {
+              .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+              .srcStageMask  = VK_PIPELINE_STAGE_2_NONE,
+              .srcAccessMask = 0,
+              .dstStageMask  = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+              .dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+              .oldLayout     = VK_IMAGE_LAYOUT_UNDEFINED,          // swapchain image is undefined after acquire
+              .newLayout     = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+              .image         = swapchain.swapchain_images[swap_image_index],
+              .subresourceRange = { .aspectMask=VK_IMAGE_ASPECT_COLOR_BIT, .levelCount=1, .layerCount=1 }
+            };
+            vkCmdPipelineBarrier2(cmd, &(VkDependencyInfo){ .sType=VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+              .imageMemoryBarrierCount=1, .pImageMemoryBarriers=&to_color });
+            VkRenderingAttachmentInfo swap_att = {
+              .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+              .imageView = swapchain.swapchain_views[swap_image_index],
+              .imageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+              .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+              .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+            };
+            VkRenderingInfo ri_swap = {
+              .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+              .renderArea = { .offset = {0,0}, .extent = swapchain.swapchain_extent },
+              .layerCount = 1,
+              .colorAttachmentCount = 1,
+              .pColorAttachments = &swap_att,
+            };
+            #if DEBUG_APP == 1
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, swapchain.query_pool, q0 + Q_BEFORE_RENDERPASS);
+            #endif
+            vkCmdBeginRendering(cmd, &ri_swap);
+            // set the resolution of the intermediary pass
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, renderer.main_pipeline);
+            // descriptors for VS (POSITIONS/NORMALS etc.)
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, renderer.common_pipeline_layout, 0, 1, &renderer.descriptor_set, 0, NULL);
+            // vertex buffers: [0]=VISIBLE_PACKED (instance), [1]=UVs (per-vertex)
+            VkBuffer vbs[2]     = { renderer.buffer_visible, renderer.buffer_uvs };
+            VkDeviceSize ofs[2] = { 0, 0 };
+            vkCmdBindVertexBuffers(cmd, 0, 2, vbs, ofs);
+            // index buffer: fixed 1152 indices (values 0..255 in your mesh order)
+            vkCmdBindIndexBuffer(cmd, renderer.buffer_index_ib, 0, VK_INDEX_TYPE_UINT32);
+            // one GPU-driven draw
+            vkCmdDrawIndexedIndirect(cmd, renderer.buffer_counters, 0, 1, sizeof(VkDrawIndexedIndirectCommand));
+            vkCmdEndRendering(cmd);
+            VkImageMemoryBarrier2 to_present = {
+              .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+              .srcStageMask  = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+              .srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+              .dstStageMask  = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
+              .dstAccessMask = 0,
+              .oldLayout     = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+              .newLayout     = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+              .image         = swapchain.swapchain_images[swap_image_index],
+              .subresourceRange = { .aspectMask=VK_IMAGE_ASPECT_COLOR_BIT, .levelCount=1, .layerCount=1 }
+            };
+            vkCmdPipelineBarrier2(cmd, &(VkDependencyInfo){ .sType=VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+              .imageMemoryBarrierCount=1, .pImageMemoryBarriers=&to_present });
+            #if DEBUG_APP == 1
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, swapchain.query_pool, q0 + Q_AFTER_RENDERPASS);
+            #endif
+           
+            #if DEBUG_APP == 1
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, swapchain.query_pool, q0 + Q_AFTER_BLIT);
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, swapchain.query_pool, q0 + Q_END);
+            #endif
+            VK_CHECK(vkEndCommandBuffer(cmd));
+            swapchain.command_buffers_recorded[swap_image_index] = 1;
+            printf("Recorded command buffer %d\n", swap_image_index);
+        }
 
-        // Barrier: make compute writes visible to graphics/indirect stages
-        VkMemoryBarrier2 mb = {
-          .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
-          .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-          .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
-          .dstStageMask  = VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
-                           VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
-                           VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
-          .dstAccessMask = VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT |
-                           VK_ACCESS_2_SHADER_READ_BIT |
-                           VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT
-        };
-        vkCmdPipelineBarrier2(cmd, &(VkDependencyInfo){ .sType=VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount=1, .pMemoryBarriers=&mb });
-
-        // --- render pass (use persistent framebuffer) ---
-        VkClearValue clear_color = { .color = {{0, 0, 0, 1}} };
-        VkRenderPassBeginInfo render_begin = {
-            .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-            .renderPass = renderer.offscreen_render_pass,
-            .framebuffer = renderer.offscreen_fb,
-            .renderArea = { .offset = {0,0}, .extent = OFFSCREEN_EXTENT },
-            .clearValueCount = 1, .pClearValues = &clear_color
-        };
-        vkCmdBeginRenderPass(cmd, &render_begin, VK_SUBPASS_CONTENTS_INLINE);
-
-        // set the resolution of the intermediary pass
-        VkViewport vp = {
-            .x = 0, .y = (float)OFFSCREEN_EXTENT.height, // flip to have y origin in bottom left
-            .width  = (float)OFFSCREEN_EXTENT.width,
-            .height = -(float)OFFSCREEN_EXTENT.height,
-            .minDepth = 0.f, .maxDepth = 1.f
-        };
-        VkRect2D sc = { .offset = {0,0}, .extent = OFFSCREEN_EXTENT };
-        vkCmdSetViewport(cmd, 0, 1, &vp);
-        vkCmdSetScissor (cmd, 0, 1, &sc);
-
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, renderer.graphics_pipeline);
-        // descriptors for VS (POSITIONS/NORMALS etc.)
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, renderer.common_pipeline_layout, 0, 1, &renderer.descriptor_set, 0, NULL);
-        // vertex buffers: [0]=VISIBLE_PACKED (instance), [1]=UVs (per-vertex)
-        VkBuffer vbs[2]     = { renderer.buffer_visible, renderer.buffer_uvs };
-        VkDeviceSize ofs[2] = { 0, 0 };
-        vkCmdBindVertexBuffers(cmd, 0, 2, vbs, ofs);
-        // index buffer: fixed 1152 indices (values 0..255 in your mesh order)
-        vkCmdBindIndexBuffer(cmd, renderer.buffer_index_ib, 0, VK_INDEX_TYPE_UINT32);
-        // one GPU-driven draw
-        vkCmdDrawIndexedIndirect(cmd, renderer.buffer_counters, 0, 1, sizeof(VkDrawIndexedIndirectCommand));
-
-        vkCmdEndRenderPass(cmd);
-        
-        #pragma region BLIT
-        // B) Transition offscreen to TRANSFER_SRC, swapchain image to TRANSFER_DST
-        VkImageMemoryBarrier2 off_to_src = {
-          .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-          .srcStageMask  = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-          .srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-          .dstStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-          .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT,
-          .oldLayout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-          .newLayout     = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-          .image         = renderer.offscreen_image,
-          .subresourceRange = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1 }
-        };
-        VkImageLayout old = swapchain.image_layouts[swap_image_index]; // UNDEFINED the first time, PRESENT thereafter
-        VkImageMemoryBarrier2 pres_to_dst = {
-            .sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-            .srcStageMask  = VK_PIPELINE_STAGE_2_NONE,     // coming from UNDEFINED or PRESENT; no producer
-            .srcAccessMask = 0,
-            .dstStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-            .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-            .oldLayout     = old,
-            .newLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            .image         = swapchain.swapchain_images[swap_image_index],
-            .subresourceRange = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1 }
-        };
-        VkDependencyInfo depA = {
-          .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-          .imageMemoryBarrierCount = 2,
-          .pImageMemoryBarriers = (VkImageMemoryBarrier2[2]){ off_to_src, pres_to_dst }
-        };
-        vkCmdPipelineBarrier2(cmd, &depA);
-        // C) Blit low-res → swapchain (nearest or linear)
-        VkImageBlit2 region = {
-          .sType = VK_STRUCTURE_TYPE_IMAGE_BLIT_2,
-          .srcSubresource = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1 },
-          .dstSubresource = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1 },
-        };
-        region.srcOffsets[0] = (VkOffset3D){0, 0, 0};
-        region.srcOffsets[1] = (VkOffset3D){ (int)OFFSCREEN_EXTENT.width,
-                                             (int)OFFSCREEN_EXTENT.height, 1 };
-        region.dstOffsets[0] = (VkOffset3D){0, 0, 0};
-        region.dstOffsets[1] = (VkOffset3D){ (int)swapchain.swapchain_extent.width,
-                                             (int)swapchain.swapchain_extent.height, 1 };
-        VkBlitImageInfo2 blit = {
-          .sType = VK_STRUCTURE_TYPE_BLIT_IMAGE_INFO_2,
-          .srcImage = renderer.offscreen_image,
-          .srcImageLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-          .dstImage = swapchain.swapchain_images[swap_image_index],
-          .dstImageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-          .regionCount = 1, .pRegions = &region,
-          .filter = VK_FILTER_LINEAR // or VK_FILTER_NEAREST
-        };
-        vkCmdBlitImage2(cmd, &blit);
-        // D) Swapchain back to PRESENT
-        VkImageMemoryBarrier2 dst_to_present = {
-            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-            .srcStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-            .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-            .dstStageMask  = VK_PIPELINE_STAGE_2_NONE,
-            .dstAccessMask = 0,
-            .oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            .newLayout     = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-            .image         = swapchain.swapchain_images[swap_image_index],
-            .subresourceRange = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1 }
-        };
-        VkDependencyInfo depB = { .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-                                  .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &dst_to_present };
-        vkCmdPipelineBarrier2(cmd, &depB);
-
-        // Record the new layout for this image
-        swapchain.image_layouts[swap_image_index] = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-
-        #if DEBUG == 1
-        vkCmdWriteTimestamp(cmd,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, swapchain.query_pool, query1);
+        #if DEBUG_APP == 1
         // bump counters, then advance slot
         renderer.frame_id_counter++;
         presented_frame_ids[renderer.frame_slot] = renderer.frame_id_counter;
@@ -751,38 +677,50 @@ int main(void) {
         if (vkGetCalibratedTimestampsEXT) {
             VkCalibratedTimestampInfoEXT infos[2] = {
                 { .sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT, .timeDomain = VK_TIME_DOMAIN_DEVICE_EXT },
-#ifdef _WIN32
-                    { .sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT, .timeDomain = VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_EXT }
-#else
-                    { .sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT, .timeDomain = VK_TIME_DOMAIN_CLOCK_MONOTONIC_EXT }
-#endif
+                #ifdef _WIN32
+                { .sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT, .timeDomain = VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_EXT }
+                #else
+                { .sType = VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT, .timeDomain = VK_TIME_DOMAIN_CLOCK_MONOTONIC_EXT }
+                #endif
             };
             vkGetCalibratedTimestampsEXT(machine.device, 2, infos, ts, &maxDev);
             uint64_t gpu_now_ticks = ts[0];
             uint64_t cpu_now_ns    = ts[1]; // on Linux MONOTONIC is ns
         }
         #endif
-        VK_CHECK(vkEndCommandBuffer(cmd));
 
-        // (D) Submit: wait on acquire, signal render-finished, fence per-frame
+        // submit
         VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        VkSemaphore present_ready = swapchain.present_ready_per_image[swap_image_index];
+        VkSemaphore waits[]   = { renderer.sem_image_available[renderer.frame_slot] }; // binary from acquire
+        VkSemaphore signals[] = { swapchain.present_ready_per_image[swap_image_index], render_timeline };
+        uint64_t next_value = timeline_value + 1;
+        // Values for each signal semaphore; binaries ignore their value (can be 0)
+        uint64_t signal_values[] = { 0, next_value };
+        VkTimelineSemaphoreSubmitInfo tssi = {
+            .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
+            .signalSemaphoreValueCount = 2,
+            .pSignalSemaphoreValues    = signal_values,
+            .waitSemaphoreValueCount   = 0,    // (we’re not waiting on a timeline in this submit)
+            .pWaitSemaphoreValues      = NULL
+        };
         VkSubmitInfo submit_info = {
             .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-            .waitSemaphoreCount = 1, .pWaitSemaphores = &renderer.sem_image_available[renderer.frame_slot],
-            .pWaitDstStageMask  = &wait_stage,
+            .pNext = &tssi,
+            .waitSemaphoreCount = 1, .pWaitSemaphores = waits, .pWaitDstStageMask = &wait_stage,
             .commandBufferCount = 1, .pCommandBuffers = &cmd,
-            .signalSemaphoreCount = 1, .pSignalSemaphores = &present_ready
+            .signalSemaphoreCount = 2, .pSignalSemaphores = signals
         };
-        VK_CHECK(vkQueueSubmit(machine.queue_graphics, 1, &submit_info, renderer.fe_in_flight[renderer.frame_slot]));
+        VK_CHECK(vkQueueSubmit(machine.queue_graphics, 1, &submit_info, VK_NULL_HANDLE));
+        // Bump our CPU-side notion of the timeline
+        timeline_value = next_value;
 
         // (E) Present: wait on render-finished
         VkPresentInfoKHR present_info = {
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-            .waitSemaphoreCount = 1, .pWaitSemaphores = &present_ready,
+            .waitSemaphoreCount = 1, .pWaitSemaphores = &swapchain.present_ready_per_image[swap_image_index],
             .swapchainCount = 1, .pSwapchains = &swapchain.swapchain, .pImageIndices = &swap_image_index
         };
-        #if DEBUG == 1
+        #if DEBUG_APP == 1
         if (vkWaitForPresentKHR) {
             VkPresentIdKHR present_id_info = {
                 .sType          = VK_STRUCTURE_TYPE_PRESENT_ID_KHR,
@@ -802,9 +740,9 @@ int main(void) {
             break;
         }
 
-        #if DEBUG == 1
+        #if DEBUG_CPU == 1
         f32 frame_end_time = (f32) (pf_ns_now() - pf_ns_start()) / 1e6;
-        printf("[%llu] cpu time %.3fms - %.3fms [%.3fms]\n",renderer.frame_id_counter, frame_start_time, frame_end_time, frame_end_time - frame_start_time);
+        printf("cpu time %.3fms - %.3fms [%.3fms]\n", frame_start_time, frame_end_time, frame_end_time - frame_start_time);
         #endif
         swapchain.previous_frame_image_index[renderer.frame_slot] = swap_image_index;
         renderer.frame_slot = (renderer.frame_slot + 1) % MAX_FRAMES_IN_FLIGHT;

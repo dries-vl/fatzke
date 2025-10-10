@@ -28,9 +28,9 @@ struct Machine create_machine(WINDOW window) {
 #ifdef _WIN32
     extensions[1] = VK_KHR_WIN32_SURFACE_EXTENSION_NAME; extension_count++;
 #else
-    extensions[1] = VK_KHR_XLIB_SURFACE_EXTENSION_NAME; extension_count++;
+    extensions[1] = VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME; extension_count++;
 #endif
-#if DEBUG == 1
+#if DEBUG_VULKAN == 1
     extensions[2] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME; extension_count++;
     const char* layers[] = { "VK_LAYER_KHRONOS_validation" };
     const uint32_t layer_count = 1;
@@ -61,7 +61,7 @@ struct Machine create_machine(WINDOW window) {
     };
 
     VK_CHECK(vkCreateInstance(&instance_info, NULL, &machine.instance));
-#if DEBUG == 1
+#if DEBUG_VULKAN == 1
     VkDebugUtilsMessengerEXT debug_msgr = VK_NULL_HANDLE;
     VK_CHECK(CreateDebugUtilsMessengerEXT(machine.instance, debugCreateInfo, NULL, &debug_msgr));
 #endif
@@ -75,13 +75,13 @@ struct Machine create_machine(WINDOW window) {
     VK_CHECK(vkCreateWin32SurfaceKHR(machine.instance, &surface_info, NULL, &machine.surface));
     pf_timestamp("Win32 surface created");
 #else
-    VkXlibSurfaceCreateInfoKHR surface_info = {
-        .sType  = VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR,
-        .dpy    = (Display*)pf_display_or_instance(window),
-        .window = (Window)pf_surface_or_hwnd(window)
+    VkWaylandSurfaceCreateInfoKHR surface_info = {
+        .sType  = VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR,
+        .display    = pf_display_or_instance(window),
+        .surface = pf_surface_or_hwnd(window)
     };
-    VK_CHECK(vkCreateXlibSurfaceKHR(machine.instance, &surface_info, NULL, &machine.surface));
-    pf_timestamp("Xlib surface created");
+    VK_CHECK(vkCreateWaylandSurfaceKHR(machine.instance, &surface_info, NULL, &machine.surface));
+    pf_timestamp("Wayland surface created");
 #endif
 
     /* -------- Physical Device & Logical Device -------- */

@@ -8,16 +8,17 @@ struct Swapchain {
     VkExtent2D                swapchain_extent;
     uint32_t                  swapchain_image_count;
     // for each image in the swapchain
-    VkImage*                  swapchain_images; // nr. of swapchain images
-    VkImageView*              swapchain_views; // nr. of swapchain images
-    VkImageLayout*            image_layouts; // nr. of swapchain images
+    VkImage                   swapchain_images[MAX_SWAPCHAIN_IMAGES];
+    VkImageView               swapchain_views[MAX_SWAPCHAIN_IMAGES];
+    VkImageLayout             image_layouts[MAX_SWAPCHAIN_IMAGES];
     VkCommandPool             command_pool_graphics;
-    VkCommandBuffer*          command_buffers_per_image; // nr. of swapchain images
-    VkSemaphore*              present_ready_per_image; // nr. of swapchain images
+    VkCommandBuffer           command_buffers_per_image[MAX_SWAPCHAIN_IMAGES];
+    int                       command_buffers_recorded[MAX_SWAPCHAIN_IMAGES];
+    VkSemaphore               present_ready_per_image[MAX_SWAPCHAIN_IMAGES];
+    VkFramebuffer             framebuffers[MAX_SWAPCHAIN_IMAGES];
     // remember which swapchain image the previous frame used
     uint32_t                  previous_frame_image_index[MAX_FRAMES_IN_FLIGHT];
-    #if DEBUG == 1
-    #define QUERIES_PER_IMAGE 2
+    #if DEBUG_APP == 1
     VkQueryPool query_pool; // GPU timestamps
     #endif
 };
@@ -68,7 +69,7 @@ struct Swapchain create_swapchain(const struct Machine *machine, WINDOW w) {
         .imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
         .preTransform     = capabilities.currentTransform,
         .compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-        .presentMode      = VK_PRESENT_MODE_FIFO_KHR,
+        .presentMode      = VK_PRESENT_MODE_MAILBOX_KHR,
         .clipped          = VK_TRUE
     };
 
@@ -84,15 +85,13 @@ struct Swapchain create_swapchain(const struct Machine *machine, WINDOW w) {
     VK_CHECK(vkCreateSwapchainKHR(machine->device, &swapchain_info, NULL, &swapchain.swapchain));
 
     VK_CHECK(vkGetSwapchainImagesKHR(machine->device, swapchain.swapchain, &min_image_count, NULL));
+    assert(min_image_count <= MAX_SWAPCHAIN_IMAGES);
     swapchain.swapchain_image_count = min_image_count;
-    swapchain.swapchain_images = (VkImage*)malloc(sizeof(VkImage) * min_image_count);
     VK_CHECK(vkGetSwapchainImagesKHR(machine->device, swapchain.swapchain, &min_image_count, swapchain.swapchain_images));
-    swapchain.image_layouts = (VkImageLayout*)malloc(sizeof(VkImageLayout) * min_image_count);
     for (uint32_t i = 0; i < min_image_count; ++i) {
         swapchain.image_layouts[i] = VK_IMAGE_LAYOUT_UNDEFINED;
     }
 
-    swapchain.swapchain_views = (VkImageView*)malloc(sizeof(VkImageView) * min_image_count);
     for (uint32_t i = 0; i < min_image_count; ++i) {
         VkImageViewCreateInfo view_info = {
             .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -107,13 +106,12 @@ struct Swapchain create_swapchain(const struct Machine *machine, WINDOW w) {
         };
         VK_CHECK(vkCreateImageView(machine->device, &view_info, NULL, &swapchain.swapchain_views[i]));
     }
-    #if DEBUG == 1
+    #if DEBUG_APP == 1
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i)
         swapchain.previous_frame_image_index[i] = UINT32_MAX;
     #endif
 
     // create per-image present semaphores
-    swapchain.present_ready_per_image = (VkSemaphore*) calloc(swapchain.swapchain_image_count, sizeof(VkSemaphore));
     VkSemaphoreCreateInfo si = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
     for (uint32_t i = 0; i < swapchain.swapchain_image_count; ++i) {
         VK_CHECK(vkCreateSemaphore(machine->device, &si, NULL, &swapchain.present_ready_per_image[i]));
@@ -128,7 +126,6 @@ struct Swapchain create_swapchain(const struct Machine *machine, WINDOW w) {
     VK_CHECK(vkCreateCommandPool(machine->device, &cmd_pool_info, NULL, &swapchain.command_pool_graphics));
 
     // create per-image command buffers (needs the command pool)
-    swapchain.command_buffers_per_image = (VkCommandBuffer*)calloc(swapchain.swapchain_image_count, sizeof(VkCommandBuffer));
     VkCommandBufferAllocateInfo cmd_alloc_info = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
         .commandPool = swapchain.command_pool_graphics,
@@ -137,7 +134,7 @@ struct Swapchain create_swapchain(const struct Machine *machine, WINDOW w) {
     };
     VK_CHECK(vkAllocateCommandBuffers(machine->device, &cmd_alloc_info, swapchain.command_buffers_per_image));
 
-    #if DEBUG == 1
+    #if DEBUG_APP == 1
     VkQueryPoolCreateInfo qpci = {
         .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
         .queryType = VK_QUERY_TYPE_TIMESTAMP,
@@ -157,38 +154,33 @@ void destroy_swapchain(struct Machine* machine, struct Renderer* renderer, struc
     if (swapchain->present_ready_per_image) {
         for (uint32_t i = 0; i < swapchain->swapchain_image_count; ++i)
             vkDestroySemaphore(machine->device, swapchain->present_ready_per_image[i], NULL);
-        free(swapchain->present_ready_per_image);
-        swapchain->present_ready_per_image = NULL;
+        memset(swapchain->present_ready_per_image, 0, sizeof swapchain->present_ready_per_image);
     }
     // Command buffers depend on image count — free them here
     if (swapchain->command_buffers_per_image) {
-        vkFreeCommandBuffers(machine->device, swapchain->command_pool_graphics,
-                             swapchain->swapchain_image_count, swapchain->command_buffers_per_image);
-        free(swapchain->command_buffers_per_image);
-        swapchain->command_buffers_per_image = NULL;
+        vkFreeCommandBuffers(machine->device, swapchain->command_pool_graphics, swapchain->swapchain_image_count, swapchain->command_buffers_per_image);
+        memset(swapchain->command_buffers_per_image, 0, sizeof swapchain->command_buffers_per_image);
     }
     // Destroy the command pool itself
     if (swapchain->command_pool_graphics) {
         vkDestroyCommandPool(machine->device, swapchain->command_pool_graphics, NULL);
         swapchain->command_pool_graphics = VK_NULL_HANDLE;
     }
-    #if DEBUG == 1
+    #if DEBUG_APP == 1
     if (swapchain->query_pool) {
         vkDestroyQueryPool(machine->device, swapchain->query_pool, NULL);
         swapchain->query_pool = VK_NULL_HANDLE;
     }
     #endif
-    if (swapchain->image_layouts) { free(swapchain->image_layouts); swapchain->image_layouts = NULL; }
+    if (swapchain->image_layouts) { memset(swapchain->image_layouts, 0, sizeof swapchain->image_layouts); }
     if (swapchain->swapchain_views) {
         for (uint32_t i = 0; i < swapchain->swapchain_image_count; ++i)
             vkDestroyImageView(machine->device, swapchain->swapchain_views[i], NULL);
-        free(swapchain->swapchain_views);
-        swapchain->swapchain_views = NULL;
+        memset(swapchain->swapchain_views, 0, sizeof swapchain->swapchain_views);
     }
     // Free the heap array of VkImage handles (the images are owned by the swapchain; no vkDestroyImage)
     if (swapchain->swapchain_images) {
-        free(swapchain->swapchain_images);
-        swapchain->swapchain_images = NULL;
+        memset(swapchain->swapchain_images, 0, sizeof swapchain->swapchain_images);
     }
     if (swapchain->swapchain) {
         vkDestroySwapchainKHR(machine->device, swapchain->swapchain, NULL);
