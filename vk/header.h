@@ -13,11 +13,10 @@ typedef long long isize;
 typedef unsigned long long usize;
 
 extern void _exit(int);
-#include <stdio.h>
-#include <stdlib.h>
-// extern int printf(const char*,...);
-// extern int snprintf(char*,__SIZE_TYPE__,const char*,...);
-#define assert(expr) ((expr) ? (void)0 : __assert_fail(#expr, __FILE__, __LINE__, __func__))
+extern int printf(const char*,...);
+extern int snprintf(char*,__SIZE_TYPE__,const char*,...);
+extern int __assert_fail(const char*,const char*,unsigned,const char*);
+#define assert(expr) ((expr) ? (void)0 : __assert_fail(#expr,__FILE__,__LINE__,__func__))
 extern int putenv(char*);
 extern void *memcpy(void *__restrict,const void*__restrict,__SIZE_TYPE__);
 extern int memcmp(const void*,const void*,__SIZE_TYPE__);
@@ -26,7 +25,6 @@ extern int strcmp(const char*,const char*);
 extern char *strdup(const char*);
 extern char *strstr(const char*,const char*);
 extern __SIZE_TYPE__ strlen (const char*);
-#define NULL ((void *)0)
 
 #pragma region PLATFORM
 typedef void* WINDOW;
@@ -60,5 +58,5 @@ WINDOW pf_create_window(void*,KEYBOARD_CB,MOUSE_CB);
 #define APP_NAME "Battle: work in progress"
 #define DEBUG_VULKAN 0
 #define DEBUG_APP 0
-#define DEBUG_CPU 1
+#define DEBUG_CPU 0
 #pragma endregion

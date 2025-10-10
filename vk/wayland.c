@@ -26,7 +26,12 @@ u64 pf_ns_now(void){
 u64 T0;
 u64 pf_ns_start(void){ return T0; }
 void pf_time_reset() {T0=pf_ns_now();}
-void pf_timestamp(char *msg) {u64 _t=pf_ns_now(); printf("[+%7.3f ms] %s\n",(_t-T0)/1e6,(msg));}
+void pf_timestamp(char *msg) {
+    #if DEBUG_CPU == 1
+    u64 _t=pf_ns_now(); 
+    printf("[+%7.3f ms] %s\n",(_t-T0)/1e6,(msg));
+    #endif
+}
 
 struct wayland_window {
     struct wl_display* display;
