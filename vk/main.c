@@ -41,6 +41,7 @@ struct Renderer {
     VkBuffer                  buffer_normals;    VkDeviceMemory memory_normals;
     VkBuffer                  buffer_uvs;        VkDeviceMemory memory_uvs;
     VkBuffer                  buffer_index_ib;   VkDeviceMemory memory_index_ib;
+    VkBuffer                  buffer_uniforms;   VkDeviceMemory memory_uniforms;
     // main rendering
     VkPipeline                main_pipeline;
     // sync
@@ -53,6 +54,13 @@ struct Renderer {
     uint64_t    frame_id_per_slot[MAX_FRAMES_IN_FLIGHT];
     f32         start_time_per_slot[MAX_FRAMES_IN_FLIGHT];
     #endif
+};
+
+struct Uniforms {
+    float camera_vp[4][4];
+    float light_vp[4][4];
+    float camera_ws[4];
+    float light_ws[4];
 };
 
 #if DEBUG_APP == 1
@@ -73,13 +81,9 @@ enum {
 #include "vk_util.h"
 #include "vk_machine.h"
 #include "vk_swapchain.h"
+#include "helper.h"
 
 #pragma region HELPER
-void* map_entire_allocation(VkDevice device, VkDeviceMemory memory, VkDeviceSize size_bytes) {
-    void* data = NULL;
-    VK_CHECK(vkMapMemory(device, memory, 0, size_bytes, 0, &data));
-    return data;
-}
 static uint32_t find_memory_type_index(VkPhysicalDevice physical_device,uint32_t memory_type_bits,VkMemoryPropertyFlags required_properties) {
     VkPhysicalDeviceMemoryProperties mem_props;
     vkGetPhysicalDeviceMemoryProperties(physical_device, &mem_props);
@@ -159,15 +163,16 @@ int main(void) {
     VkShaderModule shader_module; VK_CHECK(vkCreateShaderModule(machine.device,&smci,NULL,&shader_module));
 
     #pragma region COMPUTE PIPELINE
-    #define BINDINGS 5
+    #define BINDINGS 6
     VkDescriptorSetLayoutBinding bindings[BINDINGS];
     for (uint32_t i = 0; i < BINDINGS; ++i) {
         bindings[i] = (VkDescriptorSetLayoutBinding) {
             .binding         = i,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
             .descriptorCount = 1,
             .stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT
         };
+        // use uniform for the last one
+        bindings[i].descriptorType = (i < 5) ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     }
     VkDescriptorSetLayoutCreateInfo set_layout_info = {
         .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -241,7 +246,7 @@ int main(void) {
     VkPipelineRasterizationStateCreateInfo raster = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
         .polygonMode = VK_POLYGON_MODE_FILL,
-        .cullMode    = VK_CULL_MODE_BACK_BIT,
+        .cullMode    = VK_CULL_MODE_NONE,
         .frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE,
         .lineWidth   = 1.0f
     };
@@ -333,6 +338,11 @@ int main(void) {
         host_visible_coherent /* or DEVICE_LOCAL with staging */,
         &renderer.buffer_index_ib, &renderer.memory_index_ib);
 
+    // UNIFORMS
+    create_buffer_and_memory(machine.device, machine.physical_device, sizeof(struct Uniforms),
+        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        host_visible_coherent, &renderer.buffer_uniforms, &renderer.memory_uniforms);
+
     pf_timestamp("Buffers created");
 
     // upload the data for: uvs, positions, normals, indices, instances
@@ -345,19 +355,70 @@ int main(void) {
         struct Instance instance_zeroed = (struct Instance) {.x=0,.y=0,.yaw=32,.mesh_id=0};
         upload_to_buffer(machine.device, renderer.memory_instances, sizeof(uint64_t)*1, &instance_zeroed);
     }
+    
+    // --- CAMERA SETUP ---
+    // 1. time-based animation or user-controlled camera
+    float t = (float)((pf_ns_now() - pf_ns_start()) * 1e-9f);
+    // Example: orbit around origin at radius 5
+    float eye[3] = {
+        5.0f * sinf(0.5f * t),
+        2.0f,
+       -5.0f * cosf(0.5f * t)
+    };
+    float at[3] = { 0.0f, 1.5f, 0.0f };
+    float up[3] = { 0.0f, 1.0f, 0.0f };
+    // 2. view matrix
+    float V[16];
+    make_lookat_rh(eye, at, up, V);
+    // 3. projection matrix
+    float P[16];
+    float aspect = (float)swapchain.swapchain_extent.width /
+                   (float)swapchain.swapchain_extent.height;
+    make_perspective_vk(60.0f * 3.14159265f/180.0f, aspect, 0.1f, 100.0f, P);
+    // 4. combined view-projection
+    float VP[16];
+    #define M(i,j) (i + 4*j)
+    for (int c=0;c<4;c++)
+      for (int r=0;r<4;r++)
+        VP[M(r,c)] = P[M(r,0)]*V[M(0,c)] + P[M(r,1)]*V[M(1,c)] +
+                     P[M(r,2)]*V[M(2,c)] + P[M(r,3)]*V[M(3,c)];
+    #undef M
+    // 5. light direction (world-space)
+    float lightDirWS[3] = { 0.4f, -1.0f, 0.3f };
+    float len = sqrtf(lightDirWS[0]*lightDirWS[0] +
+                      lightDirWS[1]*lightDirWS[1] +
+                      lightDirWS[2]*lightDirWS[2]);
+    lightDirWS[0]/=len; lightDirWS[1]/=len; lightDirWS[2]/=len;
+    // --- WRITE TO UBO ---
+    struct Uniforms uniforms = {0};
+    // Transpose to row-major memory layout before uploading
+    memcpy(uniforms.camera_vp, VP, sizeof(VP));           // <— no mat4_to_rowvec4s
+
+    static const float I[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
+    memcpy(uniforms.light_vp, I, sizeof(I));
+    uniforms.camera_ws[0]=eye[0]; uniforms.camera_ws[1]=eye[1]; uniforms.camera_ws[2]=eye[2]; uniforms.camera_ws[3]=1.0f;
+    uniforms.light_ws [0]=lightDirWS[0]; uniforms.light_ws [1]=lightDirWS[1]; uniforms.light_ws [2]=lightDirWS[2]; uniforms.light_ws [3]=0.0f;
+
+    void* dst = 0;
+    VK_CHECK(vkMapMemory(machine.device, renderer.memory_uniforms, 0, sizeof uniforms, 0, &dst));
+    memcpy(dst, &uniforms, sizeof uniforms);
+    vkUnmapMemory(machine.device, renderer.memory_uniforms);
 
     /* -------- Descriptor Pool & Set -------- */
     VkDescriptorPoolSize pool_sizes[] = {
-        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,  BINDINGS }, // your existing
-        { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,   1 },
-        { VK_DESCRIPTOR_TYPE_SAMPLER,         1 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,  BINDINGS-1 }, // bindings 0..4
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,  1 }, // binding 5  <<< add this
+        // keep these only if/when you actually use them:
+        // { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,   1 },
+        // { VK_DESCRIPTOR_TYPE_SAMPLER,         1 },
     };
     VkDescriptorPoolCreateInfo pool_info = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .maxSets = 2, .poolSizeCount = 3, .pPoolSizes = pool_sizes
+        .maxSets = 2,
+        .poolSizeCount = (uint32_t)(sizeof(pool_sizes)/sizeof(pool_sizes[0])),
+        .pPoolSizes = pool_sizes,
     };
     VK_CHECK(vkCreateDescriptorPool(machine.device, &pool_info, NULL, &renderer.descriptor_pool));
-
     VkDescriptorSetAllocateInfo set_alloc_info = {
         .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
         .descriptorPool     = renderer.descriptor_pool,
@@ -371,7 +432,8 @@ int main(void) {
         { renderer.buffer_visible,   0, size_visible   }, // binding 1
         { renderer.buffer_counters,  0, size_counters  }, // binding 2
         { renderer.buffer_positions, 0, size_positions }, // binding 3
-        { renderer.buffer_normals,   0, size_normals   }  // binding 4
+        { renderer.buffer_normals,   0, size_normals   },  // binding 4
+        { renderer.buffer_uniforms,  0, sizeof(struct Uniforms)   }  // binding 5
     };
     VkWriteDescriptorSet writes[BINDINGS];
     for (uint32_t i = 0; i < BINDINGS; ++i) {
@@ -380,7 +442,8 @@ int main(void) {
             .dstSet          = renderer.descriptor_set,
             .dstBinding      = i,
             .descriptorCount = 1,
-            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            // set the last one as uniform
+            .descriptorType  = (i<5)?VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
             .pBufferInfo     = &buffer_infos[i]
         };
     }
@@ -531,6 +594,24 @@ int main(void) {
         // recreate the swapchain if the window resized
         if (acquire_result == VK_ERROR_OUT_OF_DATE_KHR) { recreate_swapchain(&machine, &renderer, &swapchain, window); continue; }
         if (acquire_result != VK_SUCCESS && acquire_result != VK_SUBOPTIMAL_KHR) { printf("vkAcquireNextImageKHR failed: %d\n", acquire_result); break; }
+        
+        // update uniforms        
+        // for now: identity for light; later fill with ortho light VP
+        memcpy(uniforms.camera_vp, VP, sizeof(VP));                // column-major
+        static const float I[16] = {
+            1,0,0,0,
+            0,1,0,0,
+            0,0,1,0,
+            0,0,0,1
+        };
+        memcpy(uniforms.light_vp, I,  sizeof(I));
+        uniforms.camera_ws[0]=eye[0]; uniforms.camera_ws[1]=eye[1]; uniforms.camera_ws[2]=eye[2];
+        uniforms.light_ws[0]=lightDirWS[0]; uniforms.light_ws[1]=lightDirWS[1]; uniforms.light_ws[2]=lightDirWS[2];
+        // upload (HOST_COHERENT)
+        void* dst=NULL;
+        VK_CHECK(vkMapMemory(machine.device, renderer.memory_uniforms, 0, sizeof(uniforms), 0, &dst));
+        memcpy(dst, &uniforms, sizeof(uniforms));
+        vkUnmapMemory(machine.device, renderer.memory_uniforms);
 
         // start recording for this frame's command buffer
         f32 frame_start_time = (f32) (pf_ns_now() - pf_ns_start()) / 1e6;
@@ -546,6 +627,22 @@ int main(void) {
             // Start timing
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, swapchain.query_pool, q0 + Q_BEGIN);
             #endif
+            
+            // make writes visible
+            VkMemoryBarrier2 cam_host_to_shader = {
+                .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+                .srcStageMask  = VK_PIPELINE_STAGE_2_HOST_BIT,
+                .srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT,
+                .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                                 VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
+                .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT
+            };
+            // record once, before your other work (e.g. right after your first timestamp)
+            vkCmdPipelineBarrier2(cmd, &(VkDependencyInfo){
+                .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                .memoryBarrierCount = 1,
+                .pMemoryBarriers    = &cam_host_to_shader
+            });
             
             // Zero the counters on GPU
             vkCmdFillBuffer(cmd, renderer.buffer_counters, 0, size_counters, 0);

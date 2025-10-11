@@ -44,6 +44,13 @@ uint decodeMeshId(uint packed1) {
 [[vk::binding(2,0)]] RWStructuredBuffer<Counters>   COUNTERS;
 [[vk::binding(3,0)]] StructuredBuffer<uint>         POSITIONS; // todo: 8bit compressed texture
 [[vk::binding(4,0)]] StructuredBuffer<uint>         NORMALS;   // todo: 8bit compressed texture
+[[vk::binding(5,0)]]
+cbuffer Uniforms {
+    column_major float4x4 camera_vp;
+    column_major float4x4 light_vp;
+    float4 camera_ws;
+    float4 light_ws;
+};
 
 // ======= Compute: build visible (no culling yet) =======
 [shader("compute")] [numthreads(64,1,1)]
@@ -97,37 +104,17 @@ VSOut vs_main(uint vid : SV_VertexID, [[vk::location(0)]] uint2 instance, [[vk::
     pr.x += xz.x;
     pr.z += xz.y;
 
+    float4 clip = mul(camera_vp, float4(pr, 1.0));  // same as the working static path
+
     VSOut o;
-    o.pos = mul(g_ViewProj, float4(pr, 1.0));
+    o.pos = clip;
+    // o.pos = mul(g_ViewProj, float4(pr, 1.0)); 
     o.uv  = uv;
-    o.normal = normal;
+    o.normal = camera_vp[3].xyz;
     return o;
 }
 
 [shader("fragment")]
 float4 fs_main(VSOut i) : SV_Target0 {
     return float4(i.normal.x, i.normal.y, i.normal.z, 1.0);
-}
-
-struct vs_out_blit {
-    float4 pos : SV_Position;
-    float2 uv  : TEXCOORD0;
-};
-[shader("vertex")]
-vs_out_blit vs_blit(uint vid : SV_VertexID) {
-    float2 pos[3] = {
-        float2(-1.0, -3.0),
-        float2(-1.0,  1.0),
-        float2( 3.0,  1.0)
-    };
-    float2 uv[3] = {
-        float2(0.0, 2.0),
-        float2(0.0, 0.0),
-        float2(2.0, 0.0)
-    };
-
-    vs_out_blit o;
-    o.pos = float4(pos[vid], 0.0, 1.0);
-    o.uv  = uv[vid];
-    return o;
 }
