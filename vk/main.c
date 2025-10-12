@@ -128,6 +128,7 @@ static void upload_to_buffer(VkDevice dev, VkDeviceMemory mem, size_t bytes, con
 #pragma region MAIN
 void key_input_callback(void* ud, enum KEYBOARD_BUTTON key, enum INPUT_STATE state) {
     if (key == KEYBOARD_ESCAPE) {_exit(0);}
+    printf("key %d state %d\n", key, state);
 }
 void mouse_input_callback(void* ud, i32 x, i32 y, enum MOUSE_BUTTON button, enum INPUT_STATE state) {}
 int main(void) {
@@ -595,23 +596,23 @@ int main(void) {
         if (acquire_result == VK_ERROR_OUT_OF_DATE_KHR) { recreate_swapchain(&machine, &renderer, &swapchain, window); continue; }
         if (acquire_result != VK_SUCCESS && acquire_result != VK_SUBOPTIMAL_KHR) { printf("vkAcquireNextImageKHR failed: %d\n", acquire_result); break; }
         
-        // update uniforms        
+        #pragma region update uniforms        
         // for now: identity for light; later fill with ortho light VP
-        memcpy(uniforms.camera_vp, VP, sizeof(VP));                // column-major
-        static const float I[16] = {
-            1,0,0,0,
-            0,1,0,0,
-            0,0,1,0,
-            0,0,0,1
-        };
-        memcpy(uniforms.light_vp, I,  sizeof(I));
-        uniforms.camera_ws[0]=eye[0]; uniforms.camera_ws[1]=eye[1]; uniforms.camera_ws[2]=eye[2];
-        uniforms.light_ws[0]=lightDirWS[0]; uniforms.light_ws[1]=lightDirWS[1]; uniforms.light_ws[2]=lightDirWS[2];
-        // upload (HOST_COHERENT)
-        void* dst=NULL;
-        VK_CHECK(vkMapMemory(machine.device, renderer.memory_uniforms, 0, sizeof(uniforms), 0, &dst));
-        memcpy(dst, &uniforms, sizeof(uniforms));
-        vkUnmapMemory(machine.device, renderer.memory_uniforms);
+        // memcpy(uniforms.camera_vp, VP, sizeof(VP));                // column-major
+        // static const float I[16] = {
+        //     1,0,0,0,
+        //     0,1,0,0,
+        //     0,0,1,0,
+        //     0,0,0,1
+        // };
+        // memcpy(uniforms.light_vp, I,  sizeof(I));
+        // uniforms.camera_ws[0]=eye[0]; uniforms.camera_ws[1]=eye[1]; uniforms.camera_ws[2]=eye[2];
+        // uniforms.light_ws[0]=lightDirWS[0]; uniforms.light_ws[1]=lightDirWS[1]; uniforms.light_ws[2]=lightDirWS[2];
+        // // upload (HOST_COHERENT)
+        // void* dst=NULL;
+        // VK_CHECK(vkMapMemory(machine.device, renderer.memory_uniforms, 0, sizeof(uniforms), 0, &dst));
+        // memcpy(dst, &uniforms, sizeof(uniforms));
+        // vkUnmapMemory(machine.device, renderer.memory_uniforms);
 
         // start recording for this frame's command buffer
         f32 frame_start_time = (f32) (pf_ns_now() - pf_ns_start()) / 1e6;
@@ -629,20 +630,20 @@ int main(void) {
             #endif
             
             // make writes visible
-            VkMemoryBarrier2 cam_host_to_shader = {
-                .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
-                .srcStageMask  = VK_PIPELINE_STAGE_2_HOST_BIT,
-                .srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT,
-                .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
-                                 VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
-                .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT
-            };
-            // record once, before your other work (e.g. right after your first timestamp)
-            vkCmdPipelineBarrier2(cmd, &(VkDependencyInfo){
-                .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-                .memoryBarrierCount = 1,
-                .pMemoryBarriers    = &cam_host_to_shader
-            });
+            // VkMemoryBarrier2 cam_host_to_shader = {
+            //     .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+            //     .srcStageMask  = VK_PIPELINE_STAGE_2_HOST_BIT,
+            //     .srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT,
+            //     .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+            //                      VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
+            //     .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT
+            // };
+            // // record once, before your other work (e.g. right after your first timestamp)
+            // vkCmdPipelineBarrier2(cmd, &(VkDependencyInfo){
+            //     .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+            //     .memoryBarrierCount = 1,
+            //     .pMemoryBarriers    = &cam_host_to_shader
+            // });
             
             // Zero the counters on GPU
             vkCmdFillBuffer(cmd, renderer.buffer_counters, 0, size_counters, 0);

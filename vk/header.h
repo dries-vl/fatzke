@@ -58,5 +58,5 @@ WINDOW pf_create_window(void*,KEYBOARD_CB,MOUSE_CB);
 #define APP_NAME "Battle: work in progress"
 #define DEBUG_VULKAN 0
 #define DEBUG_APP 0
-#define DEBUG_CPU 0
+#define DEBUG_CPU 1
 #pragma endregion

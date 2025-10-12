@@ -9,16 +9,6 @@ struct Counters {
 static const uint kVertsPerMesh = 192;
 static const uint kIdxPerMesh   = 1116;
 
-// Simple right-handed look-at (eye at 0,2,-5 looking toward +Z, up +Y)
-// Perspective: 60° vertical FOV, 16:9 aspect, near 0.1, far 100.0
-static const float4x4 g_ViewProj = {
-    // Column-major literal, i.e. four columns top-to-bottom
-    0.9742786f,  0.0000000f,  0.0000000f,  0.0000000f,
-    0.0000000f,  1.6081688f, -0.37176244f, -0.037176244f,
-    0.0000000f,  0.64326752f,  0.92940610f,  0.092940610f,
-    0.0000000f,  0.0000000f,   4.3905554f,   0.53905553f
-};
-
 float3 unpackA2B10G10R10_SNORM(uint p) {
     int r = (int)( p        & 0x3FF);
     int g = (int)((p >> 10) & 0x3FF);
@@ -108,9 +98,8 @@ VSOut vs_main(uint vid : SV_VertexID, [[vk::location(0)]] uint2 instance, [[vk::
 
     VSOut o;
     o.pos = clip;
-    // o.pos = mul(g_ViewProj, float4(pr, 1.0)); 
     o.uv  = uv;
-    o.normal = camera_vp[3].xyz;
+    o.normal = normal;
     return o;
 }
 
