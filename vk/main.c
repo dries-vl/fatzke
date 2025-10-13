@@ -56,12 +56,8 @@ struct Renderer {
     #endif
 };
 
-struct Uniforms {
-    float camera_vp[4][4];
-    float light_vp[4][4];
-    float camera_ws[4];
-    float light_ws[4];
-};
+struct Uniforms { uint32_t uCam[4]; };  // 16 bytes
+_Static_assert(sizeof(struct Uniforms) == 16, "Uniforms must be 16 bytes");
 
 #if DEBUG_APP == 1
 enum {
@@ -347,64 +343,23 @@ int main(void) {
     pf_timestamp("Buffers created");
 
     // upload the data for: uvs, positions, normals, indices, instances
-    struct Instance {short x, y; char yaw, mesh_id; char padding[2];};
+    struct GPUInstance {
+        uint32_t xz_dm;
+        uint32_t y_cs;
+    };
+    struct GPUInstance inst;
+    inst.xz_dm = ((uint16_t)0 /*z_dm*/) << 16 | ((uint16_t)0 /*x_dm*/);
+    float yaw = 0.0f;
+    inst.y_cs = ((uint16_t)20 /*y_dm*/) | (((uint8_t)lrintf(cosf(yaw) * 127.0f)) << 16) |
+        (((uint8_t)lrintf(sinf(yaw) * 127.0f)) << 24);
     {
         upload_to_buffer(machine.device, renderer.memory_positions, sizeof(uint32_t)*kVertsPerMesh, g_positions_mesh);
         upload_to_buffer(machine.device, renderer.memory_normals,   sizeof(uint32_t)*kVertsPerMesh, g_normals_mesh);
         upload_to_buffer(machine.device, renderer.memory_uvs,       sizeof(uint16_t)*2*kVertsPerMesh, g_uvs_mesh);
         upload_to_buffer(machine.device, renderer.memory_index_ib,  sizeof(uint32_t)*kIdxPerMesh, g_indices_mesh);
-        struct Instance instance_zeroed = (struct Instance) {.x=0,.y=0,.yaw=32,.mesh_id=0};
-        upload_to_buffer(machine.device, renderer.memory_instances, sizeof(uint64_t)*1, &instance_zeroed);
+        upload_to_buffer(machine.device, renderer.memory_instances, sizeof(struct GPUInstance)*1, &inst);
     }
     
-    // --- CAMERA SETUP ---
-    // 1. time-based animation or user-controlled camera
-    float t = (float)((pf_ns_now() - pf_ns_start()) * 1e-9f);
-    // Example: orbit around origin at radius 5
-    float eye[3] = {
-        5.0f * sinf(0.5f * t),
-        2.0f,
-       -5.0f * cosf(0.5f * t)
-    };
-    float at[3] = { 0.0f, 1.5f, 0.0f };
-    float up[3] = { 0.0f, 1.0f, 0.0f };
-    // 2. view matrix
-    float V[16];
-    make_lookat_rh(eye, at, up, V);
-    // 3. projection matrix
-    float P[16];
-    float aspect = (float)swapchain.swapchain_extent.width /
-                   (float)swapchain.swapchain_extent.height;
-    make_perspective_vk(60.0f * 3.14159265f/180.0f, aspect, 0.1f, 100.0f, P);
-    // 4. combined view-projection
-    float VP[16];
-    #define M(i,j) (i + 4*j)
-    for (int c=0;c<4;c++)
-      for (int r=0;r<4;r++)
-        VP[M(r,c)] = P[M(r,0)]*V[M(0,c)] + P[M(r,1)]*V[M(1,c)] +
-                     P[M(r,2)]*V[M(2,c)] + P[M(r,3)]*V[M(3,c)];
-    #undef M
-    // 5. light direction (world-space)
-    float lightDirWS[3] = { 0.4f, -1.0f, 0.3f };
-    float len = sqrtf(lightDirWS[0]*lightDirWS[0] +
-                      lightDirWS[1]*lightDirWS[1] +
-                      lightDirWS[2]*lightDirWS[2]);
-    lightDirWS[0]/=len; lightDirWS[1]/=len; lightDirWS[2]/=len;
-    // --- WRITE TO UBO ---
-    struct Uniforms uniforms = {0};
-    // Transpose to row-major memory layout before uploading
-    memcpy(uniforms.camera_vp, VP, sizeof(VP));           // <— no mat4_to_rowvec4s
-
-    static const float I[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
-    memcpy(uniforms.light_vp, I, sizeof(I));
-    uniforms.camera_ws[0]=eye[0]; uniforms.camera_ws[1]=eye[1]; uniforms.camera_ws[2]=eye[2]; uniforms.camera_ws[3]=1.0f;
-    uniforms.light_ws [0]=lightDirWS[0]; uniforms.light_ws [1]=lightDirWS[1]; uniforms.light_ws [2]=lightDirWS[2]; uniforms.light_ws [3]=0.0f;
-
-    void* dst = 0;
-    VK_CHECK(vkMapMemory(machine.device, renderer.memory_uniforms, 0, sizeof uniforms, 0, &dst));
-    memcpy(dst, &uniforms, sizeof uniforms);
-    vkUnmapMemory(machine.device, renderer.memory_uniforms);
-
     /* -------- Descriptor Pool & Set -------- */
     VkDescriptorPoolSize pool_sizes[] = {
         { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,  BINDINGS-1 }, // bindings 0..4
@@ -597,22 +552,18 @@ int main(void) {
         if (acquire_result != VK_SUCCESS && acquire_result != VK_SUBOPTIMAL_KHR) { printf("vkAcquireNextImageKHR failed: %d\n", acquire_result); break; }
         
         #pragma region update uniforms        
-        // for now: identity for light; later fill with ortho light VP
-        // memcpy(uniforms.camera_vp, VP, sizeof(VP));                // column-major
-        // static const float I[16] = {
-        //     1,0,0,0,
-        //     0,1,0,0,
-        //     0,0,1,0,
-        //     0,0,0,1
-        // };
-        // memcpy(uniforms.light_vp, I,  sizeof(I));
-        // uniforms.camera_ws[0]=eye[0]; uniforms.camera_ws[1]=eye[1]; uniforms.camera_ws[2]=eye[2];
-        // uniforms.light_ws[0]=lightDirWS[0]; uniforms.light_ws[1]=lightDirWS[1]; uniforms.light_ws[2]=lightDirWS[2];
-        // // upload (HOST_COHERENT)
-        // void* dst=NULL;
-        // VK_CHECK(vkMapMemory(machine.device, renderer.memory_uniforms, 0, sizeof(uniforms), 0, &dst));
-        // memcpy(dst, &uniforms, sizeof(uniforms));
-        // vkUnmapMemory(machine.device, renderer.memory_uniforms);
+        float cam_x = 0.0f, cam_y = 2.0f, cam_z = -10.0f; // meters
+        static i8 cam_yaw = 0;
+        // cam_yaw += 1;
+        static i8 cam_pitch = 0;
+        cam_pitch += 1;
+        struct Uniforms u = {0};
+        encode_uniforms(&u, cam_x, cam_y, cam_z, cam_yaw, cam_pitch);
+        printf("encoded uniforms: %d,%d,%d\n", u.uCam[0], u.uCam[1], u.uCam[2]);
+        void* dst=NULL;
+        VK_CHECK(vkMapMemory(machine.device, renderer.memory_uniforms, 0, sizeof u, 0, &dst));
+        memcpy(dst, &u, sizeof u);
+        vkUnmapMemory(machine.device, renderer.memory_uniforms);
 
         // start recording for this frame's command buffer
         f32 frame_start_time = (f32) (pf_ns_now() - pf_ns_start()) / 1e6;
@@ -630,20 +581,20 @@ int main(void) {
             #endif
             
             // make writes visible
-            // VkMemoryBarrier2 cam_host_to_shader = {
-            //     .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
-            //     .srcStageMask  = VK_PIPELINE_STAGE_2_HOST_BIT,
-            //     .srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT,
-            //     .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
-            //                      VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
-            //     .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT
-            // };
-            // // record once, before your other work (e.g. right after your first timestamp)
-            // vkCmdPipelineBarrier2(cmd, &(VkDependencyInfo){
-            //     .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-            //     .memoryBarrierCount = 1,
-            //     .pMemoryBarriers    = &cam_host_to_shader
-            // });
+            VkMemoryBarrier2 cam_host_to_shader = {
+                .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+                .srcStageMask  = VK_PIPELINE_STAGE_2_HOST_BIT,
+                .srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT,
+                .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                                 VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
+                .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT
+            };
+            // record once, before your other work (e.g. right after your first timestamp)
+            vkCmdPipelineBarrier2(cmd, &(VkDependencyInfo){
+                .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                .memoryBarrierCount = 1,
+                .pMemoryBarriers    = &cam_host_to_shader
+            });
             
             // Zero the counters on GPU
             vkCmdFillBuffer(cmd, renderer.buffer_counters, 0, size_counters, 0);
