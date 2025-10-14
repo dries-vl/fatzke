@@ -12,6 +12,8 @@
 #include <vulkan/vulkan.h>
 #undef VkResult
 #define VkResult int
+#undef VkBool32
+#define VkBool32 unsigned
 
 extern const unsigned char shaders[];
 extern const unsigned char shaders_end[];
@@ -20,7 +22,7 @@ extern const unsigned char shaders_end[];
 // todo: create vk_shader (to have one big shader with multiple entrypoints, have shader hot reloading, ...)
 // todo: create vk_texture (loading textures, maybe hot reloading textures, ...)
 
-// 1 for double buffering (one of ours, two of present engine) (technically triple buffered, but modern apis don't seem to do actual double buffering)
+// 1 for double buffering (one of ours, two of present engine) (technically triple buffered, but vulkan doesn't seem to do actual double buffering)
 // one is being scanned out, one is done and waiting (this one is also considered 'presented' but not scanned out yet)
 // and one of ours being rendered (this is this 1 frame that is 'in flight')
 #define MAX_FRAMES_IN_FLIGHT 1
@@ -57,7 +59,6 @@ struct Renderer {
 };
 
 struct Uniforms { uint32_t uCam[4]; };  // 16 bytes
-_Static_assert(sizeof(struct Uniforms) == 16, "Uniforms must be 16 bytes");
 
 #if DEBUG_APP == 1
 enum {
@@ -133,7 +134,9 @@ int main(void) {
     WINDOW window = pf_create_window(NULL, key_input_callback,mouse_input_callback);
     pf_timestamp("Created platform window");
 
-#if defined(_WIN32) && DEBUG == 1
+#if defined(_WIN32) && DEBUG_VULKAN == 1
+    extern int putenv(const char*);
+    extern char* getenv(const char*);
     // set env to point to vk layer path to allow finding
     const char* sdk = getenv("VULKAN_SDK");
     char buf[1024];
@@ -141,6 +144,8 @@ int main(void) {
     putenv(strdup(buf));
 #endif
 #if USE_DISCRETE_GPU == 0 && !defined(_WIN32)
+    extern int putenv(const char*);
+    extern char* getenv(const char*);
     // set env to avoid loading nvidia icd (1000ms)
     putenv((char*)"VK_DRIVER_FILES=/usr/share/vulkan/icd.d/intel_icd.x86_64.json");
     putenv((char*)"VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/intel_icd.x86_64.json");
@@ -425,7 +430,7 @@ int main(void) {
     PFN_vkGetCalibratedTimestampsEXT vkGetCalibratedTimestampsEXT =
     (PFN_vkGetCalibratedTimestampsEXT)vkGetDeviceProcAddr(machine.device, "vkGetCalibratedTimestampsEXT");
     if (!vkGetCalibratedTimestampsEXT) {
-        printf("vkGetCalibratedTimestampsEXT not available — vkGetCalibratedTimestampsEXT not supported.\n");
+        printf("VK_KHR_calibrated_timestamps not supported.\n");
     }
     VkPhysicalDeviceProperties props;
     vkGetPhysicalDeviceProperties(machine.physical_device, &props);
@@ -434,7 +439,7 @@ int main(void) {
     PFN_vkWaitForPresentKHR vkWaitForPresentKHR =
     (PFN_vkWaitForPresentKHR)vkGetDeviceProcAddr(machine.device, "vkWaitForPresentKHR");
     if (!vkWaitForPresentKHR) {
-        printf("vkWaitForPresentKHR not available — VK_KHR_present_wait not supported.\n");
+        printf("VK_KHR_present_wait not supported.\n");
     }
     uint64_t presented_frame_ids[MAX_FRAMES_IN_FLIGHT] = {0};
     #endif
@@ -551,15 +556,14 @@ int main(void) {
         if (acquire_result == VK_ERROR_OUT_OF_DATE_KHR) { recreate_swapchain(&machine, &renderer, &swapchain, window); continue; }
         if (acquire_result != VK_SUCCESS && acquire_result != VK_SUBOPTIMAL_KHR) { printf("vkAcquireNextImageKHR failed: %d\n", acquire_result); break; }
         
-        #pragma region update uniforms        
-        float cam_x = 0.0f, cam_y = 2.0f, cam_z = -10.0f; // meters
-        static i8 cam_yaw = 0;
+        #pragma region update uniforms
+        i16 cam_x = 0, cam_y = 20, cam_z = -100;
+        static i16 cam_yaw = 0;
         // cam_yaw += 1;
-        static i8 cam_pitch = 0;
+        static i16 cam_pitch = 0;
         cam_pitch += 1;
         struct Uniforms u = {0};
         encode_uniforms(&u, cam_x, cam_y, cam_z, cam_yaw, cam_pitch);
-        printf("encoded uniforms: %d,%d,%d\n", u.uCam[0], u.uCam[1], u.uCam[2]);
         void* dst=NULL;
         VK_CHECK(vkMapMemory(machine.device, renderer.memory_uniforms, 0, sizeof u, 0, &dst));
         memcpy(dst, &u, sizeof u);

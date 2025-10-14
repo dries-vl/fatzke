@@ -69,7 +69,7 @@ struct Swapchain create_swapchain(const struct Machine *machine, WINDOW w) {
         .imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
         .preTransform     = capabilities.currentTransform,
         .compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-        .presentMode      = VK_PRESENT_MODE_MAILBOX_KHR,
+        .presentMode      = VK_PRESENT_MODE_FIFO_KHR,
         .clipped          = VK_TRUE
     };
 
@@ -85,7 +85,7 @@ struct Swapchain create_swapchain(const struct Machine *machine, WINDOW w) {
     VK_CHECK(vkCreateSwapchainKHR(machine->device, &swapchain_info, NULL, &swapchain.swapchain));
 
     VK_CHECK(vkGetSwapchainImagesKHR(machine->device, swapchain.swapchain, &min_image_count, NULL));
-    assert(min_image_count <= MAX_SWAPCHAIN_IMAGES);
+    if(min_image_count > MAX_SWAPCHAIN_IMAGES) {printf("Too many swapchain images; can handle %d but got %d\n", MAX_SWAPCHAIN_IMAGES, min_image_count); _exit(0);};
     swapchain.swapchain_image_count = min_image_count;
     VK_CHECK(vkGetSwapchainImagesKHR(machine->device, swapchain.swapchain, &min_image_count, swapchain.swapchain_images));
     for (uint32_t i = 0; i < min_image_count; ++i) {

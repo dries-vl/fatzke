@@ -4,9 +4,6 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
-#include <stdint.h>
-#include <stdio.h>
-
 #ifndef GET_X_LPARAM
 #define GET_X_LPARAM(lp) ((int)(short)LOWORD(lp))
 #endif
@@ -18,7 +15,7 @@
 static LARGE_INTEGER qpf = {0};
 u64 pf_ticks_to_ns(u64 qpc){
     if (!qpf.QuadPart){ QueryPerformanceFrequency(&qpf); }
-    return (uint64_t)((__int128)qpc * 1000000000ULL / (uint64_t)qpf.QuadPart);
+    return (u64)(qpc * 1000000000ULL / (u64)qpf.QuadPart);
 }
 u64 pf_ns_now(void){
     LARGE_INTEGER qpc; QueryPerformanceCounter(&qpc);
@@ -29,7 +26,7 @@ u64 pf_ns_start(void){ return T0_ns; }
 void pf_time_reset(void){ T0_ns = pf_ns_now(); }
 void pf_timestamp(char* msg){
     u64 t = pf_ns_now();
-    printf("[+%7.3f ms] %s\n", (double)(int64_t)(t - T0_ns)/1e6, msg ? msg : "");
+    printf("[+%7.3f ms] %s\n", (double)(i64)(t - T0_ns)/1e6, msg ? msg : "");
 }
 
 /* --- window state --- */
@@ -47,7 +44,7 @@ struct win32_window {
 
     /* timing (rough; default 60 Hz) */
     u64 refresh_ns;
-};
+} window;
 
 /* forward decl for wndproc */
 static LRESULT CALLBACK wndproc(HWND, UINT, WPARAM, LPARAM);
@@ -91,7 +88,7 @@ WINDOW pf_create_window(void* ud, KEYBOARD_CB key_cb, MOUSE_CB mouse_cb){
     wc.lpfnWndProc = wndproc;
     wc.hInstance = hi;
     wc.lpszClassName = L"pf_win32_cls";
-    wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
+    wc.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
     RegisterClassW(&wc);
 
     /* primary monitor size */
@@ -107,13 +104,11 @@ WINDOW pf_create_window(void* ud, KEYBOARD_CB key_cb, MOUSE_CB mouse_cb){
 
     if (!hwnd){ printf("CreateWindowEx failed\n"); ExitProcess(1); }
 
-    /* allocate state and attach */
-    struct win32_window* w = (struct win32_window*)calloc(1, sizeof *w);
-    w->hwnd = hwnd; w->hinst = hi; w->w = sw; w->h = sh; w->visible = 0;
-    w->on_key = key_cb; w->on_mouse = mouse_cb; w->cb_ud = ud;
-    w->refresh_ns = refresh_ns;
+    window.hwnd = hwnd; window.hinst = hi; window.w = sw; window.h = sh; window.visible = 0;
+    window.on_key = key_cb; window.on_mouse = mouse_cb; window.cb_ud = ud;
+    window.refresh_ns = refresh_ns;
 
-    SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)w);
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)&window);
 
     /* make it topmost fullscreen */
     SetWindowPos(hwnd, HWND_TOP, 0, 0, sw, sh, SWP_SHOWWINDOW);
@@ -132,7 +127,7 @@ WINDOW pf_create_window(void* ud, KEYBOARD_CB key_cb, MOUSE_CB mouse_cb){
     pf_time_reset();
     pf_timestamp("win32 window ready");
     pf_timestamp("set up win32");
-    return (WINDOW)w;
+    return &window;
 }
 
 /* --- input helpers --- */

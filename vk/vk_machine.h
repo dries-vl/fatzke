@@ -32,7 +32,7 @@ struct Machine create_machine(WINDOW window) {
 #endif
 #if DEBUG_VULKAN == 1
     extensions[2] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME; extension_count++;
-    const char* layers[] = { "VK_LAYER_KHRONOS_validation" };
+    const char* layers[1] = { "VK_LAYER_KHRONOS_validation" };
     const uint32_t layer_count = 1;
     VkDebugUtilsMessengerCreateInfoEXT *debugCreateInfo = &(VkDebugUtilsMessengerCreateInfoEXT){
         .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
@@ -183,8 +183,8 @@ struct Machine create_machine(WINDOW window) {
 
     static const char* kRequiredDeviceExtensions[] = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-        VK_KHR_PRESENT_ID_EXTENSION_NAME,
-        VK_KHR_PRESENT_WAIT_EXTENSION_NAME,
+        // VK_KHR_PRESENT_ID_EXTENSION_NAME,
+        // VK_KHR_PRESENT_WAIT_EXTENSION_NAME,
         VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME
     };
     VkDeviceCreateInfo device_info = {
