@@ -71,14 +71,14 @@ void cs_build_visible(uint3 tid : SV_DispatchThreadID) {
     t_view.z = -camera_pitch_sin * t_yaw.y + camera_pitch_cos * t_yaw.z; // apply -pitch to Y/Z
     t_view.x =  t_yaw.x;
 
-    // Quantize and pack
-    int tx_cm = (int)round(t_view.x);
-    int ty_cm = (int)round(t_view.y);
-    int tz_cm = (int)round(t_view.z);
+    // convert to int again
+    int tx_dm = (int)round(t_view.x);
+    int ty_dm = (int)round(t_view.y);
+    int tz_dm = (int)round(t_view.z);
 
     // pack rotated by yaw
-    uint packed0 = (uint)((tx_cm & 0xFFFF) | ((ty_cm & 0xFFFF) << 16));
-    uint packed1 = (uint)((tz_cm & 0xFFFF) | (((int)round(cos_delta * 127.0f) & 0xFF) << 16) | (((int)round(sin_delta * 127.0f) & 0xFF) << 24));
+    uint packed0 = (uint)((tx_dm & 0xFFFF) | ((td_cm & 0xFFFF) << 16));
+    uint packed1 = (uint)((tz_dm & 0xFFFF) | (((int)round(cos_delta * 127.0f) & 0xFF) << 16) | (((int)round(sin_delta * 127.0f) & 0xFF) << 24));
 
     uint slot; InterlockedAdd(COUNTERS[0].instance_count, 1, slot);        // atomic append
     VISIBLE_PACKED[slot] = uint2(packed0, packed1);                        // write visible instance
@@ -91,9 +91,6 @@ void cs_prepare_indirect() {
     COUNTERS[0].base_vertex    = 0;                                        // base vertex
     COUNTERS[0].first_instance = 0;                                        // first instance index
 }
-
-float clamp_unit(float v)   { return max(-1.0f, min(1.0f, v)); }           // clamp to [-1,1]
-float replace_nan(float v, float repl) { return (v == v) ? v : repl; }     // replace NaN with fallback
 
 struct vs_out {
     float4 pos    : SV_Position;                                           // clip-space position

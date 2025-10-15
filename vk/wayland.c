@@ -17,6 +17,12 @@
 // sudo wayland-scanner private-code /usr/share/wayland-protocols/stable/presentation-time/presentation-time.xml /usr/include/drm-lease-v1-client-protocol.c
 // #include <drm-lease-v1-client-protocol.h>
 // #include <drm-lease-v1-client-protocol.c>
+// sudo apt install libxkbcommon-dev
+#include <xkbcommon/xkbcommon.h>
+
+// todo: get rid of these and also of the calloc down in create_window
+#include <sys/mman.h>
+#include <unistd.h>
 
 static clockid_t clockid;
 u64 pf_ns_now(void){
@@ -31,6 +37,95 @@ void pf_timestamp(char *msg) {
     u64 _t=pf_ns_now(); 
     printf("[+%7.3f ms] %s\n",(_t-T0)/1e6,(msg));
     #endif
+}
+
+static enum KEYBOARD_BUTTON map_keysym_to_button(xkb_keysym_t sym) {
+    switch (sym) {
+        case XKB_KEY_Escape:     return KEYBOARD_ESCAPE;
+
+        case XKB_KEY_Return:     return KEYBOARD_ENTER;
+        case XKB_KEY_KP_Enter:   return KEYBOARD_ENTER;
+        case XKB_KEY_BackSpace:  return KEYBOARD_BACKSPACE;
+        case XKB_KEY_Tab:        return KEYBOARD_TAB;
+        case XKB_KEY_space:      return KEYBOARD_SPACE;
+
+        case XKB_KEY_Left:       return KEYBOARD_LEFT;
+        case XKB_KEY_Right:      return KEYBOARD_RIGHT;
+        case XKB_KEY_Up:         return KEYBOARD_UP;
+        case XKB_KEY_Down:       return KEYBOARD_DOWN;
+
+        case XKB_KEY_Home:       return KEYBOARD_HOME;
+        case XKB_KEY_End:        return KEYBOARD_END;
+        case XKB_KEY_Page_Up:    return KEYBOARD_PAGEUP;
+        case XKB_KEY_Page_Down:  return KEYBOARD_PAGEDOWN;
+        case XKB_KEY_Insert:     return KEYBOARD_INSERT;
+        case XKB_KEY_Delete:     return KEYBOARD_DELETE;
+
+        case XKB_KEY_F1:  return KEYBOARD_F1;
+        case XKB_KEY_F2:  return KEYBOARD_F2;
+        case XKB_KEY_F3:  return KEYBOARD_F3;
+        case XKB_KEY_F4:  return KEYBOARD_F4;
+        case XKB_KEY_F5:  return KEYBOARD_F5;
+        case XKB_KEY_F6:  return KEYBOARD_F6;
+        case XKB_KEY_F7:  return KEYBOARD_F7;
+        case XKB_KEY_F8:  return KEYBOARD_F8;
+        case XKB_KEY_F9:  return KEYBOARD_F9;
+        case XKB_KEY_F10: return KEYBOARD_F10;
+        case XKB_KEY_F11: return KEYBOARD_F11;
+        case XKB_KEY_F12: return KEYBOARD_F12;
+
+        // modifiers (you’ll typically track via kb_modifiers, but mapping here is fine if your API wants them)
+        case XKB_KEY_Shift_L:
+        case XKB_KEY_Shift_R:    return KEYBOARD_SHIFT;
+        case XKB_KEY_Control_L:
+        case XKB_KEY_Control_R:  return KEYBOARD_CTRL;
+        case XKB_KEY_Alt_L:
+        case XKB_KEY_Alt_R:      return KEYBOARD_ALT;
+        case XKB_KEY_Super_L:
+        case XKB_KEY_Super_R:    return KEYBOARD_SUPER;
+
+        // digits (top row)
+        case XKB_KEY_0: return KEYBOARD_0;
+        case XKB_KEY_1: return KEYBOARD_1;
+        case XKB_KEY_2: return KEYBOARD_2;
+        case XKB_KEY_3: return KEYBOARD_3;
+        case XKB_KEY_4: return KEYBOARD_4;
+        case XKB_KEY_5: return KEYBOARD_5;
+        case XKB_KEY_6: return KEYBOARD_6;
+        case XKB_KEY_7: return KEYBOARD_7;
+        case XKB_KEY_8: return KEYBOARD_8;
+        case XKB_KEY_9: return KEYBOARD_9;
+
+        // letters
+        case XKB_KEY_a: case XKB_KEY_A: return KEYBOARD_A;
+        case XKB_KEY_b: case XKB_KEY_B: return KEYBOARD_B;
+        case XKB_KEY_c: case XKB_KEY_C: return KEYBOARD_C;
+        case XKB_KEY_d: case XKB_KEY_D: return KEYBOARD_D;
+        case XKB_KEY_e: case XKB_KEY_E: return KEYBOARD_E;
+        case XKB_KEY_f: case XKB_KEY_F: return KEYBOARD_F;
+        case XKB_KEY_g: case XKB_KEY_G: return KEYBOARD_G;
+        case XKB_KEY_h: case XKB_KEY_H: return KEYBOARD_H;
+        case XKB_KEY_i: case XKB_KEY_I: return KEYBOARD_I;
+        case XKB_KEY_j: case XKB_KEY_J: return KEYBOARD_J;
+        case XKB_KEY_k: case XKB_KEY_K: return KEYBOARD_K;
+        case XKB_KEY_l: case XKB_KEY_L: return KEYBOARD_L;
+        case XKB_KEY_m: case XKB_KEY_M: return KEYBOARD_M;
+        case XKB_KEY_n: case XKB_KEY_N: return KEYBOARD_N;
+        case XKB_KEY_o: case XKB_KEY_O: return KEYBOARD_O;
+        case XKB_KEY_p: case XKB_KEY_P: return KEYBOARD_P;
+        case XKB_KEY_q: case XKB_KEY_Q: return KEYBOARD_Q;
+        case XKB_KEY_r: case XKB_KEY_R: return KEYBOARD_R;
+        case XKB_KEY_s: case XKB_KEY_S: return KEYBOARD_S;
+        case XKB_KEY_t: case XKB_KEY_T: return KEYBOARD_T;
+        case XKB_KEY_u: case XKB_KEY_U: return KEYBOARD_U;
+        case XKB_KEY_v: case XKB_KEY_V: return KEYBOARD_V;
+        case XKB_KEY_w: case XKB_KEY_W: return KEYBOARD_W;
+        case XKB_KEY_x: case XKB_KEY_X: return KEYBOARD_X;
+        case XKB_KEY_y: case XKB_KEY_Y: return KEYBOARD_Y;
+        case XKB_KEY_z: case XKB_KEY_Z: return KEYBOARD_Z;
+
+        default: return KEYBOARD_BUTTON_UNKNOWN;
+    }
 }
 
 struct wayland_window {
@@ -54,6 +149,13 @@ struct wayland_window {
     struct wl_keyboard* kbd;
     struct wl_pointer* ptr;
 
+    // xkbcommon
+    struct xkb_context* xkb_ctx;
+    struct xkb_keymap*  xkb_keymap;
+    struct xkb_state*   xkb_state;
+    int                 kbd_repeat_rate;   // repeats/sec
+    int                 kbd_repeat_delay;  // ms
+
     // keep state
     i32 win_w, win_h;
     i32 mouse_x, mouse_y;
@@ -68,17 +170,78 @@ struct wayland_window {
     void *callback_data;
 };
 
-void kb_keymap(void* data, struct wl_keyboard* k, u32 format, i32 fd, u32 size) { }
 void kb_enter(void* data, struct wl_keyboard* k, u32 serial, struct wl_surface* surface, struct wl_array* keys) { }
 void kb_leave(void* data, struct wl_keyboard* k, u32 serial, struct wl_surface* surface) { }
-void kb_key(void* data, struct wl_keyboard* k, u32 serial, u32 time, u32 key, u32 state){
-    struct wayland_window* w = (struct wayland_window*)data;
-    enum KEYBOARD_BUTTON button = KEYBOARD_BUTTON_UNKNOWN;
-    if (key == 1) button = KEYBOARD_ESCAPE;
-    if (w && w->on_key) w->on_key(w->callback_data, button, state);
+void kb_keymap(void* data, struct wl_keyboard* k, u32 format, i32 fd, u32 size) {
+    struct wayland_window* w = data;
+    if (!w) { close(fd); return; }
+
+    if (format != WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1) {
+        close(fd);
+        return;
+    }
+
+    void* map_shm = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (map_shm == MAP_FAILED) {
+        close(fd);
+        return;
+    }
+
+    if (w->xkb_keymap) xkb_keymap_unref(w->xkb_keymap), w->xkb_keymap = NULL;
+    if (w->xkb_state)  xkb_state_unref(w->xkb_state),   w->xkb_state  = NULL;
+
+    w->xkb_keymap = xkb_keymap_new_from_string(
+        w->xkb_ctx,
+        (const char*)map_shm,
+        XKB_KEYMAP_FORMAT_TEXT_V1,
+        XKB_KEYMAP_COMPILE_NO_FLAGS
+    );
+    munmap(map_shm, size);
+    close(fd);
+
+    if (!w->xkb_keymap) return;
+
+    w->xkb_state = xkb_state_new(w->xkb_keymap);
 }
-void kb_modifiers(void* data, struct wl_keyboard* k, u32 serial, u32 dep, u32 lat, u32 lock, u32 group){ }
-void kb_repeat_info(void* data, struct wl_keyboard* k, i32 rate, i32 delay){ }
+
+void kb_modifiers(void* data, struct wl_keyboard* k, u32 serial,
+                  u32 dep, u32 lat, u32 lock, u32 group) {
+    struct wayland_window* w = data;
+    if (!w || !w->xkb_state) return;
+
+    xkb_state_update_mask(
+        w->xkb_state,
+        dep, lat, lock,
+        0, 0, group
+    );
+}
+
+void kb_repeat_info(void* data, struct wl_keyboard* k, i32 rate, i32 delay) {
+    struct wayland_window* w = data;
+    if (!w) return;
+    // rate: repeats per second (0 => disabled), delay: ms before first repeat
+    w->kbd_repeat_rate  = rate;
+    w->kbd_repeat_delay = delay;
+}
+
+void kb_key(void* data, struct wl_keyboard* k, u32 serial, u32 time, u32 key, u32 state) {
+    struct wayland_window* w = data;
+    if (!w || !w->on_key) return;
+
+    // Wayland 'key' is evdev code. xkbcommon expects keycodes starting at 8.
+    xkb_keycode_t kc = (xkb_keycode_t)(key + 8);
+
+    enum KEYBOARD_BUTTON button = KEYBOARD_BUTTON_UNKNOWN;
+    if (w->xkb_state) {
+        xkb_keysym_t sym = xkb_state_key_get_one_sym(w->xkb_state, kc);
+        button = map_keysym_to_button(sym);
+    } else {
+        // Fallback if xkb isn't ready yet: keep ESC handling
+        if (key == 1) button = KEYBOARD_ESCAPE;
+    }
+
+    w->on_key(w->callback_data, button, state);
+}
 
 const struct wl_keyboard_listener* get_kb_listener(void){
     static const struct wl_keyboard_listener kb_l = {
@@ -361,8 +524,11 @@ void *pf_create_window(void *ud, KEYBOARD_CB key_cb, MOUSE_CB mouse_cb){
     w->last_feedback_ns = 0;
     w->phase_ns = 0;
     w->phase_alpha = 0.10;
-
+    w->xkb_ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+    w->kbd_repeat_rate  = 0;
+    w->kbd_repeat_delay = 600; // compositor may override in kb_repeat_info
     w->display = wl_display_connect(NULL);
+
     if (!w->display){ printf("wl connect failed\n"); _exit(1); }
 
     struct wl_registry* reg = wl_display_get_registry(w->display);

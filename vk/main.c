@@ -123,8 +123,13 @@ static void upload_to_buffer(VkDevice dev, VkDeviceMemory mem, size_t bytes, con
 }
 
 #pragma region MAIN
+i16 cam_x = 0, cam_y = 5, cam_z = -20, cam_yaw = 0, cam_pitch = 0;
 void key_input_callback(void* ud, enum KEYBOARD_BUTTON key, enum INPUT_STATE state) {
     if (key == KEYBOARD_ESCAPE) {_exit(0);}
+    if (key == KEYBOARD_W && state == PRESSED) { cam_z += 10; }
+    if (key == KEYBOARD_R && state == PRESSED) { cam_z -= 10; }
+    if (key == KEYBOARD_A && state == PRESSED) { cam_x -= 10; }
+    if (key == KEYBOARD_S && state == PRESSED) { cam_x += 10; }
     printf("key %d state %d\n", key, state);
 }
 void mouse_input_callback(void* ud, i32 x, i32 y, enum MOUSE_BUTTON button, enum INPUT_STATE state) {}
@@ -557,11 +562,6 @@ int main(void) {
         if (acquire_result != VK_SUCCESS && acquire_result != VK_SUBOPTIMAL_KHR) { printf("vkAcquireNextImageKHR failed: %d\n", acquire_result); break; }
         
         #pragma region update uniforms
-        i16 cam_x = 0, cam_y = 5, cam_z = -20;
-        static i16 cam_yaw = 0;
-        cam_yaw += 10;
-        static i16 cam_pitch = 0;
-        cam_pitch += 10;
         struct Uniforms u = {0};
         encode_uniforms(&u, cam_x, cam_y, cam_z, cam_yaw, cam_pitch);
         void*dst=NULL;
