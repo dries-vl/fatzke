@@ -100,8 +100,8 @@ void cs_build_visible(uint3 tid : SV_DispatchThreadID) {
     int ty_cm = (int)round(t_view.y);
     int tz_cm = (int)round(t_view.z);
 
-    uint packed0 = (uint)((tx_cm & 0xFFFF) | ((tz_cm & 0xFFFF) << 16));   // pack x/z
-    uint packed1 = (uint)((ty_cm & 0xFFFF)
+    uint packed0 = (uint)((tx_cm & 0xFFFF) | ((ty_cm & 0xFFFF) << 16));   // pack x/z
+    uint packed1 = (uint)((tz_cm & 0xFFFF)
                  | (((int)round(cos_delta * 127.0f) & 0xFF) << 16)
                  | (((int)round(sin_delta * 127.0f) & 0xFF) << 24));      // pack y + Δyaw
 
@@ -129,28 +129,30 @@ struct vs_out {
 [shader("vertex")]
 vs_out vs_main(uint vertex_id : SV_VertexID, [[vk::location(0)]] uint2 visible_data, [[vk::location(1)]] float2 in_uv) {
     // Unpack visible instance data
-    int2 xz_cm = unpack_i16x2(visible_data.x) * 10;
-    int  y_cm  = (int)((int16_t)(visible_data.y & 0xFFFFu)) * 10;
-    int  cos_q = (int)((int8_t)((visible_data.y >> 16) & 0xFFu));
-    int  sin_q = (int)((int8_t)((visible_data.y >> 24) & 0xFFu));
-
-    float3 t_view_m = float3((float)xz_cm.x, (float)y_cm, (float)xz_cm.y);
-    float  cos_d = (float)cos_q * divide_by_127;
-    float  sin_d = (float)sin_q * divide_by_127;
+    int instance_x = 10 * (int)((int16_t)(visible_data.x & 0xFFFF));
+    int instance_y = 10 * (int)((int16_t)((visible_data.x >> 16) & 0xFFFF));
+    int instance_z = 10 * (int)((int16_t)(visible_data.y & 0xFFFF));
+    int cos_q = (int)((int8_t)((visible_data.y >> 16) & 0xFFu));
+    int sin_q = (int)((int8_t)((visible_data.y >> 24) & 0xFFu));
+    float cos_d = (float)cos_q * divide_by_127;
+    float sin_d = (float)sin_q * divide_by_127;
 
     // fetch vertex data
     uint packed = POSITIONS[vertex_id];
-    int x = (int)( packed        & 0x3FF);
-    int y = (int)((packed >> 10) & 0x3FF);
-    int z = (int)((packed >> 20) & 0x3FF);
-    x = (x << 22) >> 22; y = (y << 22) >> 22; z = (z << 22) >> 22;
-    float3 vertex = float3(x, y, z);
+    int vertex_x = (int)( packed        & 0x3FF);
+    vertex_x = (vertex_x << 22) >> 22;
+    int vertex_y = (int)((packed >> 10) & 0x3FF);
+    vertex_y = (vertex_y << 22) >> 22;
+    int vertex_z = (int)((packed >> 20) & 0x3FF);
+    vertex_z = (vertex_z << 22) >> 22;
 
     packed = NORMALS[vertex_id];
     int r = (int)( packed        & 0x3FF);
+    r = (r << 22) >> 22;
     int g = (int)((packed >> 10) & 0x3FF);
+    g = (g << 22) >> 22;
     int b = (int)((packed >> 20) & 0x3FF);
-    r = (r << 22) >> 22; g = (g << 22) >> 22; b = (b << 22) >> 22;
+    b = (b << 22) >> 22;
     float3 normal = float3(r * divide_by_511, g * divide_by_511, b * divide_by_511);
 
     // Decode camera pitch
@@ -162,9 +164,9 @@ vs_out vs_main(uint vertex_id : SV_VertexID, [[vk::location(0)]] uint2 visible_d
     }
 
     // 1) Rotate around Y by Δyaw
-    float x1 =  cos_d * vertex.x + sin_d * vertex.z;
-    float z1 = -sin_d * vertex.x + cos_d * vertex.z;
-    float y1 =  vertex.y;
+    float x1 =  cos_d * vertex_x + sin_d * vertex_z;
+    float z1 = -sin_d * vertex_x + cos_d * vertex_z;
+    float y1 =  vertex_y;
 
     // 2) Apply -pitch rotation
     float c = cam_pitch.x, s = cam_pitch.y;
@@ -173,9 +175,9 @@ vs_out vs_main(uint vertex_id : SV_VertexID, [[vk::location(0)]] uint2 visible_d
     float x2 =  x1;
 
     // 3) Translate to instance origin
-    float vx = x2 + t_view_m.x;
-    float vy = y2 + t_view_m.y;
-    float vz = z2 + t_view_m.z;
+    float vx = x2 + instance_x;
+    float vy = y2 + instance_y;
+    float vz = z2 + instance_z;
 
     // Sanitize values
     cos_d = clamp_unit(replace_nan(cos_d, 1.0f));
