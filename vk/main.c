@@ -557,14 +557,14 @@ int main(void) {
         if (acquire_result != VK_SUCCESS && acquire_result != VK_SUBOPTIMAL_KHR) { printf("vkAcquireNextImageKHR failed: %d\n", acquire_result); break; }
         
         #pragma region update uniforms
-        i16 cam_x = 0, cam_y = 20, cam_z = -100;
+        i16 cam_x = 0, cam_y = 5, cam_z = -20;
         static i16 cam_yaw = 0;
-        // cam_yaw += 1;
+        cam_yaw += 1;
         static i16 cam_pitch = 0;
         cam_pitch += 1;
         struct Uniforms u = {0};
         encode_uniforms(&u, cam_x, cam_y, cam_z, cam_yaw, cam_pitch);
-        void* dst=NULL;
+        void*dst=NULL;
         VK_CHECK(vkMapMemory(machine.device, renderer.memory_uniforms, 0, sizeof u, 0, &dst));
         memcpy(dst, &u, sizeof u);
         vkUnmapMemory(machine.device, renderer.memory_uniforms);
