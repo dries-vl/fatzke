@@ -22,16 +22,6 @@ struct mdi {
 static const uint vertices_per_mesh = 192;   // total vertices per mesh
 static const uint indices_per_mesh  = 1116;  // total indices per mesh
 
-// Decode R10G10B10A2_SNORM → float3 in [-1,1]
-float3 unpack_r10g10b10a2_snorm(uint packed) {
-    int r = (int)( packed        & 0x3FF);
-    int g = (int)((packed >> 10) & 0x3FF);
-    int b = (int)((packed >> 20) & 0x3FF);
-    r = (r << 22) >> 22; g = (g << 22) >> 22; b = (b << 22) >> 22;         // sign-extend 10-bit values
-    float s = 1.0f / 511.0f;                                              // normalize from [-511,+511] to [-1,+1]
-    return float3(r * s, g * s, b * s);                                   // return normalized color vector
-}
-
 // Decode signed X/Z (i16 each) from packed uint → float2 in decimeters
 float2 decode_xz_dm(uint packed) {
     int x = (int)(packed & 0xFFFF);      x = (x << 16) >> 16;              // extract signed X
@@ -137,10 +127,7 @@ struct vs_out {
 };
 
 [shader("vertex")]
-vs_out vs_main(uint vertex_id : SV_VertexID,
-                   [[vk::location(0)]] uint2 visible_data,
-                   [[vk::location(1)]] float2 in_uv)
-{
+vs_out vs_main(uint vertex_id : SV_VertexID, [[vk::location(0)]] uint2 visible_data, [[vk::location(1)]] float2 in_uv) {
     // Unpack visible instance data
     int2 xz_cm = unpack_i16x2(visible_data.x) * 10;
     int  y_cm  = (int)((int16_t)(visible_data.y & 0xFFFFu)) * 10;
@@ -151,9 +138,20 @@ vs_out vs_main(uint vertex_id : SV_VertexID,
     float  cos_d = (float)cos_q * divide_by_127;
     float  sin_d = (float)sin_q * divide_by_127;
 
-    // Fetch vertex data
-    float3 pos_local = unpack_r10g10b10a2_snorm(POSITIONS[vertex_id]);
-    float3 normal = unpack_r10g10b10a2_snorm(NORMALS[vertex_id]);
+    // fetch vertex data
+    uint packed = POSITIONS[vertex_id];
+    int x = (int)( packed        & 0x3FF);
+    int y = (int)((packed >> 10) & 0x3FF);
+    int z = (int)((packed >> 20) & 0x3FF);
+    x = (x << 22) >> 22; y = (y << 22) >> 22; z = (z << 22) >> 22;
+    float3 vertex = float3(x, y, z);
+
+    packed = NORMALS[vertex_id];
+    int r = (int)( packed        & 0x3FF);
+    int g = (int)((packed >> 10) & 0x3FF);
+    int b = (int)((packed >> 20) & 0x3FF);
+    r = (r << 22) >> 22; g = (g << 22) >> 22; b = (b << 22) >> 22;
+    float3 normal = float3(r * divide_by_511, g * divide_by_511, b * divide_by_511);
 
     // Decode camera pitch
     float2 cam_pitch;
@@ -164,9 +162,9 @@ vs_out vs_main(uint vertex_id : SV_VertexID,
     }
 
     // 1) Rotate around Y by Δyaw
-    float x1 =  cos_d * pos_local.x + sin_d * pos_local.z;
-    float z1 = -sin_d * pos_local.x + cos_d * pos_local.z;
-    float y1 =  pos_local.y;
+    float x1 =  cos_d * vertex.x + sin_d * vertex.z;
+    float z1 = -sin_d * vertex.x + cos_d * vertex.z;
+    float y1 =  vertex.y;
 
     // 2) Apply -pitch rotation
     float c = cam_pitch.x, s = cam_pitch.y;
