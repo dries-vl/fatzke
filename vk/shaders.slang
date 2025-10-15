@@ -10,6 +10,8 @@ static const float depth_b            = -far_plane * near_plane / (far_plane - n
 static const float divide_by_127      = float(1.0/127.0);
 static const float divide_by_511      = float(1.0/511.0);
 static const float divide_by_32767    = float(1.0/32767.0);
+static const uint vertices_per_mesh = 192;   // total vertices per mesh
+static const uint indices_per_mesh  = 1116;  // total indices per mesh
 
 struct mdi {
     uint index_count;             // number of indices per draw call
@@ -19,37 +21,10 @@ struct mdi {
     uint first_instance;          // first instance index
 };
 
-static const uint vertices_per_mesh = 192;   // total vertices per mesh
-static const uint indices_per_mesh  = 1116;  // total indices per mesh
-
-// Decode signed X/Z (i16 each) from packed uint → float2 in decimeters
-float2 decode_xz_dm(uint packed) {
-    int x = (int)(packed & 0xFFFF);      x = (x << 16) >> 16;              // extract signed X
-    int z = (int)(packed >> 16);         z = (z << 16) >> 16;              // extract signed Z
-    return float2((float)x, (float)z);                                    // return decimeter values
-}
-
-// Decode yaw byte → radians [0, 2π)
-float decode_yaw_u8(uint packed) {
-    return (float(packed & 0xFFu) * (2.0f * PI)) / 255.0f;                // scale byte range to 0..2π
-}
-
-// Extract mesh ID from bits [15:8]
-uint decode_mesh_id(uint packed) {
-    return (packed >> 8) & 0xFFu;                                         // return mesh id
-}
-
-// Unpack two signed 16-bit integers from uint
-int2 unpack_i16x2(uint packed) {
-    int16_t lo = (int16_t)(packed & 0xFFFFu);
-    int16_t hi = (int16_t)((packed >> 16) & 0xFFFFu);
-    return int2(lo, hi);                                                  // return (lo, hi)
-}
-
-[[vk::binding(0,0)]] StructuredBuffer<uint2> INSTANCES;
-[[vk::binding(1,0)]] RWStructuredBuffer<uint2> VISIBLE_PACKED;
-[[vk::binding(2,0)]] RWStructuredBuffer<mdi> COUNTERS;
-[[vk::binding(3,0)]] StructuredBuffer<uint> POSITIONS; // R10G10B10A2_SNORM
+[[vk::binding(0,0)]] StructuredBuffer<uint2> INSTANCES; // 6 bytes position + 2 bytes cos/sin
+[[vk::binding(1,0)]] RWStructuredBuffer<uint2> VISIBLE_PACKED; // 6 bytes position + 2 bytes cos/sin
+[[vk::binding(2,0)]] RWStructuredBuffer<mdi> COUNTERS; // MDI
+[[vk::binding(3,0)]] StructuredBuffer<uint> POSITIONS; // R10G10B10A2
 [[vk::binding(4,0)]] StructuredBuffer<uint> NORMALS;   // R10G10B10A2_SNORM
 [[vk::binding(5,0)]]
 cbuffer uniforms {
@@ -62,8 +37,8 @@ void cs_build_visible(uint3 tid : SV_DispatchThreadID) {
     uint instance_count, stride; INSTANCES.GetDimensions(instance_count, stride);
     if (id >= instance_count) return;
 
-    uint2 instance = INSTANCES[id];
-    uint4 camera   = CAMERA_DATA;
+    uint2 instance = INSTANCES[id];    // 8 bytes
+    uint4 camera   = CAMERA_DATA.xyzw; // 16 bytes
 
     // get position, represented as dm
     float3 position = float3(
@@ -73,12 +48,12 @@ void cs_build_visible(uint3 tid : SV_DispatchThreadID) {
     );
 
     // unpack yaw and pitch
-    float instance_yaw_cos = float((int8_t)( instance.y >> 16 & 0xFF)) * divide_by_127;
-    float instance_yaw_sin = float((int8_t)( instance.y >> 24 & 0xFF)) * divide_by_127;
-    float camera_pitch_cos = float((int16_t)(camera.y >> 16   & 0xFFFF)) * divide_by_32767;
-    float camera_pitch_sin = float((int16_t)(camera.z         & 0xFFFF)) * divide_by_32767;
-    float camera_yaw_cos   = float((int16_t)(camera.z >> 16   & 0xFFFF)) * divide_by_32767;
-    float camera_yaw_sin   = float((int16_t)(camera.w         & 0xFFFF)) * divide_by_32767;
+    float instance_yaw_cos = float((int8_t)(instance.y >> 16 & 0xFF))   * divide_by_127;
+    float instance_yaw_sin = float((int8_t)(instance.y >> 24 & 0xFF))   * divide_by_127;
+    float camera_pitch_sin = float((int16_t)(camera.z        & 0xFFFF)) * divide_by_32767;
+    float camera_pitch_cos = float((int16_t)(camera.z  >> 16 & 0xFFFF)) * divide_by_32767;
+    float camera_yaw_sin   = float((int16_t)(camera.w        & 0xFFFF)) * divide_by_32767;
+    float camera_yaw_cos   = float((int16_t)(camera.w  >> 16 & 0xFFFF)) * divide_by_32767;
 
     // compute combined yaw between instance and camera
     float cos_delta =  instance_yaw_cos * camera_yaw_cos + instance_yaw_sin * camera_yaw_sin; // cos(a-b)
@@ -89,6 +64,7 @@ void cs_build_visible(uint3 tid : SV_DispatchThreadID) {
     t_yaw.x =  camera_yaw_cos * position.x - camera_yaw_sin * position.z; // apply -yaw to X/Z
     t_yaw.z =  camera_yaw_sin * position.x + camera_yaw_cos * position.z; // apply -yaw to X/Z
     t_yaw.y =  position.y;
+
     // apply -pitch
     float3 t_view;
     t_view.y =  camera_pitch_cos * t_yaw.y + camera_pitch_sin * t_yaw.z; // apply -pitch to Y/Z
@@ -100,10 +76,9 @@ void cs_build_visible(uint3 tid : SV_DispatchThreadID) {
     int ty_cm = (int)round(t_view.y);
     int tz_cm = (int)round(t_view.z);
 
-    uint packed0 = (uint)((tx_cm & 0xFFFF) | ((ty_cm & 0xFFFF) << 16));   // pack x/z
-    uint packed1 = (uint)((tz_cm & 0xFFFF)
-                 | (((int)round(cos_delta * 127.0f) & 0xFF) << 16)
-                 | (((int)round(sin_delta * 127.0f) & 0xFF) << 24));      // pack y + Δyaw
+    // pack rotated by yaw
+    uint packed0 = (uint)((tx_cm & 0xFFFF) | ((ty_cm & 0xFFFF) << 16));
+    uint packed1 = (uint)((tz_cm & 0xFFFF) | (((int)round(cos_delta * 127.0f) & 0xFF) << 16) | (((int)round(sin_delta * 127.0f) & 0xFF) << 24));
 
     uint slot; InterlockedAdd(COUNTERS[0].instance_count, 1, slot);        // atomic append
     VISIBLE_PACKED[slot] = uint2(packed0, packed1);                        // write visible instance
@@ -127,66 +102,48 @@ struct vs_out {
 };
 
 [shader("vertex")]
-vs_out vs_main(uint vertex_id : SV_VertexID, [[vk::location(0)]] uint2 visible_data, [[vk::location(1)]] float2 in_uv) {
-    // Unpack visible instance data
-    int instance_x = 10 * (int)((int16_t)(visible_data.x & 0xFFFF));
-    int instance_y = 10 * (int)((int16_t)((visible_data.x >> 16) & 0xFFFF));
-    int instance_z = 10 * (int)((int16_t)(visible_data.y & 0xFFFF));
-    int cos_q = (int)((int8_t)((visible_data.y >> 16) & 0xFFu));
-    int sin_q = (int)((int8_t)((visible_data.y >> 24) & 0xFFu));
-    float cos_d = (float)cos_q * divide_by_127;
-    float sin_d = (float)sin_q * divide_by_127;
+vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] uint2 INSTANCE, [[vk::location(1)]] float2 UV) {
+    // fetch and unpack visible instance data, convert dm to cm (8 bytes)
+    uint2 packed_instance = INSTANCE.xy;
+    int instance_x = 10 * (int)((int16_t)( packed_instance.x        & 0xFFFF));
+    int instance_y = 10 * (int)((int16_t)((packed_instance.x >> 16) & 0xFFFF));
+    int instance_z = 10 * (int)((int16_t)( packed_instance.y        & 0xFFFF));
+    float cos_d = float(((int8_t)((packed_instance.y >> 16) & 0xFFu))) * divide_by_127;
+    float sin_d = float(((int8_t)((packed_instance.y >> 24) & 0xFFu))) * divide_by_127;
 
-    // fetch vertex data
-    uint packed = POSITIONS[vertex_id];
-    int vertex_x = (int)( packed        & 0x3FF);
-    vertex_x = (vertex_x << 22) >> 22;
-    int vertex_y = (int)((packed >> 10) & 0x3FF);
-    vertex_y = (vertex_y << 22) >> 22;
-    int vertex_z = (int)((packed >> 20) & 0x3FF);
-    vertex_z = (vertex_z << 22) >> 22;
+    // fetch and unpack vertex position, represented as cm (4 bytes)
+    uint packed_vertex = POSITIONS[VERTEX_ID];
+    int vertex_x = ((int)( packed_vertex        & 0x3FF) << 22) >> 22;
+    int vertex_y = ((int)((packed_vertex >> 10) & 0x3FF) << 22) >> 22;
+    int vertex_z = ((int)((packed_vertex >> 20) & 0x3FF) << 22) >> 22;
 
-    packed = NORMALS[vertex_id];
-    int r = (int)( packed        & 0x3FF);
-    r = (r << 22) >> 22;
-    int g = (int)((packed >> 10) & 0x3FF);
-    g = (g << 22) >> 22;
-    int b = (int)((packed >> 20) & 0x3FF);
-    b = (b << 22) >> 22;
-    float3 normal = float3(r * divide_by_511, g * divide_by_511, b * divide_by_511);
+    // fetch and unpack vertex normal (4 bytes)
+    uint packed_normal = NORMALS[VERTEX_ID];
+    float normal_x = float(((int)( packed_normal        & 0x3FF) << 22) >> 22) * divide_by_511;
+    float normal_y = float(((int)((packed_normal >> 10) & 0x3FF) << 22) >> 22) * divide_by_511;
+    float normal_z = float(((int)((packed_normal >> 20) & 0x3FF) << 22) >> 22) * divide_by_511;
 
-    // Decode camera pitch
-    float2 cam_pitch;
-    {
-        int cos_i8 = (int)((int16_t)((CAMERA_DATA[1] >> 16) & 0xFFFF));
-        int sin_i8 = (int)((int16_t)( CAMERA_DATA[2] & 0xFFFF));
-        cam_pitch = float2((float)cos_i8, (float)sin_i8) * divide_by_32767;
-    }
+    // fetch and unpack camera pitch (4 bytes)
+    uint packed_camera = CAMERA_DATA.z;
+    float camera_pitch_cos = float((int)((int16_t)((packed_camera >> 16) & 0xFFFF))) * divide_by_32767;
+    float camera_pitch_sin = float((int)((int16_t)( packed_camera        & 0xFFFF))) * divide_by_32767;
 
-    // 1) Rotate around Y by Δyaw
+    // rotate position around y for the combined camera-instance yaw we saved
     float x1 =  cos_d * vertex_x + sin_d * vertex_z;
     float z1 = -sin_d * vertex_x + cos_d * vertex_z;
     float y1 =  vertex_y;
 
-    // 2) Apply -pitch rotation
-    float c = cam_pitch.x, s = cam_pitch.y;
-    float y2 =  c * y1 + s * z1;
-    float z2 = -s * y1 + c * z1;
+    // rotate position around x for the camera pitch
+    float y2 =  camera_pitch_cos * y1 + camera_pitch_sin * z1;
+    float z2 = -camera_pitch_sin * y1 + camera_pitch_cos * z1;
     float x2 =  x1;
 
-    // 3) Translate to instance origin
+    // move position into the calculated instance-in-camera-space we saved
     float vx = x2 + instance_x;
     float vy = y2 + instance_y;
     float vz = z2 + instance_z;
 
-    // Sanitize values
-    cos_d = clamp_unit(replace_nan(cos_d, 1.0f));
-    sin_d = clamp_unit(replace_nan(sin_d, 0.0f));
-    vx = replace_nan(vx, 0.0f);
-    vy = replace_nan(vy, 0.0f);
-    vz = replace_nan(vz, 1.0f);
-
-    // Perspective projection (+Z forward)
+    // perspective projection (+Z is forward)
     float cx = proj_scale_x * vx;
     float cy = proj_scale_y * vy;
     float cz = depth_a * vz + depth_b;
@@ -194,12 +151,12 @@ vs_out vs_main(uint vertex_id : SV_VertexID, [[vk::location(0)]] uint2 visible_d
 
     vs_out o;
     o.pos = float4(cx, cy, cz, w);
-    o.normal = normal;
-    o.uv = in_uv;
+    o.normal = float3(normal_x, normal_y, normal_z);
+    o.uv = UV;
     return o;
 }
 
 [shader("fragment")]
 float4 fs_main(vs_out i) : SV_Target0 {
-    return float4(1.0f);
+    return float4(i.normal, 1.0f);
 }

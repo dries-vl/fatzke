@@ -23,8 +23,8 @@ static void encode_uniforms(struct Uniforms* u, i16 x_dm, i16 y_dm, i16 z_dm, i1
     i16 yaw_cos = clamp_i16_from_unit(cosf(yaw_radians));
     i16 yaw_sin = clamp_i16_from_unit(sinf(yaw_radians));
 
-    u->uCam[0] = (u32)(u16)x_dm | (u32)(u16)y_dm << 16;
-    u->uCam[1] = (u32)(u16)z_dm | (u32)(u16)pitch_cos << 16;
-    u->uCam[2] = (u32)(u16)pitch_sin | (u32)(u16)yaw_cos << 16;
-    u->uCam[3] = (u32)(u16)yaw_sin;
+    u->uCam[0] = (u32)(u16)x_dm      | (u32)(u16)y_dm      << 16;
+    u->uCam[1] = (u32)(u16)z_dm;                                  // 2 bytes still unused here
+    u->uCam[2] = (u32)(u16)pitch_sin | (u32)(u16)pitch_cos << 16;
+    u->uCam[3] = (u32)(u16)yaw_sin   | (u32)(u16)yaw_cos   << 16;
 }
