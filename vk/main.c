@@ -123,20 +123,59 @@ static void upload_to_buffer(VkDevice dev, VkDeviceMemory mem, size_t bytes, con
 }
 
 #pragma region MAIN
+// todo: avoid globals
+WINDOW window;
+i32 buttons[BUTTON_COUNT];
 i16 cam_x = 0, cam_y = 5, cam_z = -20, cam_yaw = 0, cam_pitch = 0;
-void key_input_callback(void* ud, enum KEYBOARD_BUTTON key, enum INPUT_STATE state) {
-    if (key == KEYBOARD_ESCAPE) {_exit(0);}
-    if (key == KEYBOARD_W && state == PRESSED) { cam_z += 10; }
-    if (key == KEYBOARD_R && state == PRESSED) { cam_z -= 10; }
-    if (key == KEYBOARD_A && state == PRESSED) { cam_x -= 10; }
-    if (key == KEYBOARD_S && state == PRESSED) { cam_x += 10; }
-    printf("key %d state %d\n", key, state);
+void move_forward(int amount) {
+    float rad = cam_yaw * 3.14159265f / 32767.0f;
+    cam_x += (i16)(sinf(rad) * amount);
+    cam_z += (i16)(cosf(rad) * amount);
 }
-void mouse_input_callback(void* ud, i32 x, i32 y, enum MOUSE_BUTTON button, enum INPUT_STATE state) {}
+void move_sideways(int amount) {
+    float rad = cam_yaw * 3.14159265f / 32767.0f;
+    cam_x += (i16)(cosf(rad) * amount);
+    cam_z -= (i16)(sinf(rad) * amount);
+}
+void key_input_callback(void* ud, enum BUTTON button, enum BUTTON_STATE state) {
+    if (state == PRESSED) buttons[button] = 1;
+    else buttons[button] = 0;
+}
+void mouse_input_callback(void* ud, i32 x, i32 y, enum BUTTON button, int state) {
+    if (button == MOUSE_MOVED) {
+        if (x < 50) buttons[MOUSE_MARGIN_LEFT] += (50 - x) / 5;
+        else buttons[MOUSE_MARGIN_LEFT] = 0;
+        if (x > pf_window_width(window) - 50) buttons[MOUSE_MARGIN_RIGHT] += (x - (pf_window_width(window) - 50)) / 5;
+        else buttons[MOUSE_MARGIN_RIGHT] = 0;
+        if (y < 50) buttons[MOUSE_MARGIN_TOP] += (50 - y) / 5;
+        else buttons[MOUSE_MARGIN_TOP] = 0;
+        if (y > pf_window_height(window) - 50) buttons[MOUSE_MARGIN_BOTTOM] += (y - (pf_window_height(window) - 50)) / 5;
+        else buttons[MOUSE_MARGIN_BOTTOM] = 0;
+    }
+    if (button == MOUSE_SCROLL) buttons[MOUSE_SCROLL] += state / 5;
+    if (button == MOUSE_SCROLL_SIDE) buttons[MOUSE_SCROLL_SIDE] -= state / 10;
+    if (button == MOUSE_LEFT || button == MOUSE_RIGHT || button == MOUSE_MIDDLE) {
+        if (state == PRESSED) buttons[button] = 1;
+        else buttons[button] = 0;
+    }
+}
+void process_inputs() {
+    if (buttons[KEYBOARD_ESCAPE]) {_exit(0);}
+    if (buttons[KEYBOARD_W]) { move_forward(2); }
+    if (buttons[KEYBOARD_R]) { move_forward(-2); }
+    if (buttons[KEYBOARD_A]) { move_sideways(-2); }
+    if (buttons[KEYBOARD_S]) { move_sideways(2); }
+    if (buttons[MOUSE_MARGIN_LEFT]) { cam_yaw -= buttons[MOUSE_MARGIN_LEFT]; } 
+    if (buttons[MOUSE_MARGIN_RIGHT]) { cam_yaw += buttons[MOUSE_MARGIN_RIGHT]; }
+    if (buttons[MOUSE_MARGIN_TOP]) { cam_pitch -= buttons[MOUSE_MARGIN_TOP]; }
+    if (buttons[MOUSE_MARGIN_BOTTOM]) { cam_pitch += buttons[MOUSE_MARGIN_BOTTOM]; }
+    if (buttons[MOUSE_SCROLL]) { cam_y += buttons[MOUSE_SCROLL]; buttons[MOUSE_SCROLL] = 0; }
+    if (buttons[MOUSE_SCROLL_SIDE]) { cam_x -= buttons[MOUSE_SCROLL_SIDE]; buttons[MOUSE_SCROLL_SIDE] = 0; }
+}
 int main(void) {
     // setup with X11
     pf_time_reset();
-    WINDOW window = pf_create_window(NULL, key_input_callback,mouse_input_callback);
+    window = pf_create_window(NULL, key_input_callback,mouse_input_callback);
     pf_timestamp("Created platform window");
 
 #if defined(_WIN32) && DEBUG_VULKAN == 1
@@ -253,7 +292,7 @@ int main(void) {
     VkPipelineRasterizationStateCreateInfo raster = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
         .polygonMode = VK_POLYGON_MODE_FILL,
-        .cullMode    = VK_CULL_MODE_NONE,
+        .cullMode    = VK_CULL_MODE_BACK_BIT,
         .frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE,
         .lineWidth   = 1.0f
     };
@@ -562,6 +601,7 @@ int main(void) {
         if (acquire_result != VK_SUCCESS && acquire_result != VK_SUBOPTIMAL_KHR) { printf("vkAcquireNextImageKHR failed: %d\n", acquire_result); break; }
         
         #pragma region update uniforms
+        process_inputs();
         struct Uniforms u = {0};
         encode_uniforms(&u, cam_x, cam_y, cam_z, cam_yaw, cam_pitch);
         void*dst=NULL;

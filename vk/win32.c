@@ -132,9 +132,100 @@ WINDOW pf_create_window(void* ud, KEYBOARD_CB key_cb, MOUSE_CB mouse_cb){
 
 /* --- input helpers --- */
 static enum KEYBOARD_BUTTON vk_to_button(WPARAM vk){
-    if (vk == VK_ESCAPE) return KEYBOARD_ESCAPE;
-    return KEYBOARD_BUTTON_UNKNOWN;
+    switch (vk){
+        case VK_ESCAPE:       return KEYBOARD_ESCAPE;
+
+        /* main editing / whitespace */
+        case VK_RETURN:       return KEYBOARD_ENTER;      /* numpad Enter is also VK_RETURN with extended flag */
+        case VK_BACK:         return KEYBOARD_BACKSPACE;
+        case VK_TAB:          return KEYBOARD_TAB;
+        case VK_SPACE:        return KEYBOARD_SPACE;
+
+        /* arrows */
+        case VK_LEFT:         return KEYBOARD_LEFT;
+        case VK_RIGHT:        return KEYBOARD_RIGHT;
+        case VK_UP:           return KEYBOARD_UP;
+        case VK_DOWN:         return KEYBOARD_DOWN;
+
+        /* navigation / editing */
+        case VK_HOME:         return KEYBOARD_HOME;
+        case VK_END:          return KEYBOARD_END;
+        case VK_PRIOR:        return KEYBOARD_PAGEUP;     /* Page Up */
+        case VK_NEXT:         return KEYBOARD_PAGEDOWN;   /* Page Down */
+        case VK_INSERT:       return KEYBOARD_INSERT;
+        case VK_DELETE:       return KEYBOARD_DELETE;
+
+        /* function row */
+        case VK_F1:  return KEYBOARD_F1;
+        case VK_F2:  return KEYBOARD_F2;
+        case VK_F3:  return KEYBOARD_F3;
+        case VK_F4:  return KEYBOARD_F4;
+        case VK_F5:  return KEYBOARD_F5;
+        case VK_F6:  return KEYBOARD_F6;
+        case VK_F7:  return KEYBOARD_F7;
+        case VK_F8:  return KEYBOARD_F8;
+        case VK_F9:  return KEYBOARD_F9;
+        case VK_F10: return KEYBOARD_F10;
+        case VK_F11: return KEYBOARD_F11;
+        case VK_F12: return KEYBOARD_F12;
+
+        /* modifiers (map both sides to the same logical buttons, like Wayland path) */
+        case VK_SHIFT:
+        case VK_LSHIFT:
+        case VK_RSHIFT:       return KEYBOARD_SHIFT;
+        case VK_CONTROL:
+        case VK_LCONTROL:
+        case VK_RCONTROL:     return KEYBOARD_CTRL;
+        case VK_MENU:         /* Alt */
+        case VK_LMENU:
+        case VK_RMENU:        return KEYBOARD_ALT;
+        case VK_LWIN:
+        case VK_RWIN:         return KEYBOARD_SUPER;
+
+        /* digits (top row) */
+        case '0': return KEYBOARD_0;
+        case '1': return KEYBOARD_1;
+        case '2': return KEYBOARD_2;
+        case '3': return KEYBOARD_3;
+        case '4': return KEYBOARD_4;
+        case '5': return KEYBOARD_5;
+        case '6': return KEYBOARD_6;
+        case '7': return KEYBOARD_7;
+        case '8': return KEYBOARD_8;
+        case '9': return KEYBOARD_9;
+
+        /* letters */
+        case 'A': return KEYBOARD_A;
+        case 'B': return KEYBOARD_B;
+        case 'C': return KEYBOARD_C;
+        case 'D': return KEYBOARD_D;
+        case 'E': return KEYBOARD_E;
+        case 'F': return KEYBOARD_F;
+        case 'G': return KEYBOARD_G;
+        case 'H': return KEYBOARD_H;
+        case 'I': return KEYBOARD_I;
+        case 'J': return KEYBOARD_J;
+        case 'K': return KEYBOARD_K;
+        case 'L': return KEYBOARD_L;
+        case 'M': return KEYBOARD_M;
+        case 'N': return KEYBOARD_N;
+        case 'O': return KEYBOARD_O;
+        case 'P': return KEYBOARD_P;
+        case 'Q': return KEYBOARD_Q;
+        case 'R': return KEYBOARD_R;
+        case 'S': return KEYBOARD_S;
+        case 'T': return KEYBOARD_T;
+        case 'U': return KEYBOARD_U;
+        case 'V': return KEYBOARD_V;
+        case 'W': return KEYBOARD_W;
+        case 'X': return KEYBOARD_X;
+        case 'Y': return KEYBOARD_Y;
+        case 'Z': return KEYBOARD_Z;
+
+        default:              return BUTTON_UNKNOWN;
+    }
 }
+
 static void emit_key(struct win32_window* w, WPARAM vk, int pressed){
     if (!w || !w->on_key) return;
     w->on_key(w->cb_ud, vk_to_button(vk), pressed ? PRESSED : RELEASED);
@@ -155,22 +246,29 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_SHOWWINDOW: if (w) w->visible = (int)wParam; break;
         case WM_SIZE:
             if (w){ w->w = LOWORD(lParam); w->h = HIWORD(lParam); } break;
+
+        /* mouse */
         case WM_MOUSEMOVE:
             if (w){
                 w->mouse_x = GET_X_LPARAM(lParam);
                 w->mouse_y = GET_Y_LPARAM(lParam);
                 emit_mouse_move(w, w->mouse_x, w->mouse_y);
             } break;
-        case WM_LBUTTONDOWN: if (w) emit_mouse_button(w, MOUSE_LEFT, 1);  break;
-        case WM_LBUTTONUP:   if (w) emit_mouse_button(w, MOUSE_LEFT, 0);  break;
-        case WM_RBUTTONDOWN: if (w) emit_mouse_button(w, MOUSE_RIGHT, 1); break;
-        case WM_RBUTTONUP:   if (w) emit_mouse_button(w, MOUSE_RIGHT, 0); break;
-        case WM_MBUTTONDOWN: if (w) emit_mouse_button(w, MOUSE_MIDDLE, 1);break;
-        case WM_MBUTTONUP:   if (w) emit_mouse_button(w, MOUSE_MIDDLE, 0);break;
-        case WM_KEYDOWN:     if (w) emit_key(w, wParam, 1);               break;
-        case WM_KEYUP:       if (w) emit_key(w, wParam, 0);               break;
-        case WM_CLOSE:       DestroyWindow(hwnd);                          return 0;
-        case WM_DESTROY:     PostQuitMessage(0);                           return 0;
+        case WM_LBUTTONDOWN: if (w) emit_mouse_button(w, MOUSE_LEFT,   1); break;
+        case WM_LBUTTONUP:   if (w) emit_mouse_button(w, MOUSE_LEFT,   0); break;
+        case WM_RBUTTONDOWN: if (w) emit_mouse_button(w, MOUSE_RIGHT,  1); break;
+        case WM_RBUTTONUP:   if (w) emit_mouse_button(w, MOUSE_RIGHT,  0); break;
+        case WM_MBUTTONDOWN: if (w) emit_mouse_button(w, MOUSE_MIDDLE, 1); break;
+        case WM_MBUTTONUP:   if (w) emit_mouse_button(w, MOUSE_MIDDLE, 0); break;
+
+        /* keyboard – include SYSKEY to catch Alt/F10 and avoid system menu */
+        case WM_KEYDOWN:      if (w) { emit_key(w, wParam, 1); return 0; } break;
+        case WM_KEYUP:        if (w) { emit_key(w, wParam, 0); return 0; } break;
+        case WM_SYSKEYDOWN:   if (w) { emit_key(w, wParam, 1); return 0; } break;
+        case WM_SYSKEYUP:     if (w) { emit_key(w, wParam, 0); return 0; } break;
+
+        case WM_CLOSE:        DestroyWindow(hwnd);                          return 0;
+        case WM_DESTROY:      PostQuitMessage(0);                           return 0;
         default: break;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);

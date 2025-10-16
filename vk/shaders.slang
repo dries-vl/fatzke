@@ -77,7 +77,7 @@ void cs_build_visible(uint3 tid : SV_DispatchThreadID) {
     int tz_dm = (int)round(t_view.z);
 
     // pack rotated by yaw
-    uint packed0 = (uint)((tx_dm & 0xFFFF) | ((td_cm & 0xFFFF) << 16));
+    uint packed0 = (uint)((tx_dm & 0xFFFF) | ((ty_dm & 0xFFFF) << 16));
     uint packed1 = (uint)((tz_dm & 0xFFFF) | (((int)round(cos_delta * 127.0f) & 0xFF) << 16) | (((int)round(sin_delta * 127.0f) & 0xFF) << 24));
 
     uint slot; InterlockedAdd(COUNTERS[0].instance_count, 1, slot);        // atomic append

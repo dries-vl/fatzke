@@ -39,7 +39,7 @@ void pf_timestamp(char *msg) {
     #endif
 }
 
-static enum KEYBOARD_BUTTON map_keysym_to_button(xkb_keysym_t sym) {
+static enum BUTTON map_keysym_to_button(xkb_keysym_t sym) {
     switch (sym) {
         case XKB_KEY_Escape:     return KEYBOARD_ESCAPE;
 
@@ -124,7 +124,7 @@ static enum KEYBOARD_BUTTON map_keysym_to_button(xkb_keysym_t sym) {
         case XKB_KEY_y: case XKB_KEY_Y: return KEYBOARD_Y;
         case XKB_KEY_z: case XKB_KEY_Z: return KEYBOARD_Z;
 
-        default: return KEYBOARD_BUTTON_UNKNOWN;
+        default: return BUTTON_UNKNOWN;
     }
 }
 
@@ -231,7 +231,7 @@ void kb_key(void* data, struct wl_keyboard* k, u32 serial, u32 time, u32 key, u3
     // Wayland 'key' is evdev code. xkbcommon expects keycodes starting at 8.
     xkb_keycode_t kc = (xkb_keycode_t)(key + 8);
 
-    enum KEYBOARD_BUTTON button = KEYBOARD_BUTTON_UNKNOWN;
+    enum BUTTON button = BUTTON_UNKNOWN;
     if (w->xkb_state) {
         xkb_keysym_t sym = xkb_state_key_get_one_sym(w->xkb_state, kc);
         button = map_keysym_to_button(sym);
@@ -273,13 +273,27 @@ void ptr_motion(void* d, struct wl_pointer* p, u32 time, wl_fixed_t sx, wl_fixed
 void ptr_button(void* d, struct wl_pointer* p, u32 serial, u32 time, u32 button, u32 state){
     struct wayland_window* w = d;
     if (!w) return;
-    u32 mb = MOUSE_BUTTON_UNKNOWN;
+    u32 mb = BUTTON_UNKNOWN;
     if (button == 272) mb = MOUSE_LEFT;
     if (button == 273) mb = MOUSE_RIGHT;
     if (button == 274) mb = MOUSE_MIDDLE;
     if (w->on_mouse) w->on_mouse(w->callback_data, w->mouse_x, w->mouse_y, mb, state);
 }
-void ptr_axis(void* d, struct wl_pointer* p, u32 time, u32 axis, wl_fixed_t value){ }
+void ptr_axis(void* d, struct wl_pointer* p, uint32_t time, uint32_t axis, wl_fixed_t value) {
+    struct wayland_window* w = d;
+    if (!w) return;
+    double val = wl_fixed_to_double(value);
+    enum BUTTON b = BUTTON_UNKNOWN;
+    // Wayland defines axis:
+    //  WL_POINTER_AXIS_VERTICAL_SCROLL = 0
+    //  WL_POINTER_AXIS_HORIZONTAL_SCROLL = 1
+    if (axis == WL_POINTER_AXIS_VERTICAL_SCROLL) {
+        b = MOUSE_SCROLL;
+    } else if (axis == WL_POINTER_AXIS_HORIZONTAL_SCROLL) {
+        b = MOUSE_SCROLL_SIDE;
+    }
+    if (b != BUTTON_UNKNOWN && w->on_mouse) w->on_mouse(w->callback_data, w->mouse_x, w->mouse_y, b, wl_fixed_to_int(value));
+}
 void ptr_frame(void* d, struct wl_pointer* p){ }
 void ptr_axis_source(void* d, struct wl_pointer* p, u32 source){ }
 void ptr_axis_stop(void* d, struct wl_pointer* p, u32 time, u32 axis){ }

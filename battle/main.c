@@ -1,10 +1,10 @@
 #include "header.h"
 
-void key_input_callback(void* ud, enum KEYBOARD_BUTTON key, enum INPUT_STATE state)
+void key_input_callback(void* ud, enum KEYBOARD_BUTTON key, enum BUTTON_STATE state)
 {
     if (key == KEYBOARD_ESCAPE) {_exit(0);}
 }
-void mouse_input_callback(void* ud, i32 x, i32 y, enum MOUSE_BUTTON button, enum INPUT_STATE state)
+void mouse_input_callback(void* ud, i32 x, i32 y, enum MOUSE_BUTTON button, enum BUTTON_STATE state)
 {
 }
 
