@@ -18,6 +18,11 @@ struct Swapchain {
     VkFramebuffer             framebuffers[MAX_SWAPCHAIN_IMAGES];
     // remember which swapchain image the previous frame used
     uint32_t                  previous_frame_image_index[MAX_FRAMES_IN_FLIGHT];
+    // depth
+    VkFormat                  depth_format;
+    VkImage                   depth_image;
+    VkDeviceMemory            depth_memory;
+    VkImageView               depth_view;
     #if DEBUG_APP == 1
     VkQueryPool query_pool; // GPU timestamps
     #endif
@@ -144,6 +149,61 @@ struct Swapchain create_swapchain(const struct Machine *machine, WINDOW w) {
     uint32_t total_queries = swapchain.swapchain_image_count * QUERIES_PER_IMAGE;
     vkResetQueryPool(machine->device, swapchain.query_pool, 0, total_queries);
     #endif
+    
+    // depth
+    const VkFormat candidates[] = {
+        VK_FORMAT_D32_SFLOAT,
+        VK_FORMAT_X8_D24_UNORM_PACK32,  // optional on some platforms
+        VK_FORMAT_D16_UNORM
+    };
+    for (uint32_t i = 0; i < sizeof(candidates)/sizeof(candidates[0]); ++i) {
+        VkFormatProperties p; vkGetPhysicalDeviceFormatProperties(machine->physical_device, candidates[i], &p);
+        if (p.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) {
+            swapchain.depth_format = candidates[i];
+            break;
+        }
+    }
+    // Fallback — should not happen on conformant HW
+    if (!swapchain.depth_format) swapchain.depth_format = VK_FORMAT_D16_UNORM;
+
+    VkImageCreateInfo ici = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .format    = swapchain.depth_format,
+        .extent    = { swapchain.swapchain_extent.width, swapchain.swapchain_extent.height, 1 },
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples   = VK_SAMPLE_COUNT_1_BIT,
+        .tiling    = VK_IMAGE_TILING_OPTIMAL,
+        .usage     = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED
+    };
+    VK_CHECK(vkCreateImage(machine->device, &ici, NULL, &swapchain.depth_image));
+
+    VkMemoryRequirements req;
+    vkGetImageMemoryRequirements(machine->device, swapchain.depth_image, &req);
+    VkMemoryAllocateInfo mai = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize  = req.size,
+        .memoryTypeIndex = find_memory_type_index(machine->physical_device, req.memoryTypeBits,
+                                                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+    };
+    VK_CHECK(vkAllocateMemory(machine->device, &mai, NULL, &swapchain.depth_memory));
+    VK_CHECK(vkBindImageMemory(machine->device, swapchain.depth_image, swapchain.depth_memory, 0));
+
+    VkImageViewCreateInfo ivci = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image = swapchain.depth_image,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = swapchain.depth_format,
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+            .baseMipLevel = 0, .levelCount = 1,
+            .baseArrayLayer = 0, .layerCount = 1
+        }
+    };
+    VK_CHECK(vkCreateImageView(machine->device, &ivci, NULL, &swapchain.depth_view));
 
     pf_timestamp("Swapchain created");
     return swapchain;
@@ -182,6 +242,11 @@ void destroy_swapchain(struct Machine* machine, struct Renderer* renderer, struc
     if (swapchain->swapchain_images) {
         memset(swapchain->swapchain_images, 0, sizeof swapchain->swapchain_images);
     }
+    // depth
+    if (swapchain->depth_view)   { vkDestroyImageView(machine->device, swapchain->depth_view, NULL);   swapchain->depth_view = VK_NULL_HANDLE; }
+    if (swapchain->depth_image)  { vkDestroyImage(machine->device, swapchain->depth_image, NULL);      swapchain->depth_image = VK_NULL_HANDLE; }
+    if (swapchain->depth_memory) { vkFreeMemory(machine->device, swapchain->depth_memory, NULL);       swapchain->depth_memory = VK_NULL_HANDLE; }
+    // swapchain
     if (swapchain->swapchain) {
         vkDestroySwapchainKHR(machine->device, swapchain->swapchain, NULL);
         swapchain->swapchain = VK_NULL_HANDLE;

@@ -42,7 +42,7 @@ struct Renderer {
     VkBuffer                  buffer_positions;  VkDeviceMemory memory_positions;
     VkBuffer                  buffer_normals;    VkDeviceMemory memory_normals;
     VkBuffer                  buffer_uvs;        VkDeviceMemory memory_uvs;
-    VkBuffer                  buffer_index_ib;   VkDeviceMemory memory_index_ib;
+    VkBuffer                  buffer_index_ib;   VkDeviceMemory memory_indices;
     VkBuffer                  buffer_uniforms;   VkDeviceMemory memory_uniforms;
     // main rendering
     VkPipeline                main_pipeline;
@@ -81,17 +81,6 @@ enum {
 #include "helper.h"
 
 #pragma region HELPER
-static uint32_t find_memory_type_index(VkPhysicalDevice physical_device,uint32_t memory_type_bits,VkMemoryPropertyFlags required_properties) {
-    VkPhysicalDeviceMemoryProperties mem_props;
-    vkGetPhysicalDeviceMemoryProperties(physical_device, &mem_props);
-    for (uint32_t i = 0; i < mem_props.memoryTypeCount; ++i) {
-        const int supported = (memory_type_bits & (1u << i)) != 0;
-        const int has_props = (mem_props.memoryTypes[i].propertyFlags & required_properties) == required_properties;
-        if (supported && has_props) return i;
-    }
-    printf("Failed to find suitable memory type.\n");
-    _exit(0); return 0;
-}
 void create_buffer_and_memory(VkDevice device, VkPhysicalDevice phys,
                               VkDeviceSize size, VkBufferUsageFlags usage,
                               VkMemoryPropertyFlags props,
@@ -228,10 +217,17 @@ int main(void) {
     VK_CHECK(vkCreateDescriptorSetLayout(machine.device, &set_layout_info, NULL, &renderer.common_set_layout));
 
     /* -------- Pipeline Layouts -------- */
+    VkPushConstantRange range = {
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        .offset = 0,
+        .size   = sizeof(uint32_t)
+    };
     VkPipelineLayoutCreateInfo common_pipeline_info = {
         .sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .setLayoutCount = 1,
-        .pSetLayouts    = &renderer.common_set_layout
+        .pSetLayouts    = &renderer.common_set_layout,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges    = &range
     };
     VK_CHECK(vkCreatePipelineLayout(machine.device, &common_pipeline_info, NULL, &renderer.common_pipeline_layout));
 
@@ -322,10 +318,17 @@ int main(void) {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
         .colorAttachmentCount = 1,
         .pColorAttachmentFormats = (VkFormat[]){ swapchain.swapchain_format },
-        // .depthAttachmentFormat = VK_FORMAT_UNDEFINED,
+        .depthAttachmentFormat = VK_FORMAT_D16_UNORM,
         // .stencilAttachmentFormat = VK_FORMAT_UNDEFINED,
     };
     graphics_info.pNext = &pr;
+    VkPipelineDepthStencilStateCreateInfo depth = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+      .depthTestEnable = VK_TRUE,
+      .depthWriteEnable = VK_TRUE,          // OK to keep TRUE even for sky
+      .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
+    };
+    graphics_info.pDepthStencilState = &depth;
     VK_CHECK(vkCreateGraphicsPipelines(machine.device, VK_NULL_HANDLE, 1, &graphics_info, NULL, &renderer.main_pipeline));
     #pragma endregion
 
@@ -343,7 +346,7 @@ int main(void) {
     VkDeviceSize size_positions = (VkDeviceSize)numMeshes * kVertsPerMesh * sizeof(uint32_t);
     VkDeviceSize size_normals   = (VkDeviceSize)numMeshes * kVertsPerMesh * sizeof(uint32_t);
     VkDeviceSize size_uvs       = (VkDeviceSize)kVertsPerMesh * sizeof(uint16_t) * 2; // shared 256 UVs (R16G16_UNORM)
-    VkDeviceSize size_indexIB   = (VkDeviceSize)kIdxPerMesh * sizeof(uint32_t);       // fixed index list 0..255 pattern
+    VkDeviceSize size_indices   = (VkDeviceSize)kIdxPerMesh * sizeof(uint16_t);       // fixed index list 0..255 pattern
 
     const VkMemoryPropertyFlags host_visible_coherent =
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
@@ -379,10 +382,10 @@ int main(void) {
         host_visible_coherent, &renderer.buffer_uvs, &renderer.memory_uvs);
 
     // Index buffer (fixed 1152 indices)
-    create_buffer_and_memory(machine.device, machine.physical_device, size_indexIB,
+    create_buffer_and_memory(machine.device, machine.physical_device, size_indices,
         VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         host_visible_coherent /* or DEVICE_LOCAL with staging */,
-        &renderer.buffer_index_ib, &renderer.memory_index_ib);
+        &renderer.buffer_index_ib, &renderer.memory_indices);
 
     // UNIFORMS
     create_buffer_and_memory(machine.device, machine.physical_device, sizeof(struct Uniforms),
@@ -405,7 +408,7 @@ int main(void) {
         upload_to_buffer(machine.device, renderer.memory_positions, sizeof(uint32_t)*kVertsPerMesh, g_positions_mesh);
         upload_to_buffer(machine.device, renderer.memory_normals,   sizeof(uint32_t)*kVertsPerMesh, g_normals_mesh);
         upload_to_buffer(machine.device, renderer.memory_uvs,       sizeof(uint16_t)*2*kVertsPerMesh, g_uvs_mesh);
-        upload_to_buffer(machine.device, renderer.memory_index_ib,  sizeof(uint32_t)*kIdxPerMesh, g_indices_mesh);
+        upload_to_buffer(machine.device, renderer.memory_indices,   sizeof(uint16_t)*kIdxPerMesh, g_indices_mesh);
         upload_to_buffer(machine.device, renderer.memory_instances, sizeof(struct GPUInstance)*1, &inst);
     }
     
@@ -709,12 +712,21 @@ int main(void) {
               .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
               .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
             };
+            VkRenderingAttachmentInfo depth_att = {
+              .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+              .imageView = swapchain.depth_view,
+              .imageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+              .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+              .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+              .clearValue = { .depthStencil = { 1.0f, 0 } },   // clear depth to FAR (1.0)
+            };
             VkRenderingInfo ri_swap = {
               .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
               .renderArea = { .offset = {0,0}, .extent = swapchain.swapchain_extent },
               .layerCount = 1,
               .colorAttachmentCount = 1,
               .pColorAttachments = &swap_att,
+              .pDepthAttachment = &depth_att
             };
             #if DEBUG_APP == 1
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, swapchain.query_pool, q0 + Q_BEFORE_RENDERPASS);
@@ -729,9 +741,20 @@ int main(void) {
             VkDeviceSize ofs[2] = { 0, 0 };
             vkCmdBindVertexBuffers(cmd, 0, 2, vbs, ofs);
             // index buffer: fixed 1152 indices (values 0..255 in your mesh order)
-            vkCmdBindIndexBuffer(cmd, renderer.buffer_index_ib, 0, VK_INDEX_TYPE_UINT32);
-            // one GPU-driven draw
+            vkCmdBindIndexBuffer(cmd, renderer.buffer_index_ib, 0, VK_INDEX_TYPE_UINT16);
+            // one GPU-driven draw then a single fullscreen triangle for sky
+            uint32_t mode_mesh = 0;
+            vkCmdPushConstants(cmd,
+                renderer.common_pipeline_layout,
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                0, sizeof(uint32_t), &mode_mesh);
             vkCmdDrawIndexedIndirect(cmd, renderer.buffer_counters, 0, 1, sizeof(VkDrawIndexedIndirectCommand));
+            uint32_t mode_sky = 1;
+            vkCmdPushConstants(cmd,
+                renderer.common_pipeline_layout,
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                0, sizeof(uint32_t), &mode_sky);
+            vkCmdDraw(cmd, 3, 1, 0, 0); // sky fullscreen triangle
             vkCmdEndRendering(cmd);
             VkImageMemoryBarrier2 to_present = {
               .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,

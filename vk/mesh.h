@@ -586,7 +586,7 @@ static const uint32_t g_uvs_mesh[192] = {
   0x00000000u,
 };
 
-static const uint32_t g_indices_mesh[1116] = {
+static const uint16_t g_indices_mesh[1116] = {
   0u,
   1u,
   2u,

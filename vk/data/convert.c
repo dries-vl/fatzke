@@ -15,7 +15,7 @@
 //   uint32_t positions[vertexCount];   // A2B10G10R10_SNORM
 //   uint32_t normals  [vertexCount];   // A2B10G10R10_SNORM
 //   uint32_t uvs      [vertexCount];   // packed R16G16 (hi=v, lo=u)
-//   uint32_t indices  [indexCount];    // uint32
+//   uint16_t indices  [indexCount];    // uint16
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -206,7 +206,7 @@ static int ends_with(const char* s, const char* suf){
 
 static void emit_header(FILE* f,
     const uint32_t* pos_u32, const uint32_t* nrm_u32, const uint32_t* uv_u32, size_t vcount,
-    const uint32_t* idx_u32, size_t icount, const char* name)
+    const uint16_t* idx_u16, size_t icount, const char* name)
 {
     fprintf(f, "// auto-generated mesh: %s\n#include <stdint.h>\n\n", name);
     fprintf(f, "static const uint32_t g_positions_%s[%zu] = {\n", name, vcount);
@@ -221,9 +221,9 @@ static void emit_header(FILE* f,
     for(size_t i=0;i<vcount;i++){ fprintf(f, "  0x%08Xu,%s", uv_u32[i], (i+1<vcount)?"\n":"\n"); }
     fprintf(f, "};\n\n");
 
-    fprintf(f, "static const uint32_t g_indices_%s[%zu] = {\n", name, icount);
+    fprintf(f, "static const uint16_t g_indices_%s[%zu] = {\n", name, icount);
     for(size_t i=0;i<icount;i++){
-        fprintf(f, "  %uu,%s", idx_u32[i], (i+1<icount)?"\n":"\n");
+        fprintf(f, "  %uu,%s", idx_u16[i], (i+1<icount)?"\n":"\n");
     }
     fprintf(f, "};\n\n");
 
@@ -233,7 +233,7 @@ static void emit_header(FILE* f,
 
 static void emit_binary(FILE* f,
     const uint32_t* pos_u32, const uint32_t* nrm_u32, const uint32_t* uv_u32, size_t vcount,
-    const uint32_t* idx_u32, size_t icount)
+    const uint16_t* idx_u16, size_t icount)
 {
     struct Header { uint32_t magic, vc, ic, reserved[5]; } hdr;
     hdr.magic = 0x3148534D; /* 'MSH1' */
@@ -244,7 +244,7 @@ static void emit_binary(FILE* f,
     fwrite(pos_u32, sizeof(uint32_t), vcount, f);
     fwrite(nrm_u32, sizeof(uint32_t), vcount, f);
     fwrite(uv_u32,  sizeof(uint32_t), vcount, f);
-    fwrite(idx_u32, sizeof(uint32_t), icount, f);
+    fwrite(idx_u16, sizeof(uint16_t), icount, f);
 }
 
 /* ---------- main build ---------- */
@@ -259,8 +259,8 @@ static void build_and_emit(
     uint32_t* pos_u32 = (uint32_t*)malloc(maxVerts*sizeof(uint32_t));
     uint32_t* nrm_u32 = (uint32_t*)malloc(maxVerts*sizeof(uint32_t));
     uint32_t* uv_u32  = (uint32_t*)malloc(maxVerts*sizeof(uint32_t));
-    uint32_t* idx_u32 = (uint32_t*)malloc((size_t)3*ntris*sizeof(uint32_t));
-    if(!pos_u32||!nrm_u32||!uv_u32||!idx_u32){ perror("malloc"); exit(1); }
+    uint16_t* idx_u16 = (uint16_t*)malloc((size_t)3*ntris*sizeof(uint16_t));
+    if(!pos_u32||!nrm_u32||!uv_u32||!idx_u16){ perror("malloc"); exit(1); }
 
     /* dedup */
     HMap map; hmap_init(&map, (size_t)3*ntris);
@@ -297,20 +297,24 @@ static void build_and_emit(
 
             vcount++;
         }
-        idx_u32[icount++] = idx; /* uint32 indices */
+        if(idx > 0xFFFFu){
+            fprintf(stderr,"Error: too many unique vertices (%zu). 16-bit indices require vcount <= 65535.\n", (size_t)(idx+1));
+            exit(1);
+        }
+        idx_u16[icount++] = idx; /* uint16 indices */
     }
 
     FILE* f = outpath? fopen(outpath, ends_with(outpath,".meshbin")? "wb":"w") : stdout;
     if(!f){ perror("fopen out"); exit(1); }
 
     if(outpath && ends_with(outpath,".meshbin")){
-        emit_binary(f, pos_u32, nrm_u32, uv_u32, vcount, idx_u32, icount);
+        emit_binary(f, pos_u32, nrm_u32, uv_u32, vcount, idx_u16, icount);
     }else{
-        emit_header(f, pos_u32, nrm_u32, uv_u32, vcount, idx_u32, icount, name?name:"mesh");
+        emit_header(f, pos_u32, nrm_u32, uv_u32, vcount, idx_u16, icount, name?name:"mesh");
     }
 
     if(outpath) fclose(f);
-    free(pos_u32); free(nrm_u32); free(uv_u32); free(idx_u32); free(map.e);
+    free(pos_u32); free(nrm_u32); free(uv_u32); free(idx_u16); free(map.e);
 }
 
 /* ---------- top-level parse pipeline ---------- */

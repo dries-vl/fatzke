@@ -28,6 +28,18 @@ static const char* vk_result_str(VkResult r) {
 
 #define VK_CHECK(call) do{ VkResult _r=(call); if(_r!=VK_SUCCESS){ printf("vulkan error: %s on line @%s:%d\n",vk_result_str(_r),__FILE__,__LINE__); _exit(1);} }while(0)
 
+static uint32_t find_memory_type_index(VkPhysicalDevice physical_device,uint32_t memory_type_bits,VkMemoryPropertyFlags required_properties) {
+    VkPhysicalDeviceMemoryProperties mem_props;
+    vkGetPhysicalDeviceMemoryProperties(physical_device, &mem_props);
+    for (uint32_t i = 0; i < mem_props.memoryTypeCount; ++i) {
+        const int supported = (memory_type_bits & (1u << i)) != 0;
+        const int has_props = (mem_props.memoryTypes[i].propertyFlags & required_properties) == required_properties;
+        if (supported && has_props) return i;
+    }
+    printf("Failed to find suitable memory type.\n");
+    _exit(0); return 0;
+}
+
 #if DEBUG_VULKAN == 1
 VKAPI_ATTR VkBool32 VKAPI_CALL vk_debug_cb(VkDebugUtilsMessageSeverityFlagBitsEXT severity, VkDebugUtilsMessageTypeFlagsEXT messageTypes, const VkDebugUtilsMessengerCallbackDataEXT* data, void* pUserData) {
     u32 error = severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;

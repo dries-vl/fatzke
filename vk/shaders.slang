@@ -21,11 +21,11 @@ struct mdi {
     uint first_instance;          // first instance index
 };
 
-[[vk::binding(0,0)]] StructuredBuffer<uint2> INSTANCES; // 6 bytes position + 2 bytes cos/sin
-[[vk::binding(1,0)]] RWStructuredBuffer<uint2> VISIBLE_PACKED; // 6 bytes position + 2 bytes cos/sin
-[[vk::binding(2,0)]] RWStructuredBuffer<mdi> COUNTERS; // MDI
-[[vk::binding(3,0)]] StructuredBuffer<uint> POSITIONS; // R10G10B10A2
-[[vk::binding(4,0)]] StructuredBuffer<uint> NORMALS;   // R10G10B10A2_SNORM
+[[vk::binding(0,0)]] StructuredBuffer<uint2>    INSTANCES; // 6 bytes position + 2 bytes cos/sin
+[[vk::binding(1,0)]] RWStructuredBuffer<uint2>  VISIBLE_PACKED; // 6 bytes position + 2 bytes cos/sin
+[[vk::binding(2,0)]] RWStructuredBuffer<mdi>    COUNTERS; // MDI
+[[vk::binding(3,0)]] StructuredBuffer<uint>     POSITIONS; // R10G10B10A2
+[[vk::binding(4,0)]] StructuredBuffer<uint>     NORMALS;   // R10G10B10A2_SNORM
 [[vk::binding(5,0)]]
 cbuffer uniforms {
     uint4 CAMERA_DATA; // packed camera data (position + orientation)
@@ -92,6 +92,12 @@ void cs_prepare_indirect() {
     COUNTERS[0].first_instance = 0;                                        // first instance index
 }
 
+
+struct Push {
+    uint mode; // 0 = normal mesh draw, 1 = sky
+};
+[[vk::push_constant]] Push gPush;
+
 struct vs_out {
     float4 pos    : SV_Position;                                           // clip-space position
     float2 uv     : TEXCOORD0;                                             // texture coordinates
@@ -100,6 +106,18 @@ struct vs_out {
 
 [shader("vertex")]
 vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] uint2 INSTANCE, [[vk::location(1)]] float2 UV) {
+    if (gPush.mode == 1) {
+        // SKY path: fullscreen triangle
+        vs_out o;
+        float2 p;
+        if (VERTEX_ID == 0) p = float2(-1.0,  3.0); // was (-1,-1)
+        if (VERTEX_ID == 1) p = float2(-1.0, -1.0); // was (-1, 3)
+        if (VERTEX_ID == 2) p = float2( 3.0, -1.0);
+        o.pos = float4(p, 1.0, 1.0);
+        o.normal = float3(p, 0.0);
+        o.uv = 0;
+        return o;
+    }
     // fetch and unpack visible instance data, convert dm to cm (8 bytes)
     uint2 packed_instance = INSTANCE.xy;
     int instance_x = 10 * (int)((int16_t)( packed_instance.x        & 0xFFFF));
