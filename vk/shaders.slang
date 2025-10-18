@@ -21,12 +21,18 @@ struct mdi {
     uint first_instance;          // first instance index
 };
 
+// create range per mesh type; implicit mesh id based on instance-id and workgroup
 [[vk::binding(0,0)]] StructuredBuffer<uint2>    INSTANCES; // 6 bytes position + 2 bytes cos/sin
+// todo: we'll probably need 4 bytes for cos/sin as it includes camera yaw
 [[vk::binding(1,0)]] RWStructuredBuffer<uint2>  VISIBLE_PACKED; // 6 bytes position + 2 bytes cos/sin
-[[vk::binding(2,0)]] RWStructuredBuffer<mdi>    COUNTERS; // MDI
-[[vk::binding(3,0)]] StructuredBuffer<uint>     POSITIONS; // R10G10B10A2
-[[vk::binding(4,0)]] StructuredBuffer<uint>     NORMALS;   // R10G10B10A2_SNORM
-[[vk::binding(5,0)]]
+// we know for a given scene, up front how many instances at most can be visible anyway, except for particles etc.
+[[vk::binding(2,0)]] RWStructuredBuffer<uint2>  MESH_INFO; // 1st vertex, 1st index, index count, 1st instance, max instance count
+// one struct per mesh type, index is mesh id
+[[vk::binding(3,0)]] RWStructuredBuffer<mdi>    COUNTERS; // MDI
+[[vk::binding(4,0)]] StructuredBuffer<uint>     POSITIONS; // R10G10B10A2
+[[vk::binding(5,0)]] StructuredBuffer<uint>     NORMALS;   // R10G10B10A2_SNORM
+[[vk::binding(6,0)]] StructuredBuffer<uint>     UVS;   // R16G16
+[[vk::binding(7,0)]]
 cbuffer uniforms {
     uint4 CAMERA_DATA; // packed camera data (position + orientation)
 };
@@ -92,32 +98,31 @@ void cs_prepare_indirect() {
     COUNTERS[0].first_instance = 0;                                        // first instance index
 }
 
-
-struct Push {
+struct push_constants {
     uint mode; // 0 = normal mesh draw, 1 = sky
 };
-[[vk::push_constant]] Push gPush;
+[[vk::push_constant]] push_constants PUSH_CONSTANTS;
 
 struct vs_out {
     float4 pos    : SV_Position;                                           // clip-space position
     float2 uv     : TEXCOORD0;                                             // texture coordinates
     float3 normal : TEXCOORD1;                                             // surface normal
 };
-
 [shader("vertex")]
-vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] uint2 INSTANCE, [[vk::location(1)]] float2 UV) {
-    if (gPush.mode == 1) {
+vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] uint2 INSTANCE) {
+    if (PUSH_CONSTANTS.mode == 1) {
         // SKY path: fullscreen triangle
         vs_out o;
         float2 p;
         if (VERTEX_ID == 0) p = float2(-1.0,  3.0); // was (-1,-1)
         if (VERTEX_ID == 1) p = float2(-1.0, -1.0); // was (-1, 3)
         if (VERTEX_ID == 2) p = float2( 3.0, -1.0);
-        o.pos = float4(p, 1.0, 1.0);
-        o.normal = float3(p, 0.0);
+        o.pos = float4(p, 1.0, 1.0); // 1.0 / 1.0 -> drawn behind everything else
+        o.normal = float3(0.3, 0.5, 1.0);
         o.uv = 0;
         return o;
     }
+
     // fetch and unpack visible instance data, convert dm to cm (8 bytes)
     uint2 packed_instance = INSTANCE.xy;
     int instance_x = 10 * (int)((int16_t)( packed_instance.x        & 0xFFFF));
@@ -167,7 +172,7 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] uint2 INSTANCE,
     vs_out o;
     o.pos = float4(cx, cy, cz, w);
     o.normal = float3(normal_x, normal_y, normal_z);
-    o.uv = UV;
+    o.uv = UVS[VERTEX_ID];
     return o;
 }
 

@@ -1,0 +1,10 @@
+# Triangulated plane 2x2 vertices on Y=0 (XZ plane)
+# 1 unit = 1 meter; vertices spaced at 1 cm (0.01 units)
+# i in [-1..0] (cm), x=i*0.01, z=j*0.01
+o plane_2x2_cm
+v -0.01 0.00 -0.01
+v 0.00 0.00 -0.01
+v -0.01 0.00 0.00
+v 0.00 0.00 0.00
+f 1 2 3
+f 3 2 4

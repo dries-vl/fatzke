@@ -38,6 +38,7 @@ struct Renderer {
     // buffers
     VkBuffer                  buffer_instances;  VkDeviceMemory memory_instances;
     VkBuffer                  buffer_visible;    VkDeviceMemory memory_visible;
+    VkBuffer                  buffer_mesh_info;  VkDeviceMemory memory_mesh_info;
     VkBuffer                  buffer_counters;   VkDeviceMemory memory_counters;
     VkBuffer                  buffer_positions;  VkDeviceMemory memory_positions;
     VkBuffer                  buffer_normals;    VkDeviceMemory memory_normals;
@@ -115,7 +116,7 @@ static void upload_to_buffer(VkDevice dev, VkDeviceMemory mem, size_t bytes, con
 // todo: avoid globals
 WINDOW window;
 i32 buttons[BUTTON_COUNT];
-i16 cam_x = 0, cam_y = 5, cam_z = -20, cam_yaw = 0, cam_pitch = 0;
+i16 cam_x = 0, cam_y = 2, cam_z = -5, cam_yaw = 0, cam_pitch = 0;
 void move_forward(int amount) {
     float rad = cam_yaw * 3.14159265f / 32767.0f;
     cam_x += (i16)(sinf(rad) * amount);
@@ -198,7 +199,8 @@ int main(void) {
     VkShaderModule shader_module; VK_CHECK(vkCreateShaderModule(machine.device,&smci,NULL,&shader_module));
 
     #pragma region COMPUTE PIPELINE
-    #define BINDINGS 6
+    #define BINDINGS 8
+    #define UNIFORM_BINDING (BINDINGS-1)
     VkDescriptorSetLayoutBinding bindings[BINDINGS];
     for (uint32_t i = 0; i < BINDINGS; ++i) {
         bindings[i] = (VkDescriptorSetLayoutBinding) {
@@ -207,7 +209,7 @@ int main(void) {
             .stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT
         };
         // use uniform for the last one
-        bindings[i].descriptorType = (i < 5) ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        bindings[i].descriptorType = (i != UNIFORM_BINDING) ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     }
     VkDescriptorSetLayoutCreateInfo set_layout_info = {
         .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -254,18 +256,16 @@ int main(void) {
         { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT,   .module = shader_module, .pName = "vs_main" },
         { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = shader_module, .pName = "fs_main" }
     };
-    VkVertexInputBindingDescription bindings_vi[2] = {
-        { .binding = 0, .stride = sizeof(uint32_t)*2,    .inputRate = VK_VERTEX_INPUT_RATE_INSTANCE },
-        { .binding = 1, .stride = sizeof(uint16_t)*2,    .inputRate = VK_VERTEX_INPUT_RATE_VERTEX   }
+    VkVertexInputBindingDescription bindings_vi[1] = {
+        { .binding = 0, .stride = sizeof(uint32_t)*2,    .inputRate = VK_VERTEX_INPUT_RATE_INSTANCE }
     };
-    VkVertexInputAttributeDescription attrs_vi[2] = {
-        { .location = 0, .binding = 0, .format = VK_FORMAT_R32G32_UINT,   .offset = 0 },
-        { .location = 1, .binding = 1, .format = VK_FORMAT_R16G16_UNORM,  .offset = 0 }
+    VkVertexInputAttributeDescription attrs_vi[1] = {
+        { .location = 0, .binding = 0, .format = VK_FORMAT_R32G32_UINT,   .offset = 0 }
     };
     VkPipelineVertexInputStateCreateInfo vertex_input = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-        .vertexBindingDescriptionCount   = 2, .pVertexBindingDescriptions   = bindings_vi,
-        .vertexAttributeDescriptionCount = 2, .pVertexAttributeDescriptions = attrs_vi
+        .vertexBindingDescriptionCount   = 1, .pVertexBindingDescriptions   = bindings_vi,
+        .vertexAttributeDescriptionCount = 1, .pVertexAttributeDescriptions = attrs_vi
     };
 
     VkPipelineInputAssemblyStateCreateInfo input_assembly = {
@@ -340,13 +340,14 @@ int main(void) {
     const uint32_t kIdxPerMesh   = 1116;
     uint32_t numMeshes    = 1;
     uint32_t numInstances = 1;
-    VkDeviceSize size_instances = (VkDeviceSize)numInstances * sizeof(uint32_t) * 2; // two uints each
-    VkDeviceSize size_visible   = (VkDeviceSize)numInstances * sizeof(uint32_t) * 2; // compacted visible (same layout)
+    VkDeviceSize size_instances = (VkDeviceSize)numInstances * sizeof(uint32_t) * 2;
+    VkDeviceSize size_visible   = (VkDeviceSize)numInstances * sizeof(uint32_t) * 2;
+    VkDeviceSize size_mesh_info = (VkDeviceSize)numMeshes * sizeof(uint32_t) * 2;
     VkDeviceSize size_counters  = sizeof(VkDrawIndexedIndirectCommand);
     VkDeviceSize size_positions = (VkDeviceSize)numMeshes * kVertsPerMesh * sizeof(uint32_t);
     VkDeviceSize size_normals   = (VkDeviceSize)numMeshes * kVertsPerMesh * sizeof(uint32_t);
-    VkDeviceSize size_uvs       = (VkDeviceSize)kVertsPerMesh * sizeof(uint16_t) * 2; // shared 256 UVs (R16G16_UNORM)
-    VkDeviceSize size_indices   = (VkDeviceSize)kIdxPerMesh * sizeof(uint16_t);       // fixed index list 0..255 pattern
+    VkDeviceSize size_uvs       = (VkDeviceSize)kVertsPerMesh * sizeof(uint16_t) * 2; 
+    VkDeviceSize size_indices   = (VkDeviceSize)kIdxPerMesh * sizeof(uint16_t);
 
     const VkMemoryPropertyFlags host_visible_coherent =
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
@@ -378,7 +379,7 @@ int main(void) {
 
     // UV vertex buffer (shared 256 UVs; per-vertex VB)
     create_buffer_and_memory(machine.device, machine.physical_device, size_uvs,
-        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         host_visible_coherent, &renderer.buffer_uvs, &renderer.memory_uvs);
 
     // Index buffer (fixed 1152 indices)
@@ -414,11 +415,8 @@ int main(void) {
     
     /* -------- Descriptor Pool & Set -------- */
     VkDescriptorPoolSize pool_sizes[] = {
-        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,  BINDINGS-1 }, // bindings 0..4
-        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,  1 }, // binding 5  <<< add this
-        // keep these only if/when you actually use them:
-        // { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,   1 },
-        // { VK_DESCRIPTOR_TYPE_SAMPLER,         1 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,  BINDINGS-1 },
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,  1 }, // one is a uniform binding
     };
     VkDescriptorPoolCreateInfo pool_info = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -436,12 +434,14 @@ int main(void) {
     VK_CHECK(vkAllocateDescriptorSets(machine.device, &set_alloc_info, &renderer.descriptor_set));
 
     VkDescriptorBufferInfo buffer_infos[BINDINGS] = {
-        { renderer.buffer_instances, 0, size_instances }, // binding 0
-        { renderer.buffer_visible,   0, size_visible   }, // binding 1
-        { renderer.buffer_counters,  0, size_counters  }, // binding 2
-        { renderer.buffer_positions, 0, size_positions }, // binding 3
-        { renderer.buffer_normals,   0, size_normals   },  // binding 4
-        { renderer.buffer_uniforms,  0, sizeof(struct Uniforms)   }  // binding 5
+        { renderer.buffer_instances, 0, size_instances },
+        { renderer.buffer_visible,   0, size_visible   },
+        { renderer.buffer_mesh_info, 0, size_mesh_info },
+        { renderer.buffer_counters,  0, size_counters  },
+        { renderer.buffer_positions, 0, size_positions },
+        { renderer.buffer_normals,   0, size_normals   },
+        { renderer.buffer_uvs,       0, size_uvs       },
+        { renderer.buffer_uniforms,  0, sizeof(struct Uniforms)   }
     };
     VkWriteDescriptorSet writes[BINDINGS];
     for (uint32_t i = 0; i < BINDINGS; ++i) {
@@ -451,7 +451,7 @@ int main(void) {
             .dstBinding      = i,
             .descriptorCount = 1,
             // set the last one as uniform
-            .descriptorType  = (i<5)?VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorType  = (i != UNIFORM_BINDING)?VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
             .pBufferInfo     = &buffer_infos[i]
         };
     }
@@ -737,9 +737,9 @@ int main(void) {
             // descriptors for VS (POSITIONS/NORMALS etc.)
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, renderer.common_pipeline_layout, 0, 1, &renderer.descriptor_set, 0, NULL);
             // vertex buffers: [0]=VISIBLE_PACKED (instance), [1]=UVs (per-vertex)
-            VkBuffer vbs[2]     = { renderer.buffer_visible, renderer.buffer_uvs };
-            VkDeviceSize ofs[2] = { 0, 0 };
-            vkCmdBindVertexBuffers(cmd, 0, 2, vbs, ofs);
+            VkBuffer vbs[1]     = { renderer.buffer_visible };
+            VkDeviceSize ofs[1] = { 0 };
+            vkCmdBindVertexBuffers(cmd, 0, 1, vbs, ofs);
             // index buffer: fixed 1152 indices (values 0..255 in your mesh order)
             vkCmdBindIndexBuffer(cmd, renderer.buffer_index_ib, 0, VK_INDEX_TYPE_UINT16);
             // one GPU-driven draw then a single fullscreen triangle for sky
@@ -755,6 +755,15 @@ int main(void) {
                 VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                 0, sizeof(uint32_t), &mode_sky);
             vkCmdDraw(cmd, 3, 1, 0, 0); // sky fullscreen triangle
+            uint32_t mode_ground = 2;
+            vkCmdPushConstants(cmd,
+                renderer.common_pipeline_layout,
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                0, sizeof(uint32_t), &mode_ground);
+            const uint32_t GRID_QUADS = 225;
+            const uint32_t triCount   = GRID_QUADS * GRID_QUADS * 2;
+            const uint32_t vertCount  = triCount * 3;
+            // vkCmdDraw(cmd, vertCount, 1, 0, 0); // ground
             vkCmdEndRendering(cmd);
             VkImageMemoryBarrier2 to_present = {
               .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,

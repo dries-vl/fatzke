@@ -1,5 +1,5 @@
 // obj2mesh: outputs positions (A2B10G10R10_SNORM), normals (A2B10G10R10_SNORM),
-// uvs (R16G16_UNORM), indices (uint32). Either as a C header or a single binary.
+// uvs (R16G16_UNORM), indices (uint16). Either as a C header or a single binary.
 //
 // Usage:
 //   obj2mesh input.obj -o out.h            (C header)
@@ -12,10 +12,12 @@
 //     uint32_t indexCount;
 //     uint32_t reserved[5]; // = 0
 //   };
-//   uint32_t positions[vertexCount];   // A2B10G10R10_SNORM
-//   uint32_t normals  [vertexCount];   // A2B10G10R10_SNORM
+//   uint32_t positions[vertexCount];   // A2B10G10R10_SNORM (cm-quantized, A2=0)
+//   uint32_t normals  [vertexCount];   // A2B10G10R10_SNORM (unit vectors, A2=0)
 //   uint32_t uvs      [vertexCount];   // packed R16G16 (hi=v, lo=u)
 //   uint16_t indices  [indexCount];    // uint16
+//
+// Deduplication policy: by **packed position** ONLY. The first normal/uv seen for a position is kept.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,26 +27,38 @@
 
 /* ---------- utils ---------- */
 static float clampf(float x, float a, float b){ return x<a?a:(x>b?b:x); }
-static uint16_t unorm16(float x){
+static uint16_t unorm16(float x){            /* clamp [0,1] then quantize */
     double t = x; if (t<0.0) t=0.0; if (t>1.0) t=1.0;
     unsigned q = (unsigned)lrint(t*65535.0);
     return (uint16_t)q;
 }
-static uint32_t snorm10_unit(float x){           /* expects x in [-1,1] */
-    double t=x; if(t<-1.0)t=-1.0; if(t>1.0)t=1.0;
-    int q = (int)lrint(t*511.0);
+static inline uint32_t snorm10q(float x){    /* x in [-1,1] → signed 10-bit (two's complement) */
+    double t = x;
+    if (t < -1.0) t = -1.0;
+    if (t >  1.0) t =  1.0;
+    int q = (int)lrint(t * 511.0);           /* -511..+511 */
+    if (q < -512) q = -512;                  /* allow min code */
+    if (q >  511) q =  511;
     return (uint32_t)(q & 0x3FFu);
 }
-static uint32_t pack101010(float x,float y,float z){
-    /* Assume OBJ units = meters. Clamp to ±5.11 m (±511 cm) then map to snorm10. */
-    const float cmx = clampf(x*100.0f, -511.0f, 511.0f);
-    const float cmy = clampf(y*100.0f, -511.0f, 511.0f);
-    const float cmz = clampf(z*100.0f, -511.0f, 511.0f);
-    const float sx = cmx / 511.0f;
-    const float sy = cmy / 511.0f;
-    const float sz = cmz / 511.0f;
-    uint32_t bx=snorm10_unit(sx), by=snorm10_unit(sy), bz=snorm10_unit(sz);
-    return (bz<<20) | (by<<10) | bx; /* top 2 bits = 0 */
+static inline uint32_t pack_pos_cm_101010(float x_m,float y_m,float z_m){
+    /* 1 unit = 1m; 1 cm = 0.01. Clamp to ±511 cm and map to [-1,1] for SNORM10 */
+    const float sx = clampf((x_m*100.0f)/511.0f, -1.0f, 1.0f);
+    const float sy = clampf((y_m*100.0f)/511.0f, -1.0f, 1.0f);
+    const float sz = clampf((z_m*100.0f)/511.0f, -1.0f, 1.0f);
+    const uint32_t bx = snorm10q(sx);
+    const uint32_t by = snorm10q(sy);
+    const uint32_t bz = snorm10q(sz);
+    return (bz<<20) | (by<<10) | (bx<<0);    /* A2=0 */
+}
+static inline uint32_t pack_nrm_101010(float nx,float ny,float nz){
+    /* normals packed directly in SNORM10 (unit space) */
+    float len = sqrtf(nx*nx + ny*ny + nz*nz);
+    if (len > 0.0f){ nx/=len; ny/=len; nz/=len; } else { nx=0; ny=0; nz=1; }
+    const uint32_t bx = snorm10q(nx);
+    const uint32_t by = snorm10q(ny);
+    const uint32_t bz = snorm10q(nz);
+    return (bz<<20) | (by<<10) | (bx<<0);    /* A2=0 */
 }
 
 /* ---------- data types ---------- */
@@ -55,6 +69,7 @@ typedef struct { int v,vt,vn; } Triplet;  /* raw OBJ indices (can be negative, 0
 /* file blob */
 typedef struct { char* ptr; size_t len; } Blob;
 
+/* ---------- IO ---------- */
 static Blob read_all(const char* path){
     Blob b = {0};
     FILE* f = path? fopen(path,"rb"): stdin;
@@ -64,6 +79,7 @@ static Blob read_all(const char* path){
     if(L < 0) { /* stdin */
         size_t cap=1<<20; b.ptr=(char*)malloc(cap); if(!b.ptr){perror("malloc"); exit(1);}
         size_t used=0, n;
+        rewind(f);
         for(;;){
             if(used+65536 > cap){ cap*=2; b.ptr=(char*)realloc(b.ptr,cap); if(!b.ptr){perror("realloc"); exit(1);} }
             n = fread(b.ptr+used,1,65536,f);
@@ -178,23 +194,30 @@ static void parse_and_fill(
     *out_nv=iv; *out_nvt=ivt; *out_nvn=ivn; *out_ntris=tt/3;
 }
 
-/* ---------- dedup map ---------- */
-typedef struct { Triplet key; uint32_t val; int used; } HEnt;
-typedef struct { HEnt* e; size_t cap, count; } HMap;
-static uint32_t hmix(uint32_t x){ x ^= x>>16; x *= 0x7feb352d; x ^= x>>15; x *= 0x846ca68b; x ^= x>>16; return x; }
-static uint32_t hkey(Triplet k){ return hmix((uint32_t)k.v) ^ (hmix((uint32_t)k.vt)<<1) ^ (hmix((uint32_t)k.vn)<<2); }
-static void hmap_init(HMap* m, size_t want){
+/* ---------- hash maps ---------- */
+static uint32_t hmix32(uint32_t x){ x ^= x>>16; x *= 0x7feb352d; x ^= x>>15; x *= 0x846ca68b; x ^= x>>16; return x; }
+
+/* (A) Position map: packed position -> vertex index */
+typedef struct { uint32_t key; uint32_t val; int used; } PosEnt;
+typedef struct { PosEnt* e; size_t cap; } PosMap;
+static void posmap_init(PosMap* m, size_t want){
     size_t cap=1; while(cap < want*2) cap<<=1;
-    m->e = (HEnt*)calloc(cap, sizeof(HEnt)); if(!m->e){perror("calloc"); exit(1);}
-    m->cap=cap; m->count=0;
+    m->e = (PosEnt*)calloc(cap, sizeof(PosEnt)); if(!m->e){perror("calloc"); exit(1);}
+    m->cap=cap;
 }
-static int hmap_get_or_put(HMap* m, Triplet k, uint32_t* io){
-    size_t mask = m->cap-1;
-    size_t idx = (hkey(k) & mask);
+static int posmap_get_or_put(PosMap* m, uint32_t key, uint32_t* ioVal){
+    size_t mask = m->cap - 1;
+    size_t idx = (hmix32(key) & mask);
     for(;;){
-        if(!m->e[idx].used){ m->e[idx].used=1; m->e[idx].key=k; m->e[idx].val=*io; m->count++; return 1; }
-        if(m->e[idx].key.v==k.v && m->e[idx].key.vt==k.vt && m->e[idx].key.vn==k.vn){ *io=m->e[idx].val; return 0; }
-        idx=(idx+1)&mask;
+        if(!m->e[idx].used){
+            m->e[idx].used=1; m->e[idx].key=key; m->e[idx].val=*ioVal;
+            return 1; /* inserted */
+        }
+        if(m->e[idx].key == key){
+            *ioVal = m->e[idx].val;
+            return 0; /* found */
+        }
+        idx = (idx + 1) & mask;
     }
 }
 
@@ -222,9 +245,7 @@ static void emit_header(FILE* f,
     fprintf(f, "};\n\n");
 
     fprintf(f, "static const uint16_t g_indices_%s[%zu] = {\n", name, icount);
-    for(size_t i=0;i<icount;i++){
-        fprintf(f, "  %uu,%s", idx_u16[i], (i+1<icount)?"\n":"\n");
-    }
+    for(size_t i=0;i<icount;i++){ fprintf(f, "  %uu,%s", idx_u16[i], (i+1<icount)?"\n":"\n"); }
     fprintf(f, "};\n\n");
 
     fprintf(f, "static const uint32_t g_vertex_count_%s = %zu;\n", name, vcount);
@@ -247,7 +268,7 @@ static void emit_binary(FILE* f,
     fwrite(idx_u16, sizeof(uint16_t), icount, f);
 }
 
-/* ---------- main build ---------- */
+/* ---------- main build (dedup by packed position only) ---------- */
 static void build_and_emit(
     const char* outpath, const char* name,
     const Vec3* V, int nv, const Vec2* VT, int nvt, const Vec3* VN, int nvn,
@@ -262,8 +283,8 @@ static void build_and_emit(
     uint16_t* idx_u16 = (uint16_t*)malloc((size_t)3*ntris*sizeof(uint16_t));
     if(!pos_u32||!nrm_u32||!uv_u32||!idx_u16){ perror("malloc"); exit(1); }
 
-    /* dedup */
-    HMap map; hmap_init(&map, (size_t)3*ntris);
+    PosMap pmap; posmap_init(&pmap, (size_t)3*ntris);
+
     size_t vcount=0, icount=0;
 
     for(int i=0;i<ntris*3;i++){
@@ -273,35 +294,33 @@ static void build_and_emit(
         int vni = (tr.vn!=0)? resolve(tr.vn, nvn) : -1;
         if(vi<0 || vi>=nv){ fprintf(stderr,"Invalid vertex index in face.\n"); exit(1); }
 
-        Triplet key = { vi, vti, vni };
+        /* pack attributes for this corner */
+        Vec3 p = V[vi];
+        uint32_t pPacked = pack_pos_cm_101010(p.x, p.y, p.z);
+
+        float nx=0.f, ny=0.f, nz=1.f;
+        if(vni>=0){ nx=VN[vni].x; ny=VN[vni].y; nz=VN[vni].z; }
+        uint32_t nPacked = pack_nrm_101010(nx, ny, nz);
+
+        float uu=0.f, vv=0.f;
+        if(vti>=0){ uu=VT[vti].u; vv=VT[vti].v; }
+        uint32_t tPacked = ((uint32_t)unorm16(uu)) | ((uint32_t)unorm16(vv) << 16);
+
+        /* dedup by **position only** */
         uint32_t idx = (uint32_t)vcount;
-        int inserted = hmap_get_or_put(&map, key, &idx);
-
+        int inserted = posmap_get_or_put(&pmap, pPacked, &idx);
         if(inserted){
-            /* position */
-            Vec3 p = V[vi];
-            pos_u32[vcount] = pack101010(p.x, p.y, p.z);
-
-            /* normal (default +Z if missing) */
-            float nx=0.f, ny=0.f, nz=1.f;
-            if(vni>=0){ nx=VN[vni].x; ny=VN[vni].y; nz=VN[vni].z; }
-            /* normalize just in case */
-            float len = sqrtf(nx*nx+ny*ny+nz*nz); if(len>0.f){ nx/=len; ny/=len; nz/=len; }
-            nrm_u32[vcount] = pack101010(nx, ny, nz);
-
-            /* uv (default 0,0 if missing) */
-            float uu=0.f, vv=0.f;
-            if(vti>=0){ uu=VT[vti].u; vv=VT[vti].v; }
-            uint16_t U=unorm16(uu), Vv=unorm16(vv);
-            uv_u32[vcount] = ((uint32_t)Vv<<16) | (uint32_t)U;
-
+            if(idx > 0xFFFFu){ fprintf(stderr,"Too many vertices (>65535).\n"); exit(1); }
+            pos_u32[idx] = pPacked;
+            nrm_u32[idx] = nPacked;   /* first normal encountered for this position */
+            uv_u32[idx]  = tPacked;   /* first UV encountered for this position     */
             vcount++;
+        } else {
+            /* already had this position; keep existing normal/uv (first wins) */
         }
-        if(idx > 0xFFFFu){
-            fprintf(stderr,"Error: too many unique vertices (%zu). 16-bit indices require vcount <= 65535.\n", (size_t)(idx+1));
-            exit(1);
-        }
-        idx_u16[icount++] = idx; /* uint16 indices */
+
+        if(idx > 0xFFFFu){ fprintf(stderr,"Index overflow.\n"); exit(1); }
+        idx_u16[icount++] = (uint16_t)idx;
     }
 
     FILE* f = outpath? fopen(outpath, ends_with(outpath,".meshbin")? "wb":"w") : stdout;
@@ -314,7 +333,7 @@ static void build_and_emit(
     }
 
     if(outpath) fclose(f);
-    free(pos_u32); free(nrm_u32); free(uv_u32); free(idx_u16); free(map.e);
+    free(pos_u32); free(nrm_u32); free(uv_u32); free(idx_u16); free(pmap.e);
 }
 
 /* ---------- top-level parse pipeline ---------- */
