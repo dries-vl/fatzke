@@ -268,72 +268,77 @@ static void emit_binary(FILE* f,
     fwrite(idx_u16, sizeof(uint16_t), icount, f);
 }
 
-/* ---------- main build (dedup by packed position only) ---------- */
-static void build_and_emit(
+/* ---------- main build (preserve OBJ vertex order; no dedup) ---------- */
+static void build_and_emit_preserve_order(
     const char* outpath, const char* name,
     const Vec3* V, int nv, const Vec2* VT, int nvt, const Vec3* VN, int nvn,
     Triplet* T, int ntris)
 {
-    size_t maxVerts = (size_t)3*ntris;
+    /* allocate exact-size buffers */
+    size_t vcount = (size_t)nv;
+    size_t icount = (size_t)ntris * 3;
 
-    /* outputs */
-    uint32_t* pos_u32 = (uint32_t*)malloc(maxVerts*sizeof(uint32_t));
-    uint32_t* nrm_u32 = (uint32_t*)malloc(maxVerts*sizeof(uint32_t));
-    uint32_t* uv_u32  = (uint32_t*)malloc(maxVerts*sizeof(uint32_t));
-    uint16_t* idx_u16 = (uint16_t*)malloc((size_t)3*ntris*sizeof(uint16_t));
-    if(!pos_u32||!nrm_u32||!uv_u32||!idx_u16){ perror("malloc"); exit(1); }
+    uint32_t* pos_u32 = (uint32_t*)malloc(vcount * sizeof(uint32_t));
+    uint32_t* nrm_u32 = (uint32_t*)malloc(vcount * sizeof(uint32_t));
+    uint32_t* uv_u32  = (uint32_t*)malloc(vcount * sizeof(uint32_t));
+    uint16_t* idx_u16 = (uint16_t*)malloc(icount * sizeof(uint16_t));
+    if(!pos_u32 || !nrm_u32 || !uv_u32 || !idx_u16){ perror("malloc"); exit(1); }
 
-    PosMap pmap; posmap_init(&pmap, (size_t)3*ntris);
+    /* 1) write positions in OBJ order (v1..vn) */
+    for (int i = 0; i < nv; ++i) {
+        Vec3 p = V[i];
+        pos_u32[i] = pack_pos_cm_101010(p.x, p.y, p.z);
+    }
 
-    size_t vcount=0, icount=0;
+    /* 2) init normals/uvs with defaults; we will set them on first use per vertex */
+    for (int i = 0; i < nv; ++i) {
+        nrm_u32[i] = pack_nrm_101010(0.0f, 0.0f, 1.0f);           /* default +Z */
+        uv_u32[i]  = ((uint32_t)unorm16(0.0f)) | ((uint32_t)unorm16(0.0f) << 16);
+    }
+    unsigned char* filled_attr = (unsigned char*)calloc((size_t)nv, 1);
+    if (!filled_attr) { perror("calloc"); exit(1); }
 
-    for(int i=0;i<ntris*3;i++){
-        Triplet tr = T[i];
+    /* 3) emit indices directly from faces; capture first normal/uv per vertex index */
+    size_t k = 0;
+    for (int t = 0; t < ntris * 3; ++t) {
+        Triplet tr = T[t];
+
         int vi  = resolve(tr.v,  nv);
         int vti = (tr.vt!=0)? resolve(tr.vt, nvt) : -1;
         int vni = (tr.vn!=0)? resolve(tr.vn, nvn) : -1;
-        if(vi<0 || vi>=nv){ fprintf(stderr,"Invalid vertex index in face.\n"); exit(1); }
 
-        /* pack attributes for this corner */
-        Vec3 p = V[vi];
-        uint32_t pPacked = pack_pos_cm_101010(p.x, p.y, p.z);
+        if (vi < 0 || vi >= nv) { fprintf(stderr,"Invalid vertex index in face.\n"); exit(1); }
 
-        float nx=0.f, ny=0.f, nz=1.f;
-        if(vni>=0){ nx=VN[vni].x; ny=VN[vni].y; nz=VN[vni].z; }
-        uint32_t nPacked = pack_nrm_101010(nx, ny, nz);
+        /* assign normal/uv for this vertex index the first time we see it */
+        if (!filled_attr[vi]) {
+            float nx=0.f, ny=0.f, nz=1.f;
+            if (vni >= 0) { nx = VN[vni].x; ny = VN[vni].y; nz = VN[vni].z; }
+            nrm_u32[vi] = pack_nrm_101010(nx, ny, nz);
 
-        float uu=0.f, vv=0.f;
-        if(vti>=0){ uu=VT[vti].u; vv=VT[vti].v; }
-        uint32_t tPacked = ((uint32_t)unorm16(uu)) | ((uint32_t)unorm16(vv) << 16);
+            float uu=0.f, vv=0.f;
+            if (vti >= 0) { uu = VT[vti].u; vv = VT[vti].v; }
+            uv_u32[vi] = ((uint32_t)unorm16(uu)) | ((uint32_t)unorm16(vv) << 16);
 
-        /* dedup by **position only** */
-        uint32_t idx = (uint32_t)vcount;
-        int inserted = posmap_get_or_put(&pmap, pPacked, &idx);
-        if(inserted){
-            if(idx > 0xFFFFu){ fprintf(stderr,"Too many vertices (>65535).\n"); exit(1); }
-            pos_u32[idx] = pPacked;
-            nrm_u32[idx] = nPacked;   /* first normal encountered for this position */
-            uv_u32[idx]  = tPacked;   /* first UV encountered for this position     */
-            vcount++;
-        } else {
-            /* already had this position; keep existing normal/uv (first wins) */
+            filled_attr[vi] = 1;
         }
 
-        if(idx > 0xFFFFu){ fprintf(stderr,"Index overflow.\n"); exit(1); }
-        idx_u16[icount++] = (uint16_t)idx;
+        /* write index = vi (0-based) */
+        if ((unsigned)vi > 0xFFFFu) { fprintf(stderr,"Index overflow.\n"); exit(1); }
+        idx_u16[k++] = (uint16_t)vi;
     }
 
+    /* 4) write out */
     FILE* f = outpath? fopen(outpath, ends_with(outpath,".meshbin")? "wb":"w") : stdout;
     if(!f){ perror("fopen out"); exit(1); }
 
     if(outpath && ends_with(outpath,".meshbin")){
         emit_binary(f, pos_u32, nrm_u32, uv_u32, vcount, idx_u16, icount);
-    }else{
+    } else {
         emit_header(f, pos_u32, nrm_u32, uv_u32, vcount, idx_u16, icount, name?name:"mesh");
     }
 
     if(outpath) fclose(f);
-    free(pos_u32); free(nrm_u32); free(uv_u32); free(idx_u16); free(pmap.e);
+    free(pos_u32); free(nrm_u32); free(uv_u32); free(idx_u16); free(filled_attr);
 }
 
 /* ---------- top-level parse pipeline ---------- */
@@ -365,7 +370,7 @@ int main(int argc, char** argv){
     int nv,nvt,nvn,ntris;
     parse_and_fill(s,e, V, VT, VN, T, &nv,&nvt,&nvn,&ntris);
 
-    build_and_emit(outpath, name, V, nv, VT, nvt, VN, nvn, T, ntris);
+    build_and_emit_preserve_order(outpath, name, V, nv, VT, nvt, VN, nvn, T, ntris);
 
     free(V); if(VT) free(VT); if(VN) free(VN); free(T); free(b.ptr);
     return 0;

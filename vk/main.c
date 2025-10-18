@@ -1,7 +1,5 @@
 #include "header.h"
 
-#include "mesh.h" // todo: remove
-
 #ifdef _WIN32
 #define VK_USE_PLATFORM_WIN32_KHR
 #define WIN32_LEAN_AND_MEAN
@@ -105,9 +103,9 @@ void create_buffer_and_memory(VkDevice device, VkPhysicalDevice phys,
     VK_CHECK(vkAllocateMemory(device, &alloc_info, NULL, out_mem));
     VK_CHECK(vkBindBufferMemory(device, *out_buf, *out_mem, 0));
 }
-static void upload_to_buffer(VkDevice dev, VkDeviceMemory mem, size_t bytes, const void *src) {
+static void upload_to_buffer(VkDevice dev, VkDeviceMemory mem, size_t offset, const void *src, size_t bytes) {
     void* dst = NULL;
-    VK_CHECK(vkMapMemory(dev, mem, 0, bytes, 0, &dst));
+    VK_CHECK(vkMapMemory(dev, mem, offset, bytes, 0, &dst));
     memcpy(dst, src, bytes);
     vkUnmapMemory(dev, mem);
 }
@@ -289,7 +287,7 @@ int main(void) {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
         .polygonMode = VK_POLYGON_MODE_FILL,
         .cullMode    = VK_CULL_MODE_BACK_BIT,
-        .frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        .frontFace   = VK_FRONT_FACE_CLOCKWISE,
         .lineWidth   = 1.0f
     };
     VkPipelineMultisampleStateCreateInfo multisample = {
@@ -336,18 +334,48 @@ int main(void) {
     vkDestroyShaderModule(machine.device, shader_module,  NULL);
 
     #pragma region BUFFERS
-    const uint32_t kVertsPerMesh = 192;
-    const uint32_t kIdxPerMesh   = 1116;
-    uint32_t numMeshes    = 1;
-    uint32_t numInstances = 1;
-    VkDeviceSize size_instances = (VkDeviceSize)numInstances * sizeof(uint32_t) * 2;
-    VkDeviceSize size_visible   = (VkDeviceSize)numInstances * sizeof(uint32_t) * 2;
-    VkDeviceSize size_mesh_info = (VkDeviceSize)numMeshes * sizeof(uint32_t) * 2;
-    VkDeviceSize size_counters  = sizeof(VkDrawIndexedIndirectCommand);
-    VkDeviceSize size_positions = (VkDeviceSize)numMeshes * kVertsPerMesh * sizeof(uint32_t);
-    VkDeviceSize size_normals   = (VkDeviceSize)numMeshes * kVertsPerMesh * sizeof(uint32_t);
-    VkDeviceSize size_uvs       = (VkDeviceSize)kVertsPerMesh * sizeof(uint16_t) * 2; 
-    VkDeviceSize size_indices   = (VkDeviceSize)kIdxPerMesh * sizeof(uint16_t);
+    #include "mesh.h" // todo: link with object file instead 
+    #include "plane_lod0.h"
+    #include "plane_lod1.h"
+    #include "plane_lod2.h"
+    #include "plane_lod3.h"
+    #include "plane_lod4.h"
+    #include "plane_lod5.h"
+    #include "plane_lod6.h"
+    #define MESH_COUNT 8
+    struct mesh_info { u32 vertex_count, index_count, instance_count; const u16 *indices; const u32 *positions, *normals, *uvs; };
+    const struct mesh_info meshes[MESH_COUNT] = {
+        {g_vertex_count_mesh, g_index_count_mesh, 1, g_indices_mesh, g_positions_mesh, g_normals_mesh, g_uvs_mesh},
+        {g_vertex_count_plane_lod0, g_index_count_plane_lod0, 1, g_indices_plane_lod0, NULL,NULL,NULL},
+        {g_vertex_count_plane_lod1, g_index_count_plane_lod1, 1, g_indices_plane_lod1, NULL,NULL,NULL},
+        {g_vertex_count_plane_lod2, g_index_count_plane_lod2, 1, g_indices_plane_lod2, NULL,NULL,NULL},
+        {g_vertex_count_plane_lod3, g_index_count_plane_lod3, 1, g_indices_plane_lod3, NULL,NULL,NULL},
+        {g_vertex_count_plane_lod4, g_index_count_plane_lod4, 1, g_indices_plane_lod4, NULL,NULL,NULL},
+        {g_vertex_count_plane_lod5, g_index_count_plane_lod5, 1, g_indices_plane_lod5, NULL,NULL,NULL},
+        {g_vertex_count_plane_lod6, g_index_count_plane_lod6, 1, g_indices_plane_lod6, NULL,NULL,NULL}
+    };
+    u32 total_vertex_count = 0;
+    u32 total_index_count = 0;
+    u32 total_instance_count = 0;
+    struct VkDrawIndexedIndirectCommand mesh_info[MESH_COUNT];
+    for (u32 i = 0; i < MESH_COUNT; ++i) {
+        mesh_info[i].firstIndex    = total_index_count;
+        mesh_info[i].vertexOffset  = total_vertex_count;
+        mesh_info[i].indexCount    = meshes[i].index_count;
+        mesh_info[i].firstInstance = total_instance_count;
+        mesh_info[i].instanceCount = meshes[i].instance_count;
+        total_vertex_count += meshes[i].vertex_count;
+        total_index_count  += meshes[i].index_count;
+        total_instance_count += meshes[i].instance_count;
+    }
+    VkDeviceSize size_instances = total_instance_count * sizeof(uint64_t);
+    VkDeviceSize size_visible   = total_instance_count * sizeof(uint64_t);
+    VkDeviceSize size_mesh_info = MESH_COUNT * sizeof(VkDrawIndexedIndirectCommand);
+    VkDeviceSize size_counters  = MESH_COUNT * sizeof(VkDrawIndexedIndirectCommand);
+    VkDeviceSize size_positions = total_vertex_count * sizeof(uint32_t);
+    VkDeviceSize size_normals   = total_vertex_count * sizeof(uint32_t);
+    VkDeviceSize size_uvs       = total_vertex_count * sizeof(uint32_t); 
+    VkDeviceSize size_indices   = total_index_count  * sizeof(uint16_t);
 
     const VkMemoryPropertyFlags host_visible_coherent =
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
@@ -366,6 +394,11 @@ int main(void) {
     create_buffer_and_memory(machine.device, machine.physical_device, size_counters,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         host_visible_coherent, &renderer.buffer_counters, &renderer.memory_counters);
+
+    // MESH INFO
+    create_buffer_and_memory(machine.device, machine.physical_device, size_mesh_info,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        host_visible_coherent, &renderer.buffer_mesh_info, &renderer.memory_mesh_info);
 
     // POSITIONS SSBO (you can make this device-local with a staging upload later)
     create_buffer_and_memory(machine.device, machine.physical_device, size_positions,
@@ -403,14 +436,46 @@ int main(void) {
     struct GPUInstance inst;
     inst.xz_dm = ((uint16_t)0 /*z_dm*/) << 16 | ((uint16_t)0 /*x_dm*/);
     float yaw = 0.0f;
-    inst.y_cs = ((uint16_t)20 /*y_dm*/) | (((uint8_t)lrintf(cosf(yaw) * 127.0f)) << 16) |
+    inst.y_cs = ((uint16_t)0 /*y_dm*/) | (((uint8_t)lrintf(cosf(yaw) * 127.0f)) << 16) |
         (((uint8_t)lrintf(sinf(yaw) * 127.0f)) << 24);
-    {
-        upload_to_buffer(machine.device, renderer.memory_positions, sizeof(uint32_t)*kVertsPerMesh, g_positions_mesh);
-        upload_to_buffer(machine.device, renderer.memory_normals,   sizeof(uint32_t)*kVertsPerMesh, g_normals_mesh);
-        upload_to_buffer(machine.device, renderer.memory_uvs,       sizeof(uint16_t)*2*kVertsPerMesh, g_uvs_mesh);
-        upload_to_buffer(machine.device, renderer.memory_indices,   sizeof(uint16_t)*kIdxPerMesh, g_indices_mesh);
-        upload_to_buffer(machine.device, renderer.memory_instances, sizeof(struct GPUInstance)*1, &inst);
+    // upload mesh info
+    upload_to_buffer(machine.device, renderer.memory_mesh_info, 0,
+        mesh_info, MESH_COUNT * sizeof(VkDrawIndexedIndirectCommand));
+    
+    // upload the mesh data for all meshes
+    for (u32 i = 0; i < MESH_COUNT; ++i) {
+        if (meshes[i].positions) {
+            upload_to_buffer(machine.device, renderer.memory_positions,
+                mesh_info[i].vertexOffset * sizeof(uint32_t),
+                meshes[i].positions,
+                meshes[i].vertex_count * sizeof(uint32_t));
+        }
+        if (meshes[i].normals) {
+            upload_to_buffer(machine.device, renderer.memory_normals,
+                mesh_info[i].vertexOffset * sizeof(uint32_t),
+                meshes[i].normals,
+                meshes[i].vertex_count * sizeof(uint32_t));
+        }
+        if (meshes[i].uvs) {
+            upload_to_buffer(machine.device, renderer.memory_uvs,
+                mesh_info[i].vertexOffset * sizeof(uint32_t),
+                meshes[i].uvs,
+                meshes[i].vertex_count * sizeof(uint32_t));
+        }
+        upload_to_buffer(machine.device, renderer.memory_indices,
+            mesh_info[i].firstIndex * sizeof(uint16_t),
+            meshes[i].indices,
+            meshes[i].index_count * sizeof(uint16_t));
+        if (meshes[i].instance_count > 0) {
+            size_t instance_buffer_size = meshes[i].instance_count * sizeof(struct GPUInstance);
+            static struct GPUInstance instance_data[4000];
+            memset(instance_data, 0, instance_buffer_size);
+            instance_data[0] = inst;
+            upload_to_buffer(machine.device, renderer.memory_instances,
+                mesh_info[i].firstInstance * sizeof(struct GPUInstance),
+                instance_data,
+                instance_buffer_size);
+        }
     }
     
     /* -------- Descriptor Pool & Set -------- */
@@ -663,7 +728,7 @@ int main(void) {
             vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,renderer.common_pipeline_layout, 0, 1, &renderer.descriptor_set, 0, NULL);
             // Build visible (no culling): instanceCount = numInstances
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, renderer.compute_pipelines[0]);
-            vkCmdDispatch(cmd, (numInstances+63)/64, 1, 1);
+            vkCmdDispatch(cmd, (total_instance_count+63)/64, 1, 1);
             #if DEBUG_APP == 1
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, swapchain.query_pool, q0 + Q_AFTER_COMP_BUILD);
             #endif
@@ -748,22 +813,13 @@ int main(void) {
                 renderer.common_pipeline_layout,
                 VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                 0, sizeof(uint32_t), &mode_mesh);
-            vkCmdDrawIndexedIndirect(cmd, renderer.buffer_counters, 0, 1, sizeof(VkDrawIndexedIndirectCommand));
+            vkCmdDrawIndexedIndirect(cmd, renderer.buffer_counters, 0, MESH_COUNT, sizeof(VkDrawIndexedIndirectCommand));
             uint32_t mode_sky = 1;
             vkCmdPushConstants(cmd,
                 renderer.common_pipeline_layout,
                 VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                 0, sizeof(uint32_t), &mode_sky);
             vkCmdDraw(cmd, 3, 1, 0, 0); // sky fullscreen triangle
-            uint32_t mode_ground = 2;
-            vkCmdPushConstants(cmd,
-                renderer.common_pipeline_layout,
-                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                0, sizeof(uint32_t), &mode_ground);
-            const uint32_t GRID_QUADS = 225;
-            const uint32_t triCount   = GRID_QUADS * GRID_QUADS * 2;
-            const uint32_t vertCount  = triCount * 3;
-            // vkCmdDraw(cmd, vertCount, 1, 0, 0); // ground
             vkCmdEndRendering(cmd);
             VkImageMemoryBarrier2 to_present = {
               .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
