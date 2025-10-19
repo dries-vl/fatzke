@@ -3,8 +3,8 @@ static const float fov_y_radians      = 60.0f * PI / 180.0f;                  //
 static const float proj_scale_y       = 1.0f / tan(fov_y_radians * 0.5f);     // cot(FoV/2), projection scale factor for Y
 static const float aspect_ratio       = 16.0f / 9.0f;                         // screen aspect ratio (width / height)
 static const float proj_scale_x       = proj_scale_y / aspect_ratio;          // projection scale factor for X
-static const float near_plane         = 0.1f;                                 // near clipping plane distance
-static const float far_plane          = 10000.0f;                             // far clipping plane distance
+static const float near_plane         = 50.0f;                                 // near clipping plane distance
+static const float far_plane          = 600000.0f;                             // far clipping plane distance
 static const float depth_a            = far_plane / (far_plane - near_plane); // depth matrix coefficient A
 static const float depth_b            = -far_plane * near_plane / (far_plane - near_plane); // depth matrix coefficient B
 static const float divide_by_127      = float(1.0/127.0);
@@ -19,45 +19,69 @@ struct mdi {
     uint first_instance;          // first instance index
 };
 
-// create range per mesh type; implicit mesh id based on instance-id and workgroup
+// todo: add mesh id to instance
 [[vk::binding(0,0)]] StructuredBuffer<uint2>    INSTANCES; // 6 bytes position + 2 bytes cos/sin
 // todo: we'll probably need 4 bytes for cos/sin as it includes camera yaw
 [[vk::binding(1,0)]] RWStructuredBuffer<uint2>  VISIBLE_PACKED; // 6 bytes position + 2 bytes cos/sin
 // we know for a given scene, up front how many instances at most can be visible anyway, except for particles etc.
 [[vk::binding(2,0)]] RWStructuredBuffer<mdi>    MESH_INFO; // reuse MDI struct for the mesh info, use instance_count to mean 'max visible of this mesh in this scene'
 // one struct per mesh type, index is mesh id
-[[vk::binding(3,0)]] RWStructuredBuffer<mdi>    COUNTERS; // MDI
+[[vk::binding(3,0)]] RWStructuredBuffer<mdi>    COUNTERS;  // MDI
 [[vk::binding(4,0)]] StructuredBuffer<uint>     POSITIONS; // R10G10B10A2
 [[vk::binding(5,0)]] StructuredBuffer<uint>     NORMALS;   // R10G10B10A2_SNORM
-[[vk::binding(6,0)]] StructuredBuffer<uint>     UVS;   // R16G16
+[[vk::binding(6,0)]] StructuredBuffer<uint>     UVS;       // R16G16_UNORM
 [[vk::binding(7,0)]]
 cbuffer uniforms {
     uint4 CAMERA_DATA; // packed camera data (position + orientation)
 };
 
+uint find_mesh_id(uint instance_id, uint mesh_count) {
+    uint lo = 0, hi = mesh_count;
+    // log(N) search, finds among 1000 in appr. 10 iterations
+    while (lo < hi) {
+        uint mid = (lo + hi) >> 1;
+        uint start = MESH_INFO[mid].first_instance;
+        if (start <= instance_id) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo - 1;
+}
+ 
 [shader("compute")] [numthreads(64,1,1)]
 void cs_build_visible(uint3 tid : SV_DispatchThreadID) {
-    uint id = tid.x;
-    uint instance_count, stride; INSTANCES.GetDimensions(instance_count, stride);
-    if (id >= instance_count) return;
+    // same fetches for whole workgroup
+    uint4 camera = CAMERA_DATA.xyzw; // 16 bytes
+    uint stride; uint mesh_count; uint instance_count;
+    INSTANCES.GetDimensions(instance_count, stride);
+    MESH_INFO.GetDimensions(mesh_count, stride);
 
-    uint2 instance = INSTANCES[id];    // 8 bytes
-    uint4 camera   = CAMERA_DATA.xyzw; // 16 bytes
+    // fetches per instance
+    uint instance_id = tid.x; if (instance_id >= instance_count) return; // early out
+    uint mesh_id = find_mesh_id(instance_id, mesh_count);
+    uint first_instance = MESH_INFO[mesh_id].first_instance; // 4 bytes (out of 20 bytes struct)
+    uint2 instance = INSTANCES[instance_id];    // 8 bytes
 
-    // get position, represented as dm
+    // same calculation for whole workgroup
+    int3 camera_position = int3(
+        (int16_t) (camera.x        & 0xFFFF),
+        (int16_t)((camera.x >> 16) & 0xFFFF),
+        (int16_t) (camera.y        & 0xFFFF)
+    );
+    float camera_pitch_sin = float((int16_t)(camera.z        & 0xFFFF)) * divide_by_32767;
+    float camera_pitch_cos = float((int16_t)(camera.z  >> 16 & 0xFFFF)) * divide_by_32767;
+    float camera_yaw_sin   = float((int16_t)(camera.w        & 0xFFFF)) * divide_by_32767;
+    float camera_yaw_cos   = float((int16_t)(camera.w  >> 16 & 0xFFFF)) * divide_by_32767;
+
+    // unpack instance position and move to camera space
     float3 position = float3(
-        ((int16_t) (instance.x        & 0xFFFF)) - ((int16_t) (camera.x        & 0xFFFF)),
-        ((int16_t)((instance.x >> 16) & 0xFFFF)) - ((int16_t)((camera.x >> 16) & 0xFFFF)),
-        ((int16_t) (instance.y        & 0xFFFF)) - ((int16_t) (camera.y        & 0xFFFF))
+        ((int16_t) (instance.x        & 0xFFFF)) - camera_position.x,
+        ((int16_t)((instance.x >> 16) & 0xFFFF)) - camera_position.y,
+        ((int16_t) (instance.y        & 0xFFFF)) - camera_position.z
     );
 
     // unpack yaw and pitch
     float instance_yaw_cos = float((int8_t)(instance.y >> 16 & 0xFF))   * divide_by_127;
     float instance_yaw_sin = float((int8_t)(instance.y >> 24 & 0xFF))   * divide_by_127;
-    float camera_pitch_sin = float((int16_t)(camera.z        & 0xFFFF)) * divide_by_32767;
-    float camera_pitch_cos = float((int16_t)(camera.z  >> 16 & 0xFFFF)) * divide_by_32767;
-    float camera_yaw_sin   = float((int16_t)(camera.w        & 0xFFFF)) * divide_by_32767;
-    float camera_yaw_cos   = float((int16_t)(camera.w  >> 16 & 0xFFFF)) * divide_by_32767;
 
     // compute combined yaw between instance and camera
     float cos_delta =  instance_yaw_cos * camera_yaw_cos + instance_yaw_sin * camera_yaw_sin; // cos(a-b)
@@ -84,14 +108,9 @@ void cs_build_visible(uint3 tid : SV_DispatchThreadID) {
     uint packed0 = (uint)((tx_dm & 0xFFFF) | ((ty_dm & 0xFFFF) << 16));
     uint packed1 = (uint)((tz_dm & 0xFFFF) | (((int)round(cos_delta * 127.0f) & 0xFF) << 16) | (((int)round(sin_delta * 127.0f) & 0xFF) << 24));
 
-    if (id == 0) {
-        uint slot; InterlockedAdd(COUNTERS[0].instance_count, 1, slot);
-        VISIBLE_PACKED[slot] = uint2(packed0, packed1);
-    } else if (id == 1) {
-        mdi mesh_info = MESH_INFO[id];
-        uint slot; InterlockedAdd(COUNTERS[id].instance_count, 1, slot);
-        VISIBLE_PACKED[slot + mesh_info.first_instance] = uint2(packed0, packed1);
-    }
+    // write into the draw calls and visible list
+    uint slot; InterlockedAdd(COUNTERS[mesh_id].instance_count, 1, slot);
+    VISIBLE_PACKED[slot + first_instance] = uint2(packed0, packed1);
 }
 
 [shader("compute")] [numthreads(1,1,1)]
@@ -117,15 +136,17 @@ struct vs_out {
     float3 normal : TEXCOORD1;                                             // surface normal
 };
 
-int3 plane_position(uint VERTEX_ID, uint grid_width) {
-    uint row = VERTEX_ID % grid_width;
-    uint col = VERTEX_ID / grid_width;
-    int cx = (int)(grid_width - 1) / 2;
-    int cz = (int)(grid_width - 1) / 2;
-    int vx_cm = (int(col) - cx) * 100;
-    int vy_cm = 0;
-    int vz_cm = (int(row) - cz) * 100;
-    return int3(vx_cm, vy_cm, vz_cm);
+float3 plane_position(uint VERTEX_ID, uint grid_scale) {
+    uint grid_width = 128u >> grid_scale;     // 128, 64, 32, ..., 2
+    uint row = VERTEX_ID % grid_width;        // 0 .. grid_width-1
+    uint col = VERTEX_ID / grid_width;        // 0 .. grid_width-1
+    // Fixed base-plane span: 127 units (same as scale 0: 128 verts -> 127 steps)
+    const float span = 128.0 * 100;                 // total width per axis
+    const float half_span = span * 0.5;       // 63.5
+    // Normalize to [0,1] then scale to the fixed span
+    float x = (float(col) / float(grid_width - 1)) * span - half_span;
+    float z = (float(row) / float(grid_width - 1)) * span - half_span;
+    return float3(x, 0.0, z);;
 }
 
 [shader("vertex")]
@@ -151,25 +172,42 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] uint2 INSTANCE,
     float cos_d = float(((int8_t)((packed_instance.y >> 16) & 0xFFu))) * divide_by_127;
     float sin_d = float(((int8_t)((packed_instance.y >> 24) & 0xFFu))) * divide_by_127;
 
-    // fetch and unpack vertex position, represented as cm (4 bytes)
     // draw id is essentially just the mesh id in this case
-    int3 vertex;
-    if (DRAW_ID > 0) {
-        vertex = plane_position(VERTEX_ID, 128);
+    float3 vertex;
+    float3 normal;
+    float2 uv;
+    // todo: better way to recognize the terrain from other meshes
+    // todo: 4 bytes yaw instead of 2 bytes -> instance in 16 bytes instead of 8 bytes (?)
+    // -> wouldn't 16 bytes x 1M instances be a bit much writes (?)
+    // todo: nicer movement with camera, faster when higher, auto pitch, move forward faster with combined push + arrowkeys
+    if (DRAW_ID < 7) {
+        uint grid_scale = DRAW_ID % 7;
+        vertex = plane_position(VERTEX_ID, grid_scale);
+        normal = float3(0.5, 1.0, 0.2);
     } else {
-        uint packed_vertex = POSITIONS[VERTEX_ID];
-        vertex = int3(
-            ((int)( packed_vertex        & 0x3FF) << 22) >> 22,
-            ((int)((packed_vertex >> 10) & 0x3FF) << 22) >> 22,
-            ((int)((packed_vertex >> 20) & 0x3FF) << 22) >> 22
+        // we need to know the offset into the position (4 bytes)
+        uint base_vertex = MESH_INFO[DRAW_ID].base_vertex;
+        // fetch and unpack vertex position, represented as cm (4 bytes)
+        uint packed_vertex = POSITIONS[VERTEX_ID + base_vertex];
+        vertex = float3(
+            float(((int)( packed_vertex        & 0x3FF) << 22) >> 22),
+            float(((int)((packed_vertex >> 10) & 0x3FF) << 22) >> 22),
+            float(((int)((packed_vertex >> 20) & 0x3FF) << 22) >> 22)
+        );
+        // fetch and unpack vertex normal (4 bytes)
+        uint packed_normal = NORMALS[VERTEX_ID + base_vertex];
+        normal = float3(
+            float(((int)( packed_normal        & 0x3FF) << 22) >> 22) * divide_by_511,
+            float(((int)((packed_normal >> 10) & 0x3FF) << 22) >> 22) * divide_by_511,
+            float(((int)((packed_normal >> 20) & 0x3FF) << 22) >> 22) * divide_by_511
+        );
+        // fetch and unpack uv (4 bytes)
+        uint packed_uv = UVS[VERTEX_ID + base_vertex];
+        uv = float2(
+            (packed_uv & 0xFFFF) * (1.0/65535.0),
+            (packed_uv >> 16)    * (1.0/65535.0)
         );
     }
-
-    // fetch and unpack vertex normal (4 bytes)
-    uint packed_normal = NORMALS[VERTEX_ID];
-    float normal_x = float(((int)( packed_normal        & 0x3FF) << 22) >> 22) * divide_by_511;
-    float normal_y = float(((int)((packed_normal >> 10) & 0x3FF) << 22) >> 22) * divide_by_511;
-    float normal_z = float(((int)((packed_normal >> 20) & 0x3FF) << 22) >> 22) * divide_by_511;
 
     // fetch and unpack camera pitch (4 bytes)
     uint packed_camera = CAMERA_DATA.z;
@@ -199,8 +237,8 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] uint2 INSTANCE,
 
     vs_out o;
     o.pos = float4(cx, cy, cz, w);
-    o.normal = float3(normal_x, normal_y, normal_z);
-    o.uv = UVS[VERTEX_ID];
+    o.normal = normal;
+    o.uv = uv;
     return o;
 }
 
@@ -209,7 +247,7 @@ float4 fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
     if (PUSH_CONSTANTS.mode == 1) return float4(i.normal, 1.0);
     // debug draw triangles as distinct colors
     float3 color = frac(sin((primID+43) * 43.5453) * float3(23.1407, 85.928, 43.533));
-    if(color.x+color.y+color.z < 0.1) color = float3(float(primID % 32) / 32, float((primID + 38) % 64) / 64, float((primID + 17) % 32) / 32);
+    // if(color.x+color.y+color.z < 0.1) color = float3(float(primID % 32) / 32, float((primID + 38) % 64) / 64, float((primID + 17) % 32) / 32);
     return float4(color, 1.0);
     // return float4(i.normal, 1.0f);
 }

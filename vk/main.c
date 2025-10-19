@@ -140,8 +140,8 @@ void mouse_input_callback(void* ud, i32 x, i32 y, enum BUTTON button, int state)
         if (y > pf_window_height(window) - 50) buttons[MOUSE_MARGIN_BOTTOM] += (y - (pf_window_height(window) - 50)) / 5;
         else buttons[MOUSE_MARGIN_BOTTOM] = 0;
     }
-    if (button == MOUSE_SCROLL) buttons[MOUSE_SCROLL] += state / 5;
-    if (button == MOUSE_SCROLL_SIDE) buttons[MOUSE_SCROLL_SIDE] -= state / 10;
+    if (button == MOUSE_SCROLL) buttons[MOUSE_SCROLL] += state / 2;
+    if (button == MOUSE_SCROLL_SIDE) buttons[MOUSE_SCROLL_SIDE] -= state / 5;
     if (button == MOUSE_LEFT || button == MOUSE_RIGHT || button == MOUSE_MIDDLE) {
         if (state == PRESSED) buttons[button] = 1;
         else buttons[button] = 0;
@@ -157,6 +157,7 @@ void process_inputs() {
     if (buttons[MOUSE_MARGIN_RIGHT]) { cam_yaw += buttons[MOUSE_MARGIN_RIGHT]; }
     if (buttons[MOUSE_MARGIN_TOP]) { cam_pitch -= buttons[MOUSE_MARGIN_TOP]; }
     if (buttons[MOUSE_MARGIN_BOTTOM]) { cam_pitch += buttons[MOUSE_MARGIN_BOTTOM]; }
+    printf("pitch: %d yaw: %d\n", cam_pitch, cam_yaw);
     if (buttons[MOUSE_SCROLL]) { cam_y += buttons[MOUSE_SCROLL]; buttons[MOUSE_SCROLL] = 0; }
     if (buttons[MOUSE_SCROLL_SIDE]) { cam_x -= buttons[MOUSE_SCROLL_SIDE]; buttons[MOUSE_SCROLL_SIDE] = 0; }
 }
@@ -316,7 +317,7 @@ int main(void) {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
         .colorAttachmentCount = 1,
         .pColorAttachmentFormats = (VkFormat[]){ swapchain.swapchain_format },
-        .depthAttachmentFormat = VK_FORMAT_D16_UNORM,
+        .depthAttachmentFormat = VK_FORMAT_D32_SFLOAT,
         // .stencilAttachmentFormat = VK_FORMAT_UNDEFINED,
     };
     graphics_info.pNext = &pr;
@@ -343,16 +344,23 @@ int main(void) {
     #include "plane_lod5.h"
     #include "plane_lod6.h"
     #define MESH_COUNT 8
-    struct mesh_info { u32 vertex_count, index_count, instance_count; const u16 *indices; const u32 *positions, *normals, *uvs; };
+    struct gpu_instance { uint32_t xy_dm; uint32_t z_cs; };
+    struct mesh_info { u32 vertex_count, index_count, instance_count; const struct gpu_instance *instances; const u16 *indices; const u32 *positions, *normals, *uvs; };
+    #include "plane_instances.h"
+    struct gpu_instance mesh_inst;
+    mesh_inst.xy_dm = ((uint16_t)0) << 16 | ((uint16_t)0);
+    float yaw = 0.0f;
+    mesh_inst.z_cs = ((uint16_t)0) | (((uint8_t)lrintf(cosf(yaw) * 127.0f)) << 16) |
+        (((uint8_t)lrintf(sinf(yaw) * 127.0f)) << 24);
     const struct mesh_info meshes[MESH_COUNT] = {
-        {g_vertex_count_mesh, g_index_count_mesh, 1, g_indices_mesh, g_positions_mesh, g_normals_mesh, g_uvs_mesh},
-        {g_vertex_count_plane_lod0, g_index_count_plane_lod0, 1, g_indices_plane_lod0, NULL,NULL,NULL},
-        {g_vertex_count_plane_lod1, g_index_count_plane_lod1, 1, g_indices_plane_lod1, NULL,NULL,NULL},
-        {g_vertex_count_plane_lod2, g_index_count_plane_lod2, 1, g_indices_plane_lod2, NULL,NULL,NULL},
-        {g_vertex_count_plane_lod3, g_index_count_plane_lod3, 1, g_indices_plane_lod3, NULL,NULL,NULL},
-        {g_vertex_count_plane_lod4, g_index_count_plane_lod4, 1, g_indices_plane_lod4, NULL,NULL,NULL},
-        {g_vertex_count_plane_lod5, g_index_count_plane_lod5, 1, g_indices_plane_lod5, NULL,NULL,NULL},
-        {g_vertex_count_plane_lod6, g_index_count_plane_lod6, 1, g_indices_plane_lod6, NULL,NULL,NULL}
+        {g_vertex_count_plane_lod0, g_index_count_plane_lod0, 0, g_plane_instances, g_indices_plane_lod0, NULL,NULL,NULL},
+        {g_vertex_count_plane_lod1, g_index_count_plane_lod1, 0, g_plane_instances, g_indices_plane_lod1, NULL,NULL,NULL},
+        {g_vertex_count_plane_lod2, g_index_count_plane_lod2, 0, g_plane_instances, g_indices_plane_lod2, NULL,NULL,NULL},
+        {g_vertex_count_plane_lod3, g_index_count_plane_lod3, 0, g_plane_instances, g_indices_plane_lod3, NULL,NULL,NULL},
+        {g_vertex_count_plane_lod4, g_index_count_plane_lod4, 2601, g_plane_instances, g_indices_plane_lod4, NULL,NULL,NULL},
+        {g_vertex_count_plane_lod5, g_index_count_plane_lod5, 0, g_plane_instances, g_indices_plane_lod5, NULL,NULL,NULL},
+        {g_vertex_count_plane_lod6, g_index_count_plane_lod6, 0, g_plane_instances, g_indices_plane_lod6, NULL,NULL,NULL},
+        {g_vertex_count_mesh, g_index_count_mesh, 1, &mesh_inst, g_indices_mesh, g_positions_mesh, g_normals_mesh, g_uvs_mesh},
     };
     u32 total_vertex_count = 0;
     u32 total_index_count = 0;
@@ -410,7 +418,7 @@ int main(void) {
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         host_visible_coherent, &renderer.buffer_normals, &renderer.memory_normals);
 
-    // UV vertex buffer (shared 256 UVs; per-vertex VB)
+    // UVS
     create_buffer_and_memory(machine.device, machine.physical_device, size_uvs,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         host_visible_coherent, &renderer.buffer_uvs, &renderer.memory_uvs);
@@ -429,15 +437,6 @@ int main(void) {
     pf_timestamp("Buffers created");
 
     // upload the data for: uvs, positions, normals, indices, instances
-    struct GPUInstance {
-        uint32_t xz_dm;
-        uint32_t y_cs;
-    };
-    struct GPUInstance inst;
-    inst.xz_dm = ((uint16_t)0 /*z_dm*/) << 16 | ((uint16_t)0 /*x_dm*/);
-    float yaw = 0.0f;
-    inst.y_cs = ((uint16_t)0 /*y_dm*/) | (((uint8_t)lrintf(cosf(yaw) * 127.0f)) << 16) |
-        (((uint8_t)lrintf(sinf(yaw) * 127.0f)) << 24);
     // upload mesh info
     upload_to_buffer(machine.device, renderer.memory_mesh_info, 0,
         mesh_info, MESH_COUNT * sizeof(VkDrawIndexedIndirectCommand));
@@ -467,13 +466,10 @@ int main(void) {
             meshes[i].indices,
             meshes[i].index_count * sizeof(uint16_t));
         if (meshes[i].instance_count > 0) {
-            size_t instance_buffer_size = meshes[i].instance_count * sizeof(struct GPUInstance);
-            static struct GPUInstance instance_data[4000];
-            memset(instance_data, 0, instance_buffer_size);
-            instance_data[0] = inst;
+            size_t instance_buffer_size = meshes[i].instance_count * sizeof(struct gpu_instance);
             upload_to_buffer(machine.device, renderer.memory_instances,
-                mesh_info[i].firstInstance * sizeof(struct GPUInstance),
-                instance_data,
+                mesh_info[i].firstInstance * sizeof(struct gpu_instance),
+                meshes[i].instances,
                 instance_buffer_size);
         }
     }
@@ -814,6 +810,7 @@ int main(void) {
                 VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                 0, sizeof(uint32_t), &mode_mesh);
             vkCmdDrawIndexedIndirect(cmd, renderer.buffer_counters, 0, MESH_COUNT, sizeof(VkDrawIndexedIndirectCommand));
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, swapchain.query_pool, q0 + Q_AFTER_RENDERPASS);
             uint32_t mode_sky = 1;
             vkCmdPushConstants(cmd,
                 renderer.common_pipeline_layout,
@@ -821,6 +818,7 @@ int main(void) {
                 0, sizeof(uint32_t), &mode_sky);
             vkCmdDraw(cmd, 3, 1, 0, 0); // sky fullscreen triangle
             vkCmdEndRendering(cmd);
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, swapchain.query_pool, q0 + Q_AFTER_BLIT);
             VkImageMemoryBarrier2 to_present = {
               .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
               .srcStageMask  = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -835,11 +833,9 @@ int main(void) {
             vkCmdPipelineBarrier2(cmd, &(VkDependencyInfo){ .sType=VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
               .imageMemoryBarrierCount=1, .pImageMemoryBarriers=&to_present });
             #if DEBUG_APP == 1
-            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, swapchain.query_pool, q0 + Q_AFTER_RENDERPASS);
             #endif
            
             #if DEBUG_APP == 1
-            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, swapchain.query_pool, q0 + Q_AFTER_BLIT);
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, swapchain.query_pool, q0 + Q_END);
             #endif
             VK_CHECK(vkEndCommandBuffer(cmd));

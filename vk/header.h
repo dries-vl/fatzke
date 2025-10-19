@@ -13,8 +13,8 @@ typedef __SIZE_TYPE__ usize;
 
 // SETTINGS
 #define APP_NAME "VK: work in progress"
-#define DEBUG_VULKAN 0
-#define DEBUG_APP 0
+#define DEBUG_VULKAN 1
+#define DEBUG_APP 1
 #define DEBUG_CPU 1
 
 // VULKAN
