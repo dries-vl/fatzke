@@ -11,26 +11,24 @@ static const float divide_by_127      = float(1.0/127.0);
 static const float divide_by_511      = float(1.0/511.0);
 static const float divide_by_32767    = float(1.0/32767.0);
 
-struct mdi {
-    uint index_count;             // number of indices per draw call
-    uint instance_count;          // number of visible INSTANCES found by compute shader
-    uint first_index;             // first index in the index buffer
-    int  base_vertex;             // base vertex offset for indexed draw
-    uint first_instance;          // first instance index
-};
 
-// todo: add mesh id to instance
+// this will be the 'high level' instance, that can be a group of instances for smaller things
+// unit instance: torso + head + shield + weapon
+// grass: bunch of grass together (although grass is procedurally generated with noise so not in instance buffer)
+// terrain: bunch of tiles together (current 2601 instances split into more granular)
 [[vk::binding(0,0)]] StructuredBuffer<uint2>    INSTANCES; // 6 bytes position + 2 bytes cos/sin
 // todo: we'll probably need 4 bytes for cos/sin as it includes camera yaw
-[[vk::binding(1,0)]] RWStructuredBuffer<uint2>  VISIBLE_PACKED; // 6 bytes position + 2 bytes cos/sin
+struct visible {uint a, b, c, pad;};
+[[vk::binding(1,0)]] RWStructuredBuffer<visible> VISIBLE_PACKED; // 6 bytes position + 2 bytes cos/sin
+[[vk::binding(2,0)]] RWStructuredBuffer<uint>    VISIBLE_IDS;
 // we know for a given scene, up front how many instances at most can be visible anyway, except for particles etc.
-[[vk::binding(2,0)]] RWStructuredBuffer<mdi>    MESH_INFO; // reuse MDI struct for the mesh info, use instance_count to mean 'max visible of this mesh in this scene'
-// one struct per mesh type, index is mesh id
-[[vk::binding(3,0)]] RWStructuredBuffer<mdi>    COUNTERS;  // MDI
-[[vk::binding(4,0)]] StructuredBuffer<uint>     POSITIONS; // R10G10B10A2
-[[vk::binding(5,0)]] StructuredBuffer<uint>     NORMALS;   // R10G10B10A2_SNORM
-[[vk::binding(6,0)]] StructuredBuffer<uint>     UVS;       // R16G16_UNORM
-[[vk::binding(7,0)]]
+struct mdi {uint index_count, instance_count, first_index, base_vertex, first_instance;};
+[[vk::binding(3,0)]] RWStructuredBuffer<mdi>    MESH_INFO; // MDI, instance_count is 'max visible of this mesh in this scene'
+[[vk::binding(4,0)]] RWStructuredBuffer<mdi>    COUNTERS;  // MDI, one struct per mesh type, index is mesh id
+[[vk::binding(5,0)]] StructuredBuffer<uint>     POSITIONS; // R10G10B10A2
+[[vk::binding(6,0)]] StructuredBuffer<uint>     NORMALS;   // R10G10B10A2_SNORM
+[[vk::binding(7,0)]] StructuredBuffer<uint>     UVS;       // R16G16_UNORM
+[[vk::binding(8,0)]]
 cbuffer uniforms {
     uint4 CAMERA_DATA; // packed camera data (position + orientation)
 };
@@ -46,6 +44,16 @@ uint find_mesh_id(uint instance_id, uint mesh_count) {
     }
     return lo - 1;
 }
+
+uint choose_lod_step(float z_forward) {
+    if (z_forward >= 600.0) return 0;
+    if (z_forward >= 300.0) return 1;
+    if (z_forward >= 150.0) return 2;
+    if (z_forward >= 75.0) return 3;
+    if (z_forward >= 38.0) return 4;
+    if (z_forward >= 19.0) return 5;
+    return 6;
+}
  
 [shader("compute")] [numthreads(64,1,1)]
 void cs_build_visible(uint3 tid : SV_DispatchThreadID) {
@@ -57,8 +65,6 @@ void cs_build_visible(uint3 tid : SV_DispatchThreadID) {
 
     // fetches per instance
     uint instance_id = tid.x; if (instance_id >= instance_count) return; // early out
-    uint mesh_id = find_mesh_id(instance_id, mesh_count);
-    uint first_instance = MESH_INFO[mesh_id].first_instance; // 4 bytes (out of 20 bytes struct)
     uint2 instance = INSTANCES[instance_id];    // 8 bytes
 
     // same calculation for whole workgroup
@@ -80,8 +86,8 @@ void cs_build_visible(uint3 tid : SV_DispatchThreadID) {
     );
 
     // unpack yaw and pitch
-    float instance_yaw_cos = float((int8_t)(instance.y >> 16 & 0xFF))   * divide_by_127;
-    float instance_yaw_sin = float((int8_t)(instance.y >> 24 & 0xFF))   * divide_by_127;
+    float instance_yaw_cos = float((int8_t)(instance.y >> 16 & 0xFF)) * divide_by_127;
+    float instance_yaw_sin = float((int8_t)(instance.y >> 24 & 0xFF)) * divide_by_127;
 
     // compute combined yaw between instance and camera
     float cos_delta =  instance_yaw_cos * camera_yaw_cos + instance_yaw_sin * camera_yaw_sin; // cos(a-b)
@@ -106,24 +112,94 @@ void cs_build_visible(uint3 tid : SV_DispatchThreadID) {
 
     // pack rotated by yaw
     uint packed0 = (uint)((tx_dm & 0xFFFF) | ((ty_dm & 0xFFFF) << 16));
-    uint packed1 = (uint)((tz_dm & 0xFFFF) | (((int)round(cos_delta * 127.0f) & 0xFF) << 16) | (((int)round(sin_delta * 127.0f) & 0xFF) << 24));
+    uint packed1 = (uint)((tz_dm & 0xFFFF) | ((int)round(cos_delta * 32767.0f) & 0xFFFF) << 16);
+    uint packed2 = (uint)(((int)round(sin_delta * 32767.0f) & 0xFFFF));
+    
+    // pick lod level
+    uint mesh_id = find_mesh_id(instance_id, mesh_count);
+    uint mesh_lod = mesh_id - choose_lod_step(t_view.z);
+    uint first_instance = MESH_INFO[mesh_id].first_instance; // 4 bytes (out of 20 bytes struct)
 
     // write into the draw calls and visible list
-    uint slot; InterlockedAdd(COUNTERS[mesh_id].instance_count, 1, slot);
-    VISIBLE_PACKED[slot + first_instance] = uint2(packed0, packed1);
+    uint slot; InterlockedAdd(COUNTERS[mesh_lod].instance_count, 1, slot);
+    VISIBLE_PACKED[slot + first_instance] = visible(packed0, packed1, packed2, 0);
+    VISIBLE_IDS[slot + first_instance] = mesh_lod;
 }
 
+// todo: for sure add a sphere bounding radius to each base gpu instance for culling + proper lod selection
 [shader("compute")] [numthreads(1,1,1)]
 void cs_prepare_indirect() {
-    uint mesh_count, stride; MESH_INFO.GetDimensions(mesh_count, stride);
-    for (int mesh_id = 0; mesh_id<mesh_count; ++mesh_id) {
-        mdi mesh_info = MESH_INFO[mesh_id];
-        COUNTERS[mesh_id].index_count    = mesh_info.index_count;
-        COUNTERS[mesh_id].first_index    = mesh_info.first_index;
-        COUNTERS[mesh_id].base_vertex    = mesh_info.base_vertex;
-        COUNTERS[mesh_id].first_instance = mesh_info.first_instance;
+    uint mesh_count, stride; 
+    MESH_INFO.GetDimensions(mesh_count, stride);
+
+    // Process meshes in groups of 7 LODs: LOD0 (most detailed, lowest id) .. LOD6 (least detailed, highest id)
+    for (uint mesh_base = 0; mesh_base < mesh_count; mesh_base += 7) {
+        // guard for incomplete tail group
+        if (mesh_base + 6 >= mesh_count) break;
+
+        // The big reserved block lives on the least-detailed LOD (highest id)
+        const uint LOD_MAX_ID = mesh_base + 6;
+
+        // Static draw params -> COUNTERS for every LOD, plus read per-LOD visible counts (written by cs_build_visible)
+        uint c[7];
+        [unroll] for (uint j = 0; j < 7; ++j) {
+            uint lod_id = mesh_base + j;
+            mdi mi = MESH_INFO[lod_id];
+            COUNTERS[lod_id].index_count = mi.index_count;
+            COUNTERS[lod_id].first_index = mi.first_index;
+            COUNTERS[lod_id].base_vertex = mi.base_vertex;
+            // Keep instance_count as produced by cs_build_visible; we'll also write it again after compaction.
+            c[j] = COUNTERS[lod_id].instance_count;
+        }
+
+        // Prefix layout inside the reserved block
+        // Base (start) of the big block and its total capacity
+        const uint base_first   = MESH_INFO[LOD_MAX_ID].first_instance;
+        const uint base_cap     = MESH_INFO[LOD_MAX_ID].instance_count; // maximum reserved slots for all LODs of this mesh
+
+        // Compute per-LOD destination starts (stable order: LOD0..LOD6)
+        uint dst_start[7];
+        uint running = base_first;
+        [unroll] for (uint j = 0; j < 7; ++j) {
+            dst_start[j] = running;
+            running     += c[j];
+        }
+        const uint total_visible = running - base_first;
+
+        // Publish the per-LOD first_instance for draws
+        [unroll] for (uint j = 0; j < 7; ++j) {
+            COUNTERS[mesh_base + j].first_instance = dst_start[j];
+        }
+
+        // Reorder/compact: walk the whole reserved block, scatter to the LOD's slice using a local write head
+        uint head[7] = {0,0,0,0,0,0,0};
+
+        // Read range is the entire reserved block. We may stop at base_first + base_cap;
+        // anything tagged with a different mesh id is ignored.
+        for (uint src = base_first; src < base_first + base_cap; ++src) {
+            uint id = VISIBLE_IDS[src];
+
+            // Keep only instances that belong to this 7-LOD mesh group
+            if (id >= mesh_base && id <= LOD_MAX_ID) {
+                uint j = id - mesh_base; // 0..6
+                uint dst = dst_start[j] + head[j]++;
+
+                // Move packed instance + tag
+                VISIBLE_PACKED[dst] = VISIBLE_PACKED[src];
+                VISIBLE_IDS[dst]    = id;
+            }
+        }
+
+        // Tighten the instance_count to what actually got written (it should equal c[j], but this is robust)
+        [unroll] for (uint j = 0; j < 7; ++j) {
+            COUNTERS[mesh_base + j].instance_count = head[j];
+        }
+
+        // (Optional) If you prefer to leave the tail clean, you could zero out the unused remainder:
+        for (uint k = base_first + total_visible; k < base_first + base_cap; ++k) { VISIBLE_IDS[k] = 0xFFFFFFFF; }
     }
 }
+
 
 struct push_constants {
     uint mode; // 0 = normal mesh draw, 1 = sky
@@ -140,8 +216,7 @@ float3 plane_position(uint VERTEX_ID, uint grid_scale) {
     uint grid_width = 128u >> grid_scale;     // 128, 64, 32, ..., 2
     uint row = VERTEX_ID % grid_width;        // 0 .. grid_width-1
     uint col = VERTEX_ID / grid_width;        // 0 .. grid_width-1
-    // Fixed base-plane span: 127 units (same as scale 0: 128 verts -> 127 steps)
-    const float span = 128.0 * 100;                 // total width per axis
+    const float span = 128.0 * 100.0;                 // total width per axis
     const float half_span = span * 0.5;       // 63.5
     // Normalize to [0,1] then scale to the fixed span
     float x = (float(col) / float(grid_width - 1)) * span - half_span;
@@ -150,7 +225,7 @@ float3 plane_position(uint VERTEX_ID, uint grid_scale) {
 }
 
 [shader("vertex")]
-vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] uint2 INSTANCE, uint DRAW_ID : SV_DrawIndex) {
+vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] uint4 INSTANCE, uint DRAW_ID : SV_DrawIndex) {
     // SKY path: fullscreen triangle
     if (PUSH_CONSTANTS.mode == 1) {
         vs_out o;
@@ -159,18 +234,18 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] uint2 INSTANCE,
         if (VERTEX_ID == 1) p = float2( 3.0, -1.0);
         if (VERTEX_ID == 2) p = float2(-1.0, -1.0); // was (-1, 3)
         o.pos = float4(p, 1.0, 1.0); // 1.0 / 1.0 -> drawn behind everything else
-        o.normal = float3(0.3, 0.5, 1.0);
-        o.uv = 0;
+        // o.normal = float3(0.3, 0.5, 1.0);
+        // o.uv = 0;
         return o;
     }
-
-    // fetch and unpack visible instance data, convert dm to cm (8 bytes)
-    uint2 packed_instance = INSTANCE.xy;
+ 
+    // fetch and unpack visible instance data, convert dm to cm (12 bytes)
+    uint3 packed_instance = INSTANCE.xyz;
     int instance_x = 10 * (int)((int16_t)( packed_instance.x        & 0xFFFF));
     int instance_y = 10 * (int)((int16_t)((packed_instance.x >> 16) & 0xFFFF));
     int instance_z = 10 * (int)((int16_t)( packed_instance.y        & 0xFFFF));
-    float cos_d = float(((int8_t)((packed_instance.y >> 16) & 0xFFu))) * divide_by_127;
-    float sin_d = float(((int8_t)((packed_instance.y >> 24) & 0xFFu))) * divide_by_127;
+    float cos_d = float(((int16_t)((packed_instance.y >> 16) & 0xFFFF))) * divide_by_32767;
+    float sin_d = float(((int16_t)((packed_instance.z) & 0xFFFF))) * divide_by_32767;
 
     // draw id is essentially just the mesh id in this case
     float3 vertex;
@@ -179,7 +254,10 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] uint2 INSTANCE,
     // todo: better way to recognize the terrain from other meshes
     // todo: 4 bytes yaw instead of 2 bytes -> instance in 16 bytes instead of 8 bytes (?)
     // -> wouldn't 16 bytes x 1M instances be a bit much writes (?)
-    // todo: nicer movement with camera, faster when higher, auto pitch, move forward faster with combined push + arrowkeys
+    // todo: much nicer movement with camera, faster when higher, auto pitch, move forward faster with combined push + arrowkeys
+    // todo: even bigger quads for very far away tiles, possibly bigger map also
+    // -> use 'task shader' for higher level tiles/groups of instances that could emit only one even bigger scale quad for a bunch of quads
+    // -> don't need 4000 instances/quads always, could have much less in the distance, and more granular up close
     if (DRAW_ID < 7) {
         uint grid_scale = DRAW_ID % 7;
         vertex = plane_position(VERTEX_ID, grid_scale);
@@ -235,7 +313,7 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] uint2 INSTANCE,
     float cz = depth_a * vz + depth_b;
     float  w = vz;
 
-    vs_out o;
+    vs_out o = vs_out(float4(-1));
     o.pos = float4(cx, cy, cz, w);
     o.normal = normal;
     o.uv = uv;
@@ -243,11 +321,13 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] uint2 INSTANCE,
 }
 
 [shader("fragment")]
-float4 fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
-    if (PUSH_CONSTANTS.mode == 1) return float4(i.normal, 1.0);
+float4 fs_main(
+    vs_out i
+    , uint primID : SV_PrimitiveID
+) : SV_Target0 {
+    if (PUSH_CONSTANTS.mode == 1) return float4(i.pos.xyz, 1.0);
     // debug draw triangles as distinct colors
     float3 color = frac(sin((primID+43) * 43.5453) * float3(23.1407, 85.928, 43.533));
-    // if(color.x+color.y+color.z < 0.1) color = float3(float(primID % 32) / 32, float((primID + 38) % 64) / 64, float((primID + 17) % 32) / 32);
+    if(color.x+color.y+color.z < 0.1) color = float3(float(primID % 32) / 32, float((primID + 38) % 64) / 64, float((primID + 17) % 32) / 32);
     return float4(color, 1.0);
-    // return float4(i.normal, 1.0f);
 }

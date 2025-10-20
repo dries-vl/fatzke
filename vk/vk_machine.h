@@ -83,7 +83,7 @@ struct Machine create_machine(WINDOW window) {
     VK_CHECK(vkCreateWaylandSurfaceKHR(machine.instance, &surface_info, NULL, &machine.surface));
     pf_timestamp("Wayland surface created");
 #endif
-
+    
     /* -------- Physical Device & Logical Device -------- */
     uint32_t device_count = 0;
     VkResult res = vkEnumeratePhysicalDevices(machine.instance, &device_count, NULL);

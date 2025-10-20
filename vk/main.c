@@ -36,6 +36,7 @@ struct Renderer {
     // buffers
     VkBuffer                  buffer_instances;  VkDeviceMemory memory_instances;
     VkBuffer                  buffer_visible;    VkDeviceMemory memory_visible;
+    VkBuffer                  buffer_visible_ids;VkDeviceMemory memory_visible_ids;
     VkBuffer                  buffer_mesh_info;  VkDeviceMemory memory_mesh_info;
     VkBuffer                  buffer_counters;   VkDeviceMemory memory_counters;
     VkBuffer                  buffer_positions;  VkDeviceMemory memory_positions;
@@ -110,6 +111,68 @@ static void upload_to_buffer(VkDevice dev, VkDeviceMemory mem, size_t offset, co
     vkUnmapMemory(dev, mem);
 }
 
+// --- Single-use command helpers (record/submit/wait) ---
+VkCommandBuffer begin_single_use_cmd(VkDevice device, VkCommandPool pool) {
+    VkCommandBufferAllocateInfo ai = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = pool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1
+    };
+    VkCommandBuffer cmd;
+    VK_CHECK(vkAllocateCommandBuffers(device, &ai, &cmd));
+    VK_CHECK(vkBeginCommandBuffer(cmd, &(VkCommandBufferBeginInfo){
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
+    }));
+    return cmd;
+}
+void end_single_use_cmd(VkDevice device, VkQueue queue, VkCommandPool pool, VkCommandBuffer cmd) {
+    VK_CHECK(vkEndCommandBuffer(cmd));
+    VK_CHECK(vkQueueSubmit(queue, 1, &(VkSubmitInfo){
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount = 1, .pCommandBuffers = &cmd
+    }, VK_NULL_HANDLE));
+    VK_CHECK(vkQueueWaitIdle(queue));
+    vkFreeCommandBuffers(device, pool, 1, &cmd);
+}
+
+// Create a DEVICE_LOCAL buffer and upload data via a temporary HOST_VISIBLE staging buffer.
+static void create_and_upload_device_local_buffer(
+    VkDevice device, VkPhysicalDevice phys, VkQueue queue, VkCommandPool pool,
+    VkDeviceSize size, VkBufferUsageFlags usage,
+    const void* src, VkBuffer* out_buf, VkDeviceMemory* out_mem,
+    VkDeviceSize dst_offset /*usually 0*/
+){
+    // 1) Create destination (DEVICE_LOCAL)
+    create_buffer_and_memory(device, phys, size, usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, out_buf, out_mem);
+
+    if (size == 0 || src == NULL) return; // nothing to upload
+
+    // 2) Create staging (HOST_VISIBLE|COHERENT, TRANSFER_SRC)
+    VkBuffer staging; VkDeviceMemory staging_mem;
+    create_buffer_and_memory(device, phys, size,
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        &staging, &staging_mem);
+
+    // 3) Map+copy to staging
+    upload_to_buffer(device, staging_mem, 0, src, (size_t)size);
+
+    // 4) Record copy
+    VkCommandBuffer cmd = begin_single_use_cmd(device, pool);
+    VkBufferCopy copy = { .srcOffset = 0, .dstOffset = dst_offset, .size = size };
+    vkCmdCopyBuffer(cmd, staging, *out_buf, 1, &copy);
+    end_single_use_cmd(device, queue, pool, cmd);
+
+    // 5) Destroy staging
+    vkDestroyBuffer(device, staging, NULL);
+    vkFreeMemory(device, staging_mem, NULL);
+}
+
+// ------------------------------------------------------------------
+
 #pragma region MAIN
 // todo: avoid globals
 WINDOW window;
@@ -157,7 +220,6 @@ void process_inputs() {
     if (buttons[MOUSE_MARGIN_RIGHT]) { cam_yaw += buttons[MOUSE_MARGIN_RIGHT]; }
     if (buttons[MOUSE_MARGIN_TOP]) { cam_pitch -= buttons[MOUSE_MARGIN_TOP]; }
     if (buttons[MOUSE_MARGIN_BOTTOM]) { cam_pitch += buttons[MOUSE_MARGIN_BOTTOM]; }
-    printf("pitch: %d yaw: %d\n", cam_pitch, cam_yaw);
     if (buttons[MOUSE_SCROLL]) { cam_y += buttons[MOUSE_SCROLL]; buttons[MOUSE_SCROLL] = 0; }
     if (buttons[MOUSE_SCROLL_SIDE]) { cam_x -= buttons[MOUSE_SCROLL_SIDE]; buttons[MOUSE_SCROLL_SIDE] = 0; }
 }
@@ -198,7 +260,7 @@ int main(void) {
     VkShaderModule shader_module; VK_CHECK(vkCreateShaderModule(machine.device,&smci,NULL,&shader_module));
 
     #pragma region COMPUTE PIPELINE
-    #define BINDINGS 8
+    #define BINDINGS 9
     #define UNIFORM_BINDING (BINDINGS-1)
     VkDescriptorSetLayoutBinding bindings[BINDINGS];
     for (uint32_t i = 0; i < BINDINGS; ++i) {
@@ -256,10 +318,10 @@ int main(void) {
         { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = shader_module, .pName = "fs_main" }
     };
     VkVertexInputBindingDescription bindings_vi[1] = {
-        { .binding = 0, .stride = sizeof(uint32_t)*2,    .inputRate = VK_VERTEX_INPUT_RATE_INSTANCE }
+        { .binding = 0, .stride = sizeof(uint32_t)*4,    .inputRate = VK_VERTEX_INPUT_RATE_INSTANCE }
     };
     VkVertexInputAttributeDescription attrs_vi[1] = {
-        { .location = 0, .binding = 0, .format = VK_FORMAT_R32G32_UINT,   .offset = 0 }
+        { .location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32A32_UINT,   .offset = 0 }
     };
     VkPipelineVertexInputStateCreateInfo vertex_input = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
@@ -335,7 +397,7 @@ int main(void) {
     vkDestroyShaderModule(machine.device, shader_module,  NULL);
 
     #pragma region BUFFERS
-    #include "mesh.h" // todo: link with object file instead 
+    #include "mesh.h"
     #include "plane_lod0.h"
     #include "plane_lod1.h"
     #include "plane_lod2.h"
@@ -343,25 +405,36 @@ int main(void) {
     #include "plane_lod4.h"
     #include "plane_lod5.h"
     #include "plane_lod6.h"
-    #define MESH_COUNT 8
+    #define MESH_COUNT 7
+
     struct gpu_instance { uint32_t xy_dm; uint32_t z_cs; };
-    struct mesh_info { u32 vertex_count, index_count, instance_count; const struct gpu_instance *instances; const u16 *indices; const u32 *positions, *normals, *uvs; };
+    struct mesh_info {
+        u32 vertex_count, index_count, instance_count;
+        const struct gpu_instance *instances;
+        const u16 *indices;
+        const u32 *positions, *normals, *uvs;
+    };
     #include "plane_instances.h"
+
     struct gpu_instance mesh_inst;
     mesh_inst.xy_dm = ((uint16_t)0) << 16 | ((uint16_t)0);
-    float yaw = 0.0f;
-    mesh_inst.z_cs = ((uint16_t)0) | (((uint8_t)lrintf(cosf(yaw) * 127.0f)) << 16) |
-        (((uint8_t)lrintf(sinf(yaw) * 127.0f)) << 24);
+    {
+        float yaw = 0.0f;
+        mesh_inst.z_cs = ((uint16_t)0)
+            | (((uint8_t)lrintf(cosf(yaw) * 127.0f)) << 16)
+            | (((uint8_t)lrintf(sinf(yaw) * 127.0f)) << 24);
+    }
     const struct mesh_info meshes[MESH_COUNT] = {
-        {g_vertex_count_plane_lod0, g_index_count_plane_lod0, 0, g_plane_instances, g_indices_plane_lod0, NULL,NULL,NULL},
-        {g_vertex_count_plane_lod1, g_index_count_plane_lod1, 0, g_plane_instances, g_indices_plane_lod1, NULL,NULL,NULL},
-        {g_vertex_count_plane_lod2, g_index_count_plane_lod2, 0, g_plane_instances, g_indices_plane_lod2, NULL,NULL,NULL},
-        {g_vertex_count_plane_lod3, g_index_count_plane_lod3, 0, g_plane_instances, g_indices_plane_lod3, NULL,NULL,NULL},
-        {g_vertex_count_plane_lod4, g_index_count_plane_lod4, 2601, g_plane_instances, g_indices_plane_lod4, NULL,NULL,NULL},
-        {g_vertex_count_plane_lod5, g_index_count_plane_lod5, 0, g_plane_instances, g_indices_plane_lod5, NULL,NULL,NULL},
-        {g_vertex_count_plane_lod6, g_index_count_plane_lod6, 0, g_plane_instances, g_indices_plane_lod6, NULL,NULL,NULL},
-        {g_vertex_count_mesh, g_index_count_mesh, 1, &mesh_inst, g_indices_mesh, g_positions_mesh, g_normals_mesh, g_uvs_mesh},
+        {g_vertex_count_plane_lod0, g_index_count_plane_lod0, 0,    g_plane_instances, g_indices_plane_lod0, NULL,NULL,NULL},
+        {g_vertex_count_plane_lod1, g_index_count_plane_lod1, 0,    g_plane_instances, g_indices_plane_lod1, NULL,NULL,NULL},
+        {g_vertex_count_plane_lod2, g_index_count_plane_lod2, 0,    g_plane_instances, g_indices_plane_lod2, NULL,NULL,NULL},
+        {g_vertex_count_plane_lod3, g_index_count_plane_lod3, 0,    g_plane_instances, g_indices_plane_lod3, NULL,NULL,NULL},
+        {g_vertex_count_plane_lod4, g_index_count_plane_lod4, 0,    g_plane_instances, g_indices_plane_lod4, NULL,NULL,NULL},
+        {g_vertex_count_plane_lod5, g_index_count_plane_lod5, 0,    g_plane_instances, g_indices_plane_lod5, NULL,NULL,NULL},
+        {g_vertex_count_plane_lod6, g_index_count_plane_lod6, 2601, g_plane_instances, g_indices_plane_lod6, NULL,NULL,NULL},
+        // {g_vertex_count_mesh,       g_index_count_mesh,       1,    &mesh_inst,        g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
     };
+
     u32 total_vertex_count = 0;
     u32 total_index_count = 0;
     u32 total_instance_count = 0;
@@ -372,120 +445,196 @@ int main(void) {
         mesh_info[i].indexCount    = meshes[i].index_count;
         mesh_info[i].firstInstance = total_instance_count;
         mesh_info[i].instanceCount = meshes[i].instance_count;
-        total_vertex_count += meshes[i].vertex_count;
-        total_index_count  += meshes[i].index_count;
+        total_vertex_count   += meshes[i].vertex_count;
+        total_index_count    += meshes[i].index_count;
         total_instance_count += meshes[i].instance_count;
     }
+
     VkDeviceSize size_instances = total_instance_count * sizeof(uint64_t);
-    VkDeviceSize size_visible   = total_instance_count * sizeof(uint64_t);
+    VkDeviceSize size_visible   = total_instance_count * sizeof(uint32_t) * 4;
+    VkDeviceSize size_visible_ids   = total_instance_count * sizeof(uint32_t) * 1;
     VkDeviceSize size_mesh_info = MESH_COUNT * sizeof(VkDrawIndexedIndirectCommand);
     VkDeviceSize size_counters  = MESH_COUNT * sizeof(VkDrawIndexedIndirectCommand);
     VkDeviceSize size_positions = total_vertex_count * sizeof(uint32_t);
     VkDeviceSize size_normals   = total_vertex_count * sizeof(uint32_t);
-    VkDeviceSize size_uvs       = total_vertex_count * sizeof(uint32_t); 
+    VkDeviceSize size_uvs       = total_vertex_count * sizeof(uint32_t);
     VkDeviceSize size_indices   = total_index_count  * sizeof(uint16_t);
 
-    const VkMemoryPropertyFlags host_visible_coherent =
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    VkCommandPoolCreateInfo pool_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .queueFamilyIndex = machine.queue_family_graphics, // use your graphics family index
+        .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT
+    };
+    VkCommandPool upload_pool; VK_CHECK(vkCreateCommandPool(machine.device, &pool_info, NULL, &upload_pool));
 
-    // INSTANCES
-    create_buffer_and_memory(machine.device, machine.physical_device, size_instances,
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        host_visible_coherent, &renderer.buffer_instances, &renderer.memory_instances);
+    // INSTANCES (SSBO, read by compute)  -> DEVICE_LOCAL + upload
+    create_and_upload_device_local_buffer(
+        machine.device, machine.physical_device, machine.queue_graphics, upload_pool,
+        size_instances, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        /*src*/ NULL, // we'll upload per-mesh ranges below
+        &renderer.buffer_instances, &renderer.memory_instances, 0);
 
-    // VISIBLE (UAV + instance-rate VB)
+    // VISIBLE (SSBO+VB, GPU-only produced/consumed) -> DEVICE_LOCAL (no initial upload)
     create_buffer_and_memory(machine.device, machine.physical_device, size_visible,
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-        host_visible_coherent, &renderer.buffer_visible, &renderer.memory_visible);
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &renderer.buffer_visible, &renderer.memory_visible);
 
-    // COUNTERS (UAV + indirect)
+    // VISIBLE IDS (SSBO+VB, GPU-only produced/consumed) -> DEVICE_LOCAL (no initial upload)
+    create_buffer_and_memory(machine.device, machine.physical_device, size_visible_ids,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &renderer.buffer_visible_ids, &renderer.memory_visible_ids);
+
+    // COUNTERS (SSBO+INDIRECT, GPU-only) -> DEVICE_LOCAL (you zero with vkCmdFillBuffer each frame)
     create_buffer_and_memory(machine.device, machine.physical_device, size_counters,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        host_visible_coherent, &renderer.buffer_counters, &renderer.memory_counters);
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &renderer.buffer_counters, &renderer.memory_counters);
 
-    // MESH INFO
-    create_buffer_and_memory(machine.device, machine.physical_device, size_mesh_info,
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        host_visible_coherent, &renderer.buffer_mesh_info, &renderer.memory_mesh_info);
+    // MESH INFO (INDIRECT + sometimes read in compute) -> DEVICE_LOCAL + upload once
+    create_and_upload_device_local_buffer(
+        machine.device, machine.physical_device, machine.queue_graphics, upload_pool,
+        size_mesh_info, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+        mesh_info, &renderer.buffer_mesh_info, &renderer.memory_mesh_info, 0);
 
-    // POSITIONS SSBO (you can make this device-local with a staging upload later)
-    create_buffer_and_memory(machine.device, machine.physical_device, size_positions,
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        host_visible_coherent, &renderer.buffer_positions, &renderer.memory_positions);
+    // POSITIONS / NORMALS / UVS (SSBOs) -> DEVICE_LOCAL; upload per-mesh ranges below
+    create_and_upload_device_local_buffer(
+        machine.device, machine.physical_device, machine.queue_graphics, upload_pool,
+        size_positions, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        /*src*/ NULL, &renderer.buffer_positions, &renderer.memory_positions, 0);
+    create_and_upload_device_local_buffer(
+        machine.device, machine.physical_device, machine.queue_graphics, upload_pool,
+        size_normals, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        /*src*/ NULL, &renderer.buffer_normals, &renderer.memory_normals, 0);
+    create_and_upload_device_local_buffer(
+        machine.device, machine.physical_device, machine.queue_graphics, upload_pool,
+        size_uvs, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        /*src*/ NULL, &renderer.buffer_uvs, &renderer.memory_uvs, 0);
 
-    // NORMALS SSBO
-    create_buffer_and_memory(machine.device, machine.physical_device, size_normals,
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        host_visible_coherent, &renderer.buffer_normals, &renderer.memory_normals);
+    // INDEX BUFFER -> DEVICE_LOCAL + upload once
+    create_and_upload_device_local_buffer(
+        machine.device, machine.physical_device, machine.queue_graphics, upload_pool,
+        size_indices, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+        /*src*/ NULL, &renderer.buffer_index_ib, &renderer.memory_indices, 0);
 
-    // UVS
-    create_buffer_and_memory(machine.device, machine.physical_device, size_uvs,
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        host_visible_coherent, &renderer.buffer_uvs, &renderer.memory_uvs);
-
-    // Index buffer (fixed 1152 indices)
-    create_buffer_and_memory(machine.device, machine.physical_device, size_indices,
-        VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        host_visible_coherent /* or DEVICE_LOCAL with staging */,
-        &renderer.buffer_index_ib, &renderer.memory_indices);
-
-    // UNIFORMS
+    // UNIFORMS: keep tiny UBO host-visible (or convert to push constants later)
     create_buffer_and_memory(machine.device, machine.physical_device, sizeof(struct Uniforms),
         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        host_visible_coherent, &renderer.buffer_uniforms, &renderer.memory_uniforms);
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        &renderer.buffer_uniforms, &renderer.memory_uniforms);
 
-    pf_timestamp("Buffers created");
+    pf_timestamp("Buffers created (DEVICE_LOCAL + staging)");
 
-    // upload the data for: uvs, positions, normals, indices, instances
-    // upload mesh info
-    upload_to_buffer(machine.device, renderer.memory_mesh_info, 0,
-        mesh_info, MESH_COUNT * sizeof(VkDrawIndexedIndirectCommand));
-    
-    // upload the mesh data for all meshes
+    // ---- Upload per-mesh data into the big DEVICE_LOCAL buffers ----
+    // We batch copies by repeatedly calling create_and_upload_device_local_buffer with dstOffset.
+    // (For simplicity, we create a staging buffer per upload. For large games, batch copies into one cmd.)
+
     for (u32 i = 0; i < MESH_COUNT; ++i) {
+        // Vertex attributes
         if (meshes[i].positions) {
-            upload_to_buffer(machine.device, renderer.memory_positions,
-                mesh_info[i].vertexOffset * sizeof(uint32_t),
-                meshes[i].positions,
-                meshes[i].vertex_count * sizeof(uint32_t));
+            VkDeviceSize bytes = meshes[i].vertex_count * sizeof(uint32_t);
+            VkDeviceSize dstOfs = (VkDeviceSize)mesh_info[i].vertexOffset * sizeof(uint32_t);
+            // Create a temp staging and copy into the already-created DEVICE_LOCAL buffer at dstOfs
+            // Reuse the helper by creating a temp device-local “alias” of same buffer & memory? Simpler: a small inline staging+copy:
+            {
+                VkBuffer staging; VkDeviceMemory staging_mem;
+                create_buffer_and_memory(machine.device, machine.physical_device, bytes,
+                    VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                    &staging, &staging_mem);
+                upload_to_buffer(machine.device, staging_mem, 0, meshes[i].positions, (size_t)bytes);
+                VkCommandBuffer cmd = begin_single_use_cmd(machine.device, upload_pool);
+                VkBufferCopy c = { .srcOffset = 0, .dstOffset = dstOfs, .size = bytes };
+                vkCmdCopyBuffer(cmd, staging, renderer.buffer_positions, 1, &c);
+                end_single_use_cmd(machine.device, machine.queue_graphics, upload_pool, cmd);
+                vkDestroyBuffer(machine.device, staging, NULL);
+                vkFreeMemory(machine.device, staging_mem, NULL);
+            }
         }
         if (meshes[i].normals) {
-            upload_to_buffer(machine.device, renderer.memory_normals,
-                mesh_info[i].vertexOffset * sizeof(uint32_t),
-                meshes[i].normals,
-                meshes[i].vertex_count * sizeof(uint32_t));
+            VkDeviceSize bytes = meshes[i].vertex_count * sizeof(uint32_t);
+            VkDeviceSize dstOfs = (VkDeviceSize)mesh_info[i].vertexOffset * sizeof(uint32_t);
+            VkBuffer staging; VkDeviceMemory staging_mem;
+            create_buffer_and_memory(machine.device, machine.physical_device, bytes,
+                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                &staging, &staging_mem);
+            upload_to_buffer(machine.device, staging_mem, 0, meshes[i].normals, (size_t)bytes);
+            VkCommandBuffer cmd = begin_single_use_cmd(machine.device, upload_pool);
+            VkBufferCopy c = { .srcOffset = 0, .dstOffset = dstOfs, .size = bytes };
+            vkCmdCopyBuffer(cmd, staging, renderer.buffer_normals, 1, &c);
+            end_single_use_cmd(machine.device, machine.queue_graphics, upload_pool, cmd);
+            vkDestroyBuffer(machine.device, staging, NULL);
+            vkFreeMemory(machine.device, staging_mem, NULL);
         }
         if (meshes[i].uvs) {
-            upload_to_buffer(machine.device, renderer.memory_uvs,
-                mesh_info[i].vertexOffset * sizeof(uint32_t),
-                meshes[i].uvs,
-                meshes[i].vertex_count * sizeof(uint32_t));
+            VkDeviceSize bytes = meshes[i].vertex_count * sizeof(uint32_t);
+            VkDeviceSize dstOfs = (VkDeviceSize)mesh_info[i].vertexOffset * sizeof(uint32_t);
+            VkBuffer staging; VkDeviceMemory staging_mem;
+            create_buffer_and_memory(machine.device, machine.physical_device, bytes,
+                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                &staging, &staging_mem);
+            upload_to_buffer(machine.device, staging_mem, 0, meshes[i].uvs, (size_t)bytes);
+            VkCommandBuffer cmd = begin_single_use_cmd(machine.device, upload_pool);
+            VkBufferCopy c = { .srcOffset = 0, .dstOffset = dstOfs, .size = bytes };
+            vkCmdCopyBuffer(cmd, staging, renderer.buffer_uvs, 1, &c);
+            end_single_use_cmd(machine.device, machine.queue_graphics, upload_pool, cmd);
+            vkDestroyBuffer(machine.device, staging, NULL);
+            vkFreeMemory(machine.device, staging_mem, NULL);
         }
-        upload_to_buffer(machine.device, renderer.memory_indices,
-            mesh_info[i].firstIndex * sizeof(uint16_t),
-            meshes[i].indices,
-            meshes[i].index_count * sizeof(uint16_t));
+
+        // Indices
+        {
+            VkDeviceSize bytes = meshes[i].index_count * sizeof(uint16_t);
+            VkDeviceSize dstOfs = (VkDeviceSize)mesh_info[i].firstIndex * sizeof(uint16_t);
+            VkBuffer staging; VkDeviceMemory staging_mem;
+            create_buffer_and_memory(machine.device, machine.physical_device, bytes,
+                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                &staging, &staging_mem);
+            upload_to_buffer(machine.device, staging_mem, 0, meshes[i].indices, (size_t)bytes);
+            VkCommandBuffer cmd = begin_single_use_cmd(machine.device, upload_pool);
+            VkBufferCopy c = { .srcOffset = 0, .dstOffset = dstOfs, .size = bytes };
+            vkCmdCopyBuffer(cmd, staging, renderer.buffer_index_ib, 1, &c);
+            end_single_use_cmd(machine.device, machine.queue_graphics, upload_pool, cmd);
+            vkDestroyBuffer(machine.device, staging, NULL);
+            vkFreeMemory(machine.device, staging_mem, NULL);
+        }
+
+        // Instances
         if (meshes[i].instance_count > 0) {
-            size_t instance_buffer_size = meshes[i].instance_count * sizeof(struct gpu_instance);
-            upload_to_buffer(machine.device, renderer.memory_instances,
-                mesh_info[i].firstInstance * sizeof(struct gpu_instance),
-                meshes[i].instances,
-                instance_buffer_size);
+            VkDeviceSize bytes = meshes[i].instance_count * sizeof(struct gpu_instance);
+            VkDeviceSize dstOfs = (VkDeviceSize)mesh_info[i].firstInstance * sizeof(struct gpu_instance);
+            VkBuffer staging; VkDeviceMemory staging_mem;
+            create_buffer_and_memory(machine.device, machine.physical_device, bytes,
+                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                &staging, &staging_mem);
+            upload_to_buffer(machine.device, staging_mem, 0, meshes[i].instances, (size_t)bytes);
+            VkCommandBuffer cmd = begin_single_use_cmd(machine.device, upload_pool);
+            VkBufferCopy c = { .srcOffset = 0, .dstOffset = dstOfs, .size = bytes };
+            vkCmdCopyBuffer(cmd, staging, renderer.buffer_instances, 1, &c);
+            end_single_use_cmd(machine.device, machine.queue_graphics, upload_pool, cmd);
+            vkDestroyBuffer(machine.device, staging, NULL);
+            vkFreeMemory(machine.device, staging_mem, NULL);
         }
     }
-    
-    /* -------- Descriptor Pool & Set -------- */
+
+    vkDestroyCommandPool(machine.device, upload_pool, NULL);
+    pf_timestamp("Uploads complete");
+
+    // --- Descriptor pool & set (unchanged, but note buffers are now DEVICE_LOCAL) ---
     VkDescriptorPoolSize pool_sizes[] = {
         { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,  BINDINGS-1 },
-        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,  1 }, // one is a uniform binding
+        { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,  1 },
     };
-    VkDescriptorPoolCreateInfo pool_info = {
+    VkDescriptorPoolCreateInfo pool_info_desc = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
         .maxSets = 2,
         .poolSizeCount = (uint32_t)(sizeof(pool_sizes)/sizeof(pool_sizes[0])),
         .pPoolSizes = pool_sizes,
     };
-    VK_CHECK(vkCreateDescriptorPool(machine.device, &pool_info, NULL, &renderer.descriptor_pool));
+    VK_CHECK(vkCreateDescriptorPool(machine.device, &pool_info_desc, NULL, &renderer.descriptor_pool));
+
     VkDescriptorSetAllocateInfo set_alloc_info = {
         .sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
         .descriptorPool     = renderer.descriptor_pool,
@@ -497,28 +646,30 @@ int main(void) {
     VkDescriptorBufferInfo buffer_infos[BINDINGS] = {
         { renderer.buffer_instances, 0, size_instances },
         { renderer.buffer_visible,   0, size_visible   },
+        { renderer.buffer_visible_ids,0, size_visible_ids   },
         { renderer.buffer_mesh_info, 0, size_mesh_info },
         { renderer.buffer_counters,  0, size_counters  },
         { renderer.buffer_positions, 0, size_positions },
         { renderer.buffer_normals,   0, size_normals   },
         { renderer.buffer_uvs,       0, size_uvs       },
-        { renderer.buffer_uniforms,  0, sizeof(struct Uniforms)   }
+        { renderer.buffer_uniforms,  0, sizeof(struct Uniforms) }
     };
     VkWriteDescriptorSet writes[BINDINGS];
     for (uint32_t i = 0; i < BINDINGS; ++i) {
-        writes[i] = (VkWriteDescriptorSet) {
-            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet          = renderer.descriptor_set,
-            .dstBinding      = i,
+        writes[i] = (VkWriteDescriptorSet){
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = renderer.descriptor_set,
+            .dstBinding = i,
             .descriptorCount = 1,
-            // set the last one as uniform
-            .descriptorType  = (i != UNIFORM_BINDING)?VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            .pBufferInfo     = &buffer_infos[i]
+            .descriptorType = (i != UNIFORM_BINDING) ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .pBufferInfo = &buffer_infos[i]
         };
     }
     vkUpdateDescriptorSets(machine.device, BINDINGS, writes, 0, NULL);
-    pf_timestamp("Descriptors created");
-    
+    pf_timestamp("Descriptors created (DEVICE_LOCAL)");
+
+#pragma endregion
+
     VkSemaphoreTypeCreateInfo type_info = {
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
         .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE,
@@ -564,12 +715,12 @@ int main(void) {
     #if DEBUG_APP == 1
     printf("SWAPCHAIN IMAGE COUNT: %d\n", swapchain.swapchain_image_count);
     #endif
-    VkSemaphore parking_semaphores[3]; uint32_t parked_images[3];
-    for (uint32_t i = 0; i < swapchain.swapchain_image_count - MAX_FRAMES_IN_FLIGHT - 1; ++i) {
-        printf("parking an image\n");
-        VK_CHECK(vkCreateSemaphore(machine.device, &semaphore_info, NULL, &parking_semaphores[i]));
-        vkAcquireNextImageKHR(machine.device, swapchain.swapchain, UINT64_MAX, parking_semaphores[i], VK_NULL_HANDLE, &parked_images[i]);
-    }
+    // VkSemaphore parking_semaphores[3]; uint32_t parked_images[3];
+    // for (uint32_t i = 0; i < swapchain.swapchain_image_count - MAX_FRAMES_IN_FLIGHT - 1; ++i) {
+    //     printf("parking an image\n");
+    //     VK_CHECK(vkCreateSemaphore(machine.device, &semaphore_info, NULL, &parking_semaphores[i]));
+    //     vkAcquireNextImageKHR(machine.device, swapchain.swapchain, UINT64_MAX, parking_semaphores[i], VK_NULL_HANDLE, &parked_images[i]);
+    // }
 
     renderer.frame_slot = 0;
     while (pf_poll_events(window)) {

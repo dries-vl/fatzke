@@ -15,7 +15,7 @@ typedef __SIZE_TYPE__ usize;
 #define APP_NAME "VK: work in progress"
 #define DEBUG_VULKAN 1
 #define DEBUG_APP 1
-#define DEBUG_CPU 1
+#define DEBUG_CPU 0
 
 // VULKAN
 #define USE_DISCRETE_GPU 0
