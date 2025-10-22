@@ -64,3 +64,10 @@ static void DestroyDebugUtilsMessengerEXT(VkInstance inst, VkDebugUtilsMessenger
     if (fp) fp(inst, msgr, alloc);
 }
 #endif
+
+#define SSW VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT
+#define SSR VK_ACCESS_2_SHADER_STORAGE_READ_BIT
+#define CS  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
+#define TR  VK_PIPELINE_STAGE_2_TRANSFER_BIT
+#define DI  VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT
+#define VS  VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT

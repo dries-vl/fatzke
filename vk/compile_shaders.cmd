@@ -5,8 +5,7 @@ slangc shaders.slang ^
   -target spirv ^
   -fvk-use-entrypoint-name ^
   -fvk-use-gl-layout ^
-  -entry cs_build_visible ^
-  -entry cs_prepare_indirect ^
+  -entry cs_main ^
   -entry vs_main ^
   -entry fs_main ^
   -o static/win32/shaders.spv
@@ -20,8 +19,7 @@ slangc shaders.slang \
   -target spirv \
   -fvk-use-entrypoint-name \
   -fvk-use-gl-layout \
-  -entry cs_build_visible \
-  -entry cs_prepare_indirect \
+  -entry cs_main \
   -entry vs_main \
   -entry fs_main \
   -o static/linux/shaders.spv

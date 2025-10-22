@@ -30,13 +30,15 @@ struct Renderer {
     // compute pipelines
     VkDescriptorSetLayout     common_set_layout;
     VkPipelineLayout          common_pipeline_layout;
-    VkPipeline                compute_pipelines[2];
+    VkPipeline                compute_pipeline;
     VkDescriptorPool          descriptor_pool;
     VkDescriptorSet           descriptor_set;
     // buffers
     VkBuffer                  buffer_instances;  VkDeviceMemory memory_instances;
-    VkBuffer                  buffer_visible;    VkDeviceMemory memory_visible;
+    VkBuffer                  buffer_counts;     VkDeviceMemory memory_counts;
+    VkBuffer                  buffer_offsets;    VkDeviceMemory memory_offsets;
     VkBuffer                  buffer_visible_ids;VkDeviceMemory memory_visible_ids;
+    VkBuffer                  buffer_visible;    VkDeviceMemory memory_visible;
     VkBuffer                  buffer_mesh_info;  VkDeviceMemory memory_mesh_info;
     VkBuffer                  buffer_counters;   VkDeviceMemory memory_counters;
     VkBuffer                  buffer_positions;  VkDeviceMemory memory_positions;
@@ -203,7 +205,7 @@ void mouse_input_callback(void* ud, i32 x, i32 y, enum BUTTON button, int state)
         if (y > pf_window_height(window) - 50) buttons[MOUSE_MARGIN_BOTTOM] += (y - (pf_window_height(window) - 50)) / 5;
         else buttons[MOUSE_MARGIN_BOTTOM] = 0;
     }
-    if (button == MOUSE_SCROLL) buttons[MOUSE_SCROLL] += state / 2;
+    if (button == MOUSE_SCROLL) buttons[MOUSE_SCROLL] += state * 5;
     if (button == MOUSE_SCROLL_SIDE) buttons[MOUSE_SCROLL_SIDE] -= state / 5;
     if (button == MOUSE_LEFT || button == MOUSE_RIGHT || button == MOUSE_MIDDLE) {
         if (state == PRESSED) buttons[button] = 1;
@@ -212,10 +214,10 @@ void mouse_input_callback(void* ud, i32 x, i32 y, enum BUTTON button, int state)
 }
 void process_inputs() {
     if (buttons[KEYBOARD_ESCAPE]) {_exit(0);}
-    if (buttons[KEYBOARD_W]) { move_forward(2); }
-    if (buttons[KEYBOARD_R]) { move_forward(-2); }
-    if (buttons[KEYBOARD_A]) { move_sideways(-2); }
-    if (buttons[KEYBOARD_S]) { move_sideways(2); }
+    if (buttons[KEYBOARD_W]) { move_forward(100); }
+    if (buttons[KEYBOARD_R]) { move_forward(-100); }
+    if (buttons[KEYBOARD_A]) { move_sideways(-100); }
+    if (buttons[KEYBOARD_S]) { move_sideways(100); }
     if (buttons[MOUSE_MARGIN_LEFT]) { cam_yaw -= buttons[MOUSE_MARGIN_LEFT]; } 
     if (buttons[MOUSE_MARGIN_RIGHT]) { cam_yaw += buttons[MOUSE_MARGIN_RIGHT]; }
     if (buttons[MOUSE_MARGIN_TOP]) { cam_pitch -= buttons[MOUSE_MARGIN_TOP]; }
@@ -260,7 +262,7 @@ int main(void) {
     VkShaderModule shader_module; VK_CHECK(vkCreateShaderModule(machine.device,&smci,NULL,&shader_module));
 
     #pragma region COMPUTE PIPELINE
-    #define BINDINGS 9
+    #define BINDINGS 11
     #define UNIFORM_BINDING (BINDINGS-1)
     VkDescriptorSetLayoutBinding bindings[BINDINGS];
     for (uint32_t i = 0; i < BINDINGS; ++i) {
@@ -281,7 +283,7 @@ int main(void) {
 
     /* -------- Pipeline Layouts -------- */
     VkPushConstantRange range = {
-        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
         .offset = 0,
         .size   = sizeof(uint32_t)
     };
@@ -294,22 +296,13 @@ int main(void) {
     };
     VK_CHECK(vkCreatePipelineLayout(machine.device, &common_pipeline_info, NULL, &renderer.common_pipeline_layout));
 
-    /* -------- Compute Pipelines -------- */
-    VkComputePipelineCreateInfo compute_infos[2] = {
-        {
+    VkComputePipelineCreateInfo compute_info = {
             .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
             .stage  = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                        .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = shader_module, .pName = "cs_build_visible" },
+                        .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = shader_module, .pName = "cs_main" },
             .layout = renderer.common_pipeline_layout
-        },
-        {
-            .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-            .stage  = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                        .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = shader_module,  .pName = "cs_prepare_indirect"  },
-            .layout = renderer.common_pipeline_layout
-        }
-    };
-    VK_CHECK(vkCreateComputePipelines(machine.device,VK_NULL_HANDLE,2,compute_infos,NULL,renderer.compute_pipelines));
+        };
+    VK_CHECK(vkCreateComputePipelines(machine.device,VK_NULL_HANDLE,1,&compute_info,NULL,&renderer.compute_pipeline));
     #pragma endregion
 
     #pragma region GRAPHICS PIPELINE
@@ -387,7 +380,7 @@ int main(void) {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
       .depthTestEnable = VK_TRUE,
       .depthWriteEnable = VK_TRUE,          // OK to keep TRUE even for sky
-      .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
+      .depthCompareOp = VK_COMPARE_OP_GREATER,
     };
     graphics_info.pDepthStencilState = &depth;
     VK_CHECK(vkCreateGraphicsPipelines(machine.device, VK_NULL_HANDLE, 1, &graphics_info, NULL, &renderer.main_pipeline));
@@ -425,13 +418,13 @@ int main(void) {
             | (((uint8_t)lrintf(sinf(yaw) * 127.0f)) << 24);
     }
     const struct mesh_info meshes[MESH_COUNT] = {
-        {g_vertex_count_plane_lod0, g_index_count_plane_lod0, 0,    g_plane_instances, g_indices_plane_lod0, NULL,NULL,NULL},
-        {g_vertex_count_plane_lod1, g_index_count_plane_lod1, 0,    g_plane_instances, g_indices_plane_lod1, NULL,NULL,NULL},
-        {g_vertex_count_plane_lod2, g_index_count_plane_lod2, 0,    g_plane_instances, g_indices_plane_lod2, NULL,NULL,NULL},
-        {g_vertex_count_plane_lod3, g_index_count_plane_lod3, 0,    g_plane_instances, g_indices_plane_lod3, NULL,NULL,NULL},
-        {g_vertex_count_plane_lod4, g_index_count_plane_lod4, 0,    g_plane_instances, g_indices_plane_lod4, NULL,NULL,NULL},
-        {g_vertex_count_plane_lod5, g_index_count_plane_lod5, 0,    g_plane_instances, g_indices_plane_lod5, NULL,NULL,NULL},
         {g_vertex_count_plane_lod6, g_index_count_plane_lod6, 2601, g_plane_instances, g_indices_plane_lod6, NULL,NULL,NULL},
+        {g_vertex_count_plane_lod5, g_index_count_plane_lod5, 0,    g_plane_instances, g_indices_plane_lod5, NULL,NULL,NULL},
+        {g_vertex_count_plane_lod4, g_index_count_plane_lod4, 0,    g_plane_instances, g_indices_plane_lod4, NULL,NULL,NULL},
+        {g_vertex_count_plane_lod3, g_index_count_plane_lod3, 0,    g_plane_instances, g_indices_plane_lod3, NULL,NULL,NULL},
+        {g_vertex_count_plane_lod2, g_index_count_plane_lod2, 0,    g_plane_instances, g_indices_plane_lod2, NULL,NULL,NULL},
+        {g_vertex_count_plane_lod1, g_index_count_plane_lod1, 0,    g_plane_instances, g_indices_plane_lod1, NULL,NULL,NULL},
+        {g_vertex_count_plane_lod0, g_index_count_plane_lod0, 0,    g_plane_instances, g_indices_plane_lod0, NULL,NULL,NULL},
         // {g_vertex_count_mesh,       g_index_count_mesh,       1,    &mesh_inst,        g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
     };
 
@@ -451,8 +444,10 @@ int main(void) {
     }
 
     VkDeviceSize size_instances = total_instance_count * sizeof(uint64_t);
+    VkDeviceSize size_counts = MESH_COUNT * sizeof(uint32_t);
+    VkDeviceSize size_offsets = MESH_COUNT * sizeof(uint32_t);
+    VkDeviceSize size_visible_ids = total_instance_count * sizeof(uint32_t);
     VkDeviceSize size_visible   = total_instance_count * sizeof(uint32_t) * 4;
-    VkDeviceSize size_visible_ids   = total_instance_count * sizeof(uint32_t) * 1;
     VkDeviceSize size_mesh_info = MESH_COUNT * sizeof(VkDrawIndexedIndirectCommand);
     VkDeviceSize size_counters  = MESH_COUNT * sizeof(VkDrawIndexedIndirectCommand);
     VkDeviceSize size_positions = total_vertex_count * sizeof(uint32_t);
@@ -471,20 +466,30 @@ int main(void) {
     create_and_upload_device_local_buffer(
         machine.device, machine.physical_device, machine.queue_graphics, upload_pool,
         size_instances, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        /*src*/ NULL, // we'll upload per-mesh ranges below
+        NULL,
         &renderer.buffer_instances, &renderer.memory_instances, 0);
 
-    // VISIBLE (SSBO+VB, GPU-only produced/consumed) -> DEVICE_LOCAL (no initial upload)
+    // COUNTS
+    create_buffer_and_memory(machine.device, machine.physical_device, size_counts,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &renderer.buffer_counts, &renderer.memory_counts);
+
+    // OFFSETS
+    create_buffer_and_memory(machine.device, machine.physical_device, size_offsets,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &renderer.buffer_offsets, &renderer.memory_offsets);
+
+    // VISIBLE IDS
+    create_buffer_and_memory(machine.device, machine.physical_device, size_visible_ids,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &renderer.buffer_visible_ids, &renderer.memory_visible_ids);
+
+    // VISIBLE
     create_buffer_and_memory(machine.device, machine.physical_device, size_visible,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &renderer.buffer_visible, &renderer.memory_visible);
 
-    // VISIBLE IDS (SSBO+VB, GPU-only produced/consumed) -> DEVICE_LOCAL (no initial upload)
-    create_buffer_and_memory(machine.device, machine.physical_device, size_visible_ids,
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &renderer.buffer_visible_ids, &renderer.memory_visible_ids);
-
-    // COUNTERS (SSBO+INDIRECT, GPU-only) -> DEVICE_LOCAL (you zero with vkCmdFillBuffer each frame)
+    // DRAW_CALLS
     create_buffer_and_memory(machine.device, machine.physical_device, size_counters,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &renderer.buffer_counters, &renderer.memory_counters);
@@ -645,8 +650,10 @@ int main(void) {
 
     VkDescriptorBufferInfo buffer_infos[BINDINGS] = {
         { renderer.buffer_instances, 0, size_instances },
-        { renderer.buffer_visible,   0, size_visible   },
+        { renderer.buffer_counts,0, size_counts   },
+        { renderer.buffer_offsets,0, size_offsets   },
         { renderer.buffer_visible_ids,0, size_visible_ids   },
+        { renderer.buffer_visible,   0, size_visible   },
         { renderer.buffer_mesh_info, 0, size_mesh_info },
         { renderer.buffer_counters,  0, size_counters  },
         { renderer.buffer_positions, 0, size_positions },
@@ -828,18 +835,17 @@ int main(void) {
         f32 frame_start_time = (f32) (pf_ns_now() - pf_ns_start()) / 1e6;
         VkCommandBuffer cmd = swapchain.command_buffers_per_image[swap_image_index];
         if (!swapchain.command_buffers_recorded[swap_image_index]) {
-            // VK_CHECK(vkResetCommandBuffer(cmd, 0)); // don't need to reset if recorded once and reused
+            // START RECORDING
             VkCommandBufferBeginInfo begin_info = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+            // VK_CHECK(vkResetCommandBuffer(cmd, 0)); // don't need to reset if recorded once and reused
             VK_CHECK(vkBeginCommandBuffer(cmd, &begin_info));
             #if DEBUG_APP == 1
             uint32_t q0 = swap_image_index * QUERIES_PER_IMAGE + 0; // index of the first query of this frame
-            // Reset the time queries for frame
             vkCmdResetQueryPool(cmd, swapchain.query_pool, q0, QUERIES_PER_IMAGE);
-            // Start timing
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, swapchain.query_pool, q0 + Q_BEGIN);
             #endif
             
-            // make writes visible
+            // BLOCK UNTIL UNIFORM WRITES ARE VISIBLE
             VkMemoryBarrier2 cam_host_to_shader = {
                 .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
                 .srcStageMask  = VK_PIPELINE_STAGE_2_HOST_BIT,
@@ -848,16 +854,15 @@ int main(void) {
                                  VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
                 .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT
             };
-            // record once, before your other work (e.g. right after your first timestamp)
             vkCmdPipelineBarrier2(cmd, &(VkDependencyInfo){
                 .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
                 .memoryBarrierCount = 1,
                 .pMemoryBarriers    = &cam_host_to_shader
             });
             
-            // Zero the counters on GPU
+            // ZERO THE DRAW CALL BUFFER (todo: will not be needed anymore after adding counts pass setup)
             vkCmdFillBuffer(cmd, renderer.buffer_counters, 0, size_counters, 0);
-            // Make the writes visible to COMPUTE
+            vkCmdFillBuffer(cmd, renderer.buffer_counts, 0, size_counts, 0);
             VkMemoryBarrier2 xfer_to_compute = {
                 .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
                 .srcStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
@@ -871,39 +876,122 @@ int main(void) {
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, swapchain.query_pool, q0 + Q_AFTER_ZERO);
             #endif
 
-            // --- Compute passes ---
+            // VISIBLE COUNT PASS
             vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,renderer.common_pipeline_layout, 0, 1, &renderer.descriptor_set, 0, NULL);
-            // Build visible (no culling): instanceCount = numInstances
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, renderer.compute_pipelines[0]);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, renderer.compute_pipeline);
+            uint32_t mode_counts = 0;
+            vkCmdPushConstants(cmd,
+                renderer.common_pipeline_layout,
+                VK_SHADER_STAGE_COMPUTE_BIT,
+                0, sizeof(uint32_t), &mode_counts);
             vkCmdDispatch(cmd, (total_instance_count+63)/64, 1, 1);
+            VkMemoryBarrier2 after_count = {
+                .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+                .srcStageMask = CS,
+                .srcAccessMask = SSW,                  // pass 0 wrote SSBOs
+                .dstStageMask = CS,
+                .dstAccessMask = SSR | SSW,            // pass 1 will read & write SSBOs
+            };
+            VkDependencyInfo dep_after_count = {
+                .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                .memoryBarrierCount = 1,
+                .pMemoryBarriers = &after_count,
+            };
+            vkCmdPipelineBarrier2(cmd, &dep_after_count);
+
             #if DEBUG_APP == 1
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, swapchain.query_pool, q0 + Q_AFTER_COMP_BUILD);
             #endif
 
-            // Prepare indirect
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, renderer.compute_pipelines[1]);
+            // PREPARE INDIRECT PASS
+            uint32_t mode_prepare = 1;
+            vkCmdPushConstants(cmd,
+                renderer.common_pipeline_layout,
+                VK_SHADER_STAGE_COMPUTE_BIT,
+                0, sizeof(uint32_t), &mode_prepare);
             vkCmdDispatch(cmd, 1, 1, 1);
+            VkMemoryBarrier2 after_prepare = {
+                .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+                .srcStageMask = CS,
+                .srcAccessMask = SSW,
+                .dstStageMask = CS,
+                .dstAccessMask = SSR | SSW,            // scatter reads OFFSETS & writes VISIBLE, DRAW_CALLS.instance_count
+            };
+            VkDependencyInfo dep_after_prepare = {
+                .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                .memoryBarrierCount = 1,
+                .pMemoryBarriers = &after_prepare,
+            };
+            vkCmdPipelineBarrier2(cmd, &dep_after_prepare);
+
+            // SCATTER PASS
+            uint32_t mode_scatter = 2;
+            vkCmdPushConstants(cmd,
+                renderer.common_pipeline_layout,
+                VK_SHADER_STAGE_COMPUTE_BIT,
+                0, sizeof(uint32_t), &mode_scatter);
+            vkCmdDispatch(cmd, (total_instance_count+63)/64, 1, 1);
+            
             #if DEBUG_APP == 1
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, swapchain.query_pool, q0 + Q_AFTER_COMP_INDIRECT);
             #endif
-            // Barrier: make compute writes visible to graphics/indirect stages
-            VkMemoryBarrier2 mb = {
-              .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
-              .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-              .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
-              .dstStageMask  = VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
-                               VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
-                               VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
-              .dstAccessMask = VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT |
-                               VK_ACCESS_2_SHADER_READ_BIT |
-                               VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT
+            VkBufferMemoryBarrier2 scatter_to_indirect = {
+                .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+                .srcStageMask = CS,
+                .srcAccessMask = SSW,                  // wrote indirect args
+                .dstStageMask = DI,
+                .dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .buffer = renderer.buffer_counters,  // backing buffer for DRAW_CALLS
+                .offset = 0,
+                .size = VK_WHOLE_SIZE,
             };
-            vkCmdPipelineBarrier2(cmd, &(VkDependencyInfo){ .sType=VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount=1, .pMemoryBarriers=&mb });
+            // (B) make VISIBLE[] visible to the vertex/graphics stage (SSBO reads in VS or later)
+            VkBufferMemoryBarrier2 scatter_to_vs = {
+                .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+                .srcStageMask = CS,
+                .srcAccessMask = SSW,                  // wrote instance data
+                .dstStageMask = VS,                    // or FRAGMENT if read there; include both if needed
+                .dstAccessMask = SSR,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .buffer = renderer.buffer_visible,     // backing buffer for VISIBLE
+                .offset = 0,
+                .size = VK_WHOLE_SIZE,
+            };
+            VkDependencyInfo dep_to_graphics = {
+                .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                .bufferMemoryBarrierCount = 2,
+                .pBufferMemoryBarriers = (VkBufferMemoryBarrier2[]){ scatter_to_indirect, scatter_to_vs },
+            };
+            vkCmdPipelineBarrier2(cmd, &dep_to_graphics);
             #if DEBUG_APP == 1
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, swapchain.query_pool, q0 + Q_AFTER_COMP_TO_GFX);
             #endif
 
             // --- render pass (use persistent framebuffer) ---
+            VkImageMemoryBarrier2 to_depth = {
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                .srcStageMask  = VK_PIPELINE_STAGE_2_NONE,
+                .srcAccessMask = 0,
+                .dstStageMask  = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                                 VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                .dstAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
+                                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
+                .oldLayout     = VK_IMAGE_LAYOUT_UNDEFINED,            // or previous
+                .newLayout     = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                .image         = swapchain.depth_image,                // your depth image
+                .subresourceRange = {
+                    .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+                    .baseMipLevel = 0, .levelCount = 1,
+                    .baseArrayLayer = 0, .layerCount = 1
+                }
+            };
+            vkCmdPipelineBarrier2(cmd, &(VkDependencyInfo){
+                .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &to_depth
+            });
             VkImageMemoryBarrier2 to_color = {
               .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
               .srcStageMask  = VK_PIPELINE_STAGE_2_NONE,
@@ -911,7 +999,7 @@ int main(void) {
               .dstStageMask  = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
               .dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
               .oldLayout     = VK_IMAGE_LAYOUT_UNDEFINED,          // swapchain image is undefined after acquire
-              .newLayout     = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+              .newLayout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
               .image         = swapchain.swapchain_images[swap_image_index],
               .subresourceRange = { .aspectMask=VK_IMAGE_ASPECT_COLOR_BIT, .levelCount=1, .layerCount=1 }
             };
@@ -920,17 +1008,17 @@ int main(void) {
             VkRenderingAttachmentInfo swap_att = {
               .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
               .imageView = swapchain.swapchain_views[swap_image_index],
-              .imageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+              .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
               .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
               .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
             };
             VkRenderingAttachmentInfo depth_att = {
               .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
               .imageView = swapchain.depth_view,
-              .imageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+              .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
               .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
               .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-              .clearValue = { .depthStencil = { 1.0f, 0 } },   // clear depth to FAR (1.0)
+              .clearValue = { .depthStencil = { 0.0f, 0 } },
             };
             VkRenderingInfo ri_swap = {
               .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
@@ -976,7 +1064,7 @@ int main(void) {
               .srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
               .dstStageMask  = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
               .dstAccessMask = 0,
-              .oldLayout     = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+              .oldLayout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
               .newLayout     = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
               .image         = swapchain.swapchain_images[swap_image_index],
               .subresourceRange = { .aspectMask=VK_IMAGE_ASPECT_COLOR_BIT, .levelCount=1, .layerCount=1 }
