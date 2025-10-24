@@ -8,6 +8,9 @@ static const float divide_by_127      = float(1.0/127.0);
 static const float divide_by_511      = float(1.0/511.0);
 static const float divide_by_32767    = float(1.0/32767.0);
 
+static const float tanHalfFovY = tan(0.5 * fov_y_radians); // for frustrum culling
+static const float tanHalfFovX = tanHalfFovY * aspect_ratio;
+
 struct push_constants {
     uint mode; // 0 = normal mesh draw, 1 = sky
 };
@@ -52,15 +55,14 @@ uint find_mesh_id(uint instance_id, uint mesh_count) {
     return (lo - 1) - ((lo-1) % 7);
 }
 
-uint choose_lod_step(float z_forward) {
-    if (z_forward >= 10000.0) return 0;
-    if (z_forward >= 5000.0) return 0;
-    if (z_forward >= 2500.0) return 0;
-    if (z_forward >= 1250.0) return 0;
-    if (z_forward >= 625.0) return 0;
-    if (z_forward >= 312.5) return 0;
-    if (z_forward >= 1.0) return 0;
-    return 0;
+uint choose_lod_step(float distance) {
+    if (distance >= 3000000.0) return 0;
+    if (distance >= 1000000.0) return 1;
+    if (distance >= 400000.0) return 2;
+    if (distance >= 50000.0) return 3;
+    if (distance >= 10000.0) return 4;
+    if (distance >= 1000.0) return 5;
+    return 6;
 }
 
 [shader("compute")] [numthreads(64,1,1)]
@@ -78,7 +80,7 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
         uint2 instance = INSTANCES[instance_id];    // 8 bytes
         
         // same calculation for whole workgroup
-        int3 camera_position = int3(
+        float3 camera_position = float3(
             (int16_t) (camera.x        & 0xFFFF),
             (int16_t)((camera.x >> 16) & 0xFFFF),
             (int16_t) (camera.y        & 0xFFFF)
@@ -117,13 +119,29 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
 
         // pick lod level
         uint base_mesh_id = find_mesh_id(instance_id, mesh_count);
-        uint lod_level = choose_lod_step(t_view.z);
+        float distance = dot(position,position) / 500.0f;
+        uint lod_level = choose_lod_step(distance);
         uint mesh_id = base_mesh_id + lod_level;
+        
+        float ax = abs(t_view.x);
+        float ay = abs(t_view.y);
+        float maxX = t_view.z * tanHalfFovX;
+        float maxY = t_view.z * tanHalfFovY;
+
+        
+        bool valid = true;
+        // frustrum cull
+        if (ax > maxX || ay > maxY) valid = false;
+        // overflow cull
+        if (t_view.x > 32767 || t_view.z > 32767 || t_view.x < -32767 || t_view.z < -32767) valid = false;
+        // near cull
+        if (t_view.z < 0) valid = false;
 
         // increment counter
-        if (lod_level < 7 && (int)round(t_view.z) < 32767 && (int)round(t_view.y) < 32767
-            && (int)round(t_view.x) < 32767 && (int)round(t_view.y) >= -camera_position.y
-            && position.x < 32767 && position.z < 32767) {
+        // two issues:
+        // 1: camera far in distance: >32k -> culled in distance
+        // 2: -32k -> camera on other side -> substract camera -> even smaller -> overflows -> shows up beside edge, weird angles (?)
+        if (valid) {
             uint slot; InterlockedAdd(COUNTS[mesh_id], 1, slot);
             VISIBLE_IDS[instance_id] = mesh_id;
         } else {

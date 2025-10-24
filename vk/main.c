@@ -173,22 +173,29 @@ static void create_and_upload_device_local_buffer(
     vkFreeMemory(device, staging_mem, NULL);
 }
 
-// ------------------------------------------------------------------
-
 #pragma region MAIN
 // todo: avoid globals
 WINDOW window;
 i32 buttons[BUTTON_COUNT];
 i16 cam_x = 0, cam_y = 2, cam_z = -5, cam_yaw = 0, cam_pitch = 0;
 void move_forward(int amount) {
-    float rad = cam_yaw * 3.14159265f / 32767.0f;
-    cam_x += (i16)(sinf(rad) * amount);
-    cam_z += (i16)(cosf(rad) * amount);
+    double rad = (double)(cam_yaw) * 3.14159265f / 32767.0f;
+    cam_x += (i16)lroundf(sinf(rad) * amount);
+    cam_z += (i16)lroundf(cosf(rad) * amount);
 }
 void move_sideways(int amount) {
-    float rad = cam_yaw * 3.14159265f / 32767.0f;
-    cam_x += (i16)(cosf(rad) * amount);
-    cam_z -= (i16)(sinf(rad) * amount);
+    double rad = (double)(cam_yaw) * 3.14159265f / 32767.0f;
+    cam_x += (i16)lroundf(cosf(rad) * amount);
+    cam_z -= (i16)lroundf(sinf(rad) * amount);
+}
+int scaled(int value) {
+    static const int min_in = 0;
+    static const int max_in = 32767;
+    static const int min_out = 1;
+    static const int max_out = 1024;
+    float slope = (float)(max_out - min_out) / (max_in - min_in);
+    float scale = (min_out + (cam_y - min_in) * slope);
+    return (int)((float)value * scale);
 }
 void key_input_callback(void* ud, enum BUTTON button, enum BUTTON_STATE state) {
     if (state == PRESSED) buttons[button] = 1;
@@ -196,17 +203,17 @@ void key_input_callback(void* ud, enum BUTTON button, enum BUTTON_STATE state) {
 }
 void mouse_input_callback(void* ud, i32 x, i32 y, enum BUTTON button, int state) {
     if (button == MOUSE_MOVED) {
-        if (x < 50) buttons[MOUSE_MARGIN_LEFT] += (50 - x) / 5;
+        if (x < 50) buttons[MOUSE_MARGIN_LEFT] += (50 - x) / 3;
         else buttons[MOUSE_MARGIN_LEFT] = 0;
-        if (x > pf_window_width(window) - 50) buttons[MOUSE_MARGIN_RIGHT] += (x - (pf_window_width(window) - 50)) / 5;
+        if (x > pf_window_width(window) - 50) buttons[MOUSE_MARGIN_RIGHT] += (x - (pf_window_width(window) - 50)) / 3;
         else buttons[MOUSE_MARGIN_RIGHT] = 0;
         if (y < 50) buttons[MOUSE_MARGIN_TOP] += (50 - y) / 5;
         else buttons[MOUSE_MARGIN_TOP] = 0;
         if (y > pf_window_height(window) - 50) buttons[MOUSE_MARGIN_BOTTOM] += (y - (pf_window_height(window) - 50)) / 5;
         else buttons[MOUSE_MARGIN_BOTTOM] = 0;
     }
-    if (button == MOUSE_SCROLL) buttons[MOUSE_SCROLL] += state * 5;
-    if (button == MOUSE_SCROLL_SIDE) buttons[MOUSE_SCROLL_SIDE] -= state / 5;
+    if (button == MOUSE_SCROLL) buttons[MOUSE_SCROLL] += scaled(state / 5);
+    if (button == MOUSE_SCROLL_SIDE) buttons[MOUSE_SCROLL_SIDE] -= scaled(state / 5);
     if (button == MOUSE_LEFT || button == MOUSE_RIGHT || button == MOUSE_MIDDLE) {
         if (state == PRESSED) buttons[button] = 1;
         else buttons[button] = 0;
@@ -214,10 +221,10 @@ void mouse_input_callback(void* ud, i32 x, i32 y, enum BUTTON button, int state)
 }
 void process_inputs() {
     if (buttons[KEYBOARD_ESCAPE]) {_exit(0);}
-    if (buttons[KEYBOARD_W]) { move_forward(100); }
-    if (buttons[KEYBOARD_R]) { move_forward(-100); }
-    if (buttons[KEYBOARD_A]) { move_sideways(-100); }
-    if (buttons[KEYBOARD_S]) { move_sideways(100); }
+    if (buttons[KEYBOARD_W]) { move_forward(scaled(1)); }
+    if (buttons[KEYBOARD_R]) { move_forward(-scaled(1)); }
+    if (buttons[KEYBOARD_A]) { move_sideways(-scaled(1)); }
+    if (buttons[KEYBOARD_S]) { move_sideways(scaled(1)); }
     if (buttons[MOUSE_MARGIN_LEFT]) { cam_yaw -= buttons[MOUSE_MARGIN_LEFT]; } 
     if (buttons[MOUSE_MARGIN_RIGHT]) { cam_yaw += buttons[MOUSE_MARGIN_RIGHT]; }
     if (buttons[MOUSE_MARGIN_TOP]) { cam_pitch -= buttons[MOUSE_MARGIN_TOP]; }
@@ -398,7 +405,7 @@ int main(void) {
     #include "plane_lod4.h"
     #include "plane_lod5.h"
     #include "plane_lod6.h"
-    #define MESH_COUNT 7
+    #define MESH_COUNT 14
 
     struct gpu_instance { uint32_t xy_dm; uint32_t z_cs; };
     struct mesh_info {
@@ -425,7 +432,13 @@ int main(void) {
         {g_vertex_count_plane_lod2, g_index_count_plane_lod2, 0,    g_plane_instances, g_indices_plane_lod2, NULL,NULL,NULL},
         {g_vertex_count_plane_lod1, g_index_count_plane_lod1, 0,    g_plane_instances, g_indices_plane_lod1, NULL,NULL,NULL},
         {g_vertex_count_plane_lod0, g_index_count_plane_lod0, 0,    g_plane_instances, g_indices_plane_lod0, NULL,NULL,NULL},
-        // {g_vertex_count_mesh,       g_index_count_mesh,       1,    &mesh_inst,        g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
+        {g_vertex_count_mesh,       g_index_count_mesh,       1,    &mesh_inst,        g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
+        {g_vertex_count_mesh,       g_index_count_mesh,       0,    &mesh_inst,        g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
+        {g_vertex_count_mesh,       g_index_count_mesh,       0,    &mesh_inst,        g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
+        {g_vertex_count_mesh,       g_index_count_mesh,       0,    &mesh_inst,        g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
+        {g_vertex_count_mesh,       g_index_count_mesh,       0,    &mesh_inst,        g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
+        {g_vertex_count_mesh,       g_index_count_mesh,       0,    &mesh_inst,        g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
+        {g_vertex_count_mesh,       g_index_count_mesh,       0,    &mesh_inst,        g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh}
     };
 
     u32 total_vertex_count = 0;
@@ -817,10 +830,10 @@ int main(void) {
 
         // get the next swapchain image (block until one is available)
         uint32_t swap_image_index = 0;
-        VkResult acquire_result = vkAcquireNextImageKHR(machine.device, swapchain.swapchain, 100000000, renderer.sem_image_available[renderer.frame_slot], VK_NULL_HANDLE, &swap_image_index);
+        VkResult acquire_result = vkAcquireNextImageKHR(machine.device, swapchain.swapchain, UINT64_MAX, renderer.sem_image_available[renderer.frame_slot], VK_NULL_HANDLE, &swap_image_index);
         // recreate the swapchain if the window resized
         if (acquire_result == VK_ERROR_OUT_OF_DATE_KHR) { recreate_swapchain(&machine, &renderer, &swapchain, window); continue; }
-        if (acquire_result != VK_SUCCESS && acquire_result != VK_SUBOPTIMAL_KHR) { printf("vkAcquireNextImageKHR failed: %d\n", acquire_result); break; }
+        if (acquire_result != VK_SUCCESS && acquire_result != VK_SUBOPTIMAL_KHR) { printf("vkAcquireNextImageKHR failed: %s\n", vk_result_str(acquire_result)); break; }
         
         #pragma region update uniforms
         process_inputs();
@@ -882,7 +895,7 @@ int main(void) {
             uint32_t mode_counts = 0;
             vkCmdPushConstants(cmd,
                 renderer.common_pipeline_layout,
-                VK_SHADER_STAGE_COMPUTE_BIT,
+                VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                 0, sizeof(uint32_t), &mode_counts);
             vkCmdDispatch(cmd, (total_instance_count+63)/64, 1, 1);
             VkMemoryBarrier2 after_count = {
@@ -907,7 +920,7 @@ int main(void) {
             uint32_t mode_prepare = 1;
             vkCmdPushConstants(cmd,
                 renderer.common_pipeline_layout,
-                VK_SHADER_STAGE_COMPUTE_BIT,
+                VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                 0, sizeof(uint32_t), &mode_prepare);
             vkCmdDispatch(cmd, 1, 1, 1);
             VkMemoryBarrier2 after_prepare = {
@@ -928,7 +941,7 @@ int main(void) {
             uint32_t mode_scatter = 2;
             vkCmdPushConstants(cmd,
                 renderer.common_pipeline_layout,
-                VK_SHADER_STAGE_COMPUTE_BIT,
+                VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                 0, sizeof(uint32_t), &mode_scatter);
             vkCmdDispatch(cmd, (total_instance_count+63)/64, 1, 1);
             
@@ -1046,18 +1059,22 @@ int main(void) {
             uint32_t mode_mesh = 0;
             vkCmdPushConstants(cmd,
                 renderer.common_pipeline_layout,
-                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                 0, sizeof(uint32_t), &mode_mesh);
             vkCmdDrawIndexedIndirect(cmd, renderer.buffer_counters, 0, MESH_COUNT, sizeof(VkDrawIndexedIndirectCommand));
+            #if DEBUG_APP == 1
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, swapchain.query_pool, q0 + Q_AFTER_RENDERPASS);
+            #endif
             uint32_t mode_sky = 1;
             vkCmdPushConstants(cmd,
                 renderer.common_pipeline_layout,
-                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                 0, sizeof(uint32_t), &mode_sky);
             vkCmdDraw(cmd, 3, 1, 0, 0); // sky fullscreen triangle
             vkCmdEndRendering(cmd);
+            #if DEBUG_APP == 1
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, swapchain.query_pool, q0 + Q_AFTER_BLIT);
+            #endif
             VkImageMemoryBarrier2 to_present = {
               .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
               .srcStageMask  = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
