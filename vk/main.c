@@ -416,13 +416,16 @@ int main(void) {
     };
     #include "plane_instances.h"
 
-    struct gpu_instance mesh_inst;
-    mesh_inst.xy_dm = ((uint16_t)0) << 16 | ((uint16_t)0);
-    {
-        float yaw = 0.0f;
-        mesh_inst.z_cs = ((uint16_t)0)
-            | (((uint8_t)lrintf(cosf(yaw) * 127.0f)) << 16)
-            | (((uint8_t)lrintf(sinf(yaw) * 127.0f)) << 24);
+    struct gpu_instance mesh_inst[100];
+    // steps of 1dm, we want i to move 1 meter for each, and form a square of instances 1 meter apart
+    for (int i = 0; i < 100; ++i) {
+        mesh_inst[i].xy_dm = ((uint16_t)((15)) << 16 | ((uint16_t)(i % 10) * 20));
+        {
+            float yaw = 0.0f;
+            mesh_inst[i].z_cs = ((uint16_t)((i / 10) * 20))
+                | (((uint8_t)lrintf(cosf(yaw) * 127.0f)) << 16)
+                | (((uint8_t)lrintf(sinf(yaw) * 127.0f)) << 24);
+        }
     }
     const struct mesh_info meshes[MESH_COUNT] = {
         {g_vertex_count_plane_lod6, g_index_count_plane_lod6, 2601, g_plane_instances, g_indices_plane_lod6, NULL,NULL,NULL},
@@ -432,7 +435,7 @@ int main(void) {
         {g_vertex_count_plane_lod2, g_index_count_plane_lod2, 0,    g_plane_instances, g_indices_plane_lod2, NULL,NULL,NULL},
         {g_vertex_count_plane_lod1, g_index_count_plane_lod1, 0,    g_plane_instances, g_indices_plane_lod1, NULL,NULL,NULL},
         {g_vertex_count_plane_lod0, g_index_count_plane_lod0, 0,    g_plane_instances, g_indices_plane_lod0, NULL,NULL,NULL},
-        {g_vertex_count_mesh,       g_index_count_mesh,       1,    &mesh_inst,        g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
+        {g_vertex_count_mesh,       g_index_count_mesh,       100,    &mesh_inst,        g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
         {g_vertex_count_mesh,       g_index_count_mesh,       0,    &mesh_inst,        g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
         {g_vertex_count_mesh,       g_index_count_mesh,       0,    &mesh_inst,        g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
         {g_vertex_count_mesh,       g_index_count_mesh,       0,    &mesh_inst,        g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},

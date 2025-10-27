@@ -56,8 +56,8 @@ uint find_mesh_id(uint instance_id, uint mesh_count) {
 }
 
 uint choose_lod_step(float distance) {
-    if (distance >= 3000000.0) return 0;
-    if (distance >= 1000000.0) return 1;
+    // if (distance >= 3000000.0) return 0;
+    // if (distance >= 1000000.0) return 1;
     if (distance >= 400000.0) return 2;
     if (distance >= 50000.0) return 3;
     if (distance >= 10000.0) return 4;
@@ -67,6 +67,9 @@ uint choose_lod_step(float distance) {
 
 [shader("compute")] [numthreads(64,1,1)]
 void cs_main(uint3 tid : SV_DispatchThreadID) {
+    // todo: chunks
+    // 1 chunk -> 64 objects -> each 1 or more actual instances
+    // 
     if (PUSH_CONSTANTS.mode == 0) {
         // same fetches for whole workgroup
         uint stride; uint mesh_count; uint instance_count;
@@ -138,9 +141,6 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
         if (t_view.z < 0) valid = false;
 
         // increment counter
-        // two issues:
-        // 1: camera far in distance: >32k -> culled in distance
-        // 2: -32k -> camera on other side -> substract camera -> even smaller -> overflows -> shows up beside edge, weird angles (?)
         if (valid) {
             uint slot; InterlockedAdd(COUNTS[mesh_id], 1, slot);
             VISIBLE_IDS[instance_id] = mesh_id;
