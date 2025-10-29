@@ -428,14 +428,15 @@ int main(void) {
         }
     }
     const struct mesh_info meshes[MESH_COUNT] = {
-        {g_vertex_count_plane_lod6, g_index_count_plane_lod6, 2601, g_plane_instances, g_indices_plane_lod6, NULL,NULL,NULL},
+        // todo: add chunk compute pass for 64 instance chunks
+        {g_vertex_count_plane_lod6, g_index_count_plane_lod6, 64, g_plane_instances, g_indices_plane_lod6, NULL,NULL,NULL},
         {g_vertex_count_plane_lod5, g_index_count_plane_lod5, 0,    g_plane_instances, g_indices_plane_lod5, NULL,NULL,NULL},
         {g_vertex_count_plane_lod4, g_index_count_plane_lod4, 0,    g_plane_instances, g_indices_plane_lod4, NULL,NULL,NULL},
         {g_vertex_count_plane_lod3, g_index_count_plane_lod3, 0,    g_plane_instances, g_indices_plane_lod3, NULL,NULL,NULL},
         {g_vertex_count_plane_lod2, g_index_count_plane_lod2, 0,    g_plane_instances, g_indices_plane_lod2, NULL,NULL,NULL},
         {g_vertex_count_plane_lod1, g_index_count_plane_lod1, 0,    g_plane_instances, g_indices_plane_lod1, NULL,NULL,NULL},
         {g_vertex_count_plane_lod0, g_index_count_plane_lod0, 0,    g_plane_instances, g_indices_plane_lod0, NULL,NULL,NULL},
-        {g_vertex_count_mesh,       g_index_count_mesh,       100,    &mesh_inst,        g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
+        {g_vertex_count_mesh,       g_index_count_mesh,       64,    &mesh_inst,        g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
         {g_vertex_count_mesh,       g_index_count_mesh,       0,    &mesh_inst,        g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
         {g_vertex_count_mesh,       g_index_count_mesh,       0,    &mesh_inst,        g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
         {g_vertex_count_mesh,       g_index_count_mesh,       0,    &mesh_inst,        g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
