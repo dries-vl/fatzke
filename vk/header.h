@@ -13,7 +13,7 @@ typedef __SIZE_TYPE__ usize;
 
 // SETTINGS
 #define APP_NAME "VK: work in progress"
-#define DEBUG_VULKAN 1
+#define DEBUG_VULKAN 0
 #define DEBUG_APP 1
 #define DEBUG_CPU 1
 
@@ -23,8 +23,9 @@ typedef __SIZE_TYPE__ usize;
 
 // LIBC
 extern void _exit(int);
-extern int printf(const char*,...); // todo: don't use printf
-extern int snprintf(char*,usize,const char*,...);
+#include <stdio.h>
+// extern int printf(const char*,...); // todo: don't use printf
+// extern int snprintf(char*,usize,const char*,...);
 extern void *memcpy(void *__restrict,const void*__restrict,usize);
 extern int memcmp(const void*,const void*,usize);
 extern void *memset(void*,int,usize);

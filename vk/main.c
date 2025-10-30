@@ -175,7 +175,7 @@ static void create_and_upload_device_local_buffer(
 
 #pragma region MAIN
 // todo: avoid globals
-WINDOW window;
+WINDOW w;
 i32 buttons[BUTTON_COUNT];
 i16 cam_x = 0, cam_y = 2, cam_z = -5, cam_yaw = 0, cam_pitch = 0;
 void move_forward(int amount) {
@@ -205,11 +205,11 @@ void mouse_input_callback(void* ud, i32 x, i32 y, enum BUTTON button, int state)
     if (button == MOUSE_MOVED) {
         if (x < 50) buttons[MOUSE_MARGIN_LEFT] += (50 - x) / 3;
         else buttons[MOUSE_MARGIN_LEFT] = 0;
-        if (x > pf_window_width(window) - 50) buttons[MOUSE_MARGIN_RIGHT] += (x - (pf_window_width(window) - 50)) / 3;
+        if (x > pf_window_width(w) - 50) buttons[MOUSE_MARGIN_RIGHT] += (x - (pf_window_width(w) - 50)) / 3;
         else buttons[MOUSE_MARGIN_RIGHT] = 0;
         if (y < 50) buttons[MOUSE_MARGIN_TOP] += (50 - y) / 5;
         else buttons[MOUSE_MARGIN_TOP] = 0;
-        if (y > pf_window_height(window) - 50) buttons[MOUSE_MARGIN_BOTTOM] += (y - (pf_window_height(window) - 50)) / 5;
+        if (y > pf_window_height(w) - 50) buttons[MOUSE_MARGIN_BOTTOM] += (y - (pf_window_height(w) - 50)) / 5;
         else buttons[MOUSE_MARGIN_BOTTOM] = 0;
     }
     if (button == MOUSE_SCROLL) buttons[MOUSE_SCROLL] += scaled(state / 5);
@@ -235,7 +235,7 @@ void process_inputs() {
 int main(void) {
     // setup with X11
     pf_time_reset();
-    window = pf_create_window(NULL, key_input_callback,mouse_input_callback);
+    w = pf_create_window(NULL, key_input_callback,mouse_input_callback);
     pf_timestamp("Created platform window");
 
 #if defined(_WIN32) && DEBUG_VULKAN == 1
@@ -257,12 +257,12 @@ int main(void) {
 #endif
 
     // setup vulkan on the machine
-    struct Machine machine = create_machine(window);
-    struct Swapchain swapchain = create_swapchain(&machine,window);
+    struct Machine machine = create_machine(w);
+    struct Swapchain swapchain = create_swapchain(&machine,w);
     struct Renderer renderer = {0};
     
     printf("SCREEN SIZE: %d, %d\n", swapchain.swapchain_extent.width, swapchain.swapchain_extent.height);
-    printf("WINDOW SIZE: %d, %d\n", pf_window_width(window), pf_window_height(window));
+    printf("WINDOW SIZE: %d, %d\n", pf_window_width(w), pf_window_height(w));
 
     // create shader module
     VkShaderModuleCreateInfo smci={ .sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize=shaders_len, .pCode=(const u32*)shaders };
@@ -747,7 +747,7 @@ int main(void) {
     // }
 
     renderer.frame_slot = 0;
-    while (pf_poll_events(window)) {
+    while (pf_poll_events(w)) {
         uint64_t wait_value = timeline_value; // for MAX_FRAMES_IN_FLIGHT == 1
         // If you ever increase MAX_FRAMES_IN_FLIGHT to N, use:
         // uint64_t wait_value = renderer.timeline_value - (MAX_FRAMES_IN_FLIGHT - 1);
@@ -836,7 +836,7 @@ int main(void) {
         uint32_t swap_image_index = 0;
         VkResult acquire_result = vkAcquireNextImageKHR(machine.device, swapchain.swapchain, UINT64_MAX, renderer.sem_image_available[renderer.frame_slot], VK_NULL_HANDLE, &swap_image_index);
         // recreate the swapchain if the window resized
-        if (acquire_result == VK_ERROR_OUT_OF_DATE_KHR) { recreate_swapchain(&machine, &renderer, &swapchain, window); continue; }
+        if (acquire_result == VK_ERROR_OUT_OF_DATE_KHR) { recreate_swapchain(&machine, &renderer, &swapchain, w); continue; }
         if (acquire_result != VK_SUCCESS && acquire_result != VK_SUBOPTIMAL_KHR) { printf("vkAcquireNextImageKHR failed: %s\n", vk_result_str(acquire_result)); break; }
         
         #pragma region update uniforms
@@ -896,7 +896,7 @@ int main(void) {
             // VISIBLE COUNT PASS
             vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,renderer.common_pipeline_layout, 0, 1, &renderer.descriptor_set, 0, NULL);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, renderer.compute_pipeline);
-            uint32_t mode_counts = 0;
+            uint32_t mode_counts = 1;
             vkCmdPushConstants(cmd,
                 renderer.common_pipeline_layout,
                 VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -921,7 +921,7 @@ int main(void) {
             #endif
 
             // PREPARE INDIRECT PASS
-            uint32_t mode_prepare = 1;
+            uint32_t mode_prepare = 2;
             vkCmdPushConstants(cmd,
                 renderer.common_pipeline_layout,
                 VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -942,7 +942,7 @@ int main(void) {
             vkCmdPipelineBarrier2(cmd, &dep_after_prepare);
 
             // SCATTER PASS
-            uint32_t mode_scatter = 2;
+            uint32_t mode_scatter = 3;
             vkCmdPushConstants(cmd,
                 renderer.common_pipeline_layout,
                 VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -980,7 +980,7 @@ int main(void) {
             VkDependencyInfo dep_to_graphics = {
                 .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
                 .bufferMemoryBarrierCount = 2,
-                .pBufferMemoryBarriers = (VkBufferMemoryBarrier2[]){ scatter_to_indirect, scatter_to_vs },
+                .pBufferMemoryBarriers = (VkBufferMemoryBarrier2[2]){ scatter_to_indirect, scatter_to_vs },
             };
             vkCmdPipelineBarrier2(cmd, &dep_to_graphics);
             #if DEBUG_APP == 1
@@ -1170,7 +1170,7 @@ int main(void) {
         #endif
         VkResult present_res = vkQueuePresentKHR(machine.queue_present, &present_info);
         if (present_res == VK_ERROR_OUT_OF_DATE_KHR || present_res == VK_SUBOPTIMAL_KHR) {
-            recreate_swapchain(&machine, &renderer, &swapchain, window);
+            recreate_swapchain(&machine, &renderer, &swapchain, w);
             continue;
         } else if (present_res != VK_SUCCESS) {
             printf("vkQueuePresentKHR failed: %d\n", present_res);

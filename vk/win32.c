@@ -3,6 +3,9 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#ifndef WM_MOUSEHWHEEL
+#define WM_MOUSEHWHEEL 0x020E
+#endif
 
 #ifndef GET_X_LPARAM
 #define GET_X_LPARAM(lp) ((int)(short)LOWORD(lp))
@@ -131,7 +134,7 @@ WINDOW pf_create_window(void* ud, KEYBOARD_CB key_cb, MOUSE_CB mouse_cb){
 }
 
 /* --- input helpers --- */
-static enum KEYBOARD_BUTTON vk_to_button(WPARAM vk){
+static enum BUTTON vk_to_button(WPARAM vk){
     switch (vk){
         case VK_ESCAPE:       return KEYBOARD_ESCAPE;
 
@@ -230,7 +233,7 @@ static void emit_key(struct win32_window* w, WPARAM vk, int pressed){
     if (!w || !w->on_key) return;
     w->on_key(w->cb_ud, vk_to_button(vk), pressed ? PRESSED : RELEASED);
 }
-static void emit_mouse_button(struct win32_window* w, enum MOUSE_BUTTON b, int pressed){
+static void emit_mouse_button(struct win32_window* w, enum BUTTON b, int pressed){
     if (!w || !w->on_mouse) return;
     w->on_mouse(w->cb_ud, w->mouse_x, w->mouse_y, b, pressed ? PRESSED : RELEASED);
 }
@@ -248,6 +251,48 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (w){ w->w = LOWORD(lParam); w->h = HIWORD(lParam); } break;
 
         /* mouse */
+            /* scrolling (vertical + horizontal) */
+        case WM_MOUSEWHEEL:
+            if (w){
+                // Position in WM_MOUSEWHEEL is in screen coords; convert to client
+                POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+                ScreenToClient(hwnd, &pt);
+                w->mouse_x = pt.x; w->mouse_y = pt.y;
+
+                // Convert WHEEL_DELTA units to step count, with remainder for smooth wheels
+                static int v_remainder = 0;
+                int delta = GET_WHEEL_DELTA_WPARAM(wParam);  // multiples of 120
+                v_remainder += delta;
+                int steps = v_remainder / WHEEL_DELTA;       // signed
+                v_remainder -= steps * WHEEL_DELTA;
+
+                if (steps != 0 && w->on_mouse){
+                    // NOTE: for scroll, we pass 'steps' in the 'pressed' parameter
+                    w->on_mouse(w->cb_ud, w->mouse_x, w->mouse_y, MOUSE_SCROLL, -steps * 30);
+                }
+                return 0; // prevent default scrolling (like scrolling inactive window behind)
+            }
+            break;
+
+        case WM_MOUSEHWHEEL:
+            if (w){
+                POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+                ScreenToClient(hwnd, &pt);
+                w->mouse_x = pt.x; w->mouse_y = pt.y;
+
+                static int h_remainder = 0;
+                int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+                h_remainder += delta;
+                int steps = h_remainder / WHEEL_DELTA;       // signed
+                h_remainder -= steps * WHEEL_DELTA;
+
+                if (steps != 0 && w->on_mouse){
+                    w->on_mouse(w->cb_ud, w->mouse_x, w->mouse_y, MOUSE_SCROLL_SIDE, -steps * 30);
+                }
+                return 0;
+            }
+            break;
+
         case WM_MOUSEMOVE:
             if (w){
                 w->mouse_x = GET_X_LPARAM(lParam);

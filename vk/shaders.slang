@@ -66,29 +66,54 @@ uint choose_lod_step(float distance) {
 }
 
 [shader("compute")] [numthreads(64,1,1)]
-void cs_main(uint3 tid : SV_DispatchThreadID) {
+void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_DispatchThreadID) {
+  // todo: just store full float camera position + sin/cos values; uniform bandwidth is free anyway
+    uint4 camera = CAMERA_DATA.xyzw; // 16 bytes
+    float3 camera_position = float3(
+        (int16_t) (camera.x        & 0xFFFF),
+        (int16_t)((camera.x >> 16) & 0xFFFF),
+        (int16_t) (camera.y        & 0xFFFF)
+    );
+    float camera_pitch_sin = float((int16_t)(camera.z        & 0xFFFF)) * divide_by_32767;
+    float camera_pitch_cos = float((int16_t)(camera.z  >> 16 & 0xFFFF)) * divide_by_32767;
+    float camera_yaw_sin   = float((int16_t)(camera.w        & 0xFFFF)) * divide_by_32767;
+    float camera_yaw_cos   = float((int16_t)(camera.w  >> 16 & 0xFFFF)) * divide_by_32767;
+    // CHUNK PASS
     if (PUSH_CONSTANTS.mode == 0) {
+        uint instance_id = tid.x;
+        // 64 tile chunks (64 for every 1 actual 8192m chunk)
+        if (gid.x == 0) { // for now assume just the first chunk hardcoded
+            // assuming each tile is 1024m wide, and we use meters instead of dm now
+            float3 tile_position = float3((instance_id / 8) * 1024, 0, (instance_id % 8) * 1024);
+            float3 delta_position = tile_position - camera_position;
+            // frustum
+            float position_yaw_z =  camera_yaw_sin * delta_position.x + camera_yaw_cos * delta_position.z; // apply yaw to Z
+            float3 view = float3(
+                 camera_yaw_cos   * delta_position.x - camera_yaw_sin   * delta_position.z, // apply yaw to X
+                 camera_pitch_cos * delta_position.y + camera_pitch_sin * position_yaw_z, // apply pitch to Y (using new z)
+                -camera_pitch_sin * delta_position.y + camera_pitch_cos * position_yaw_z // apply pitch to Z (using new z)
+            );
+            bool frustum = abs(view.x) > (view.z * tanHalfFovX) || abs(view.y) > (view.z * tanHalfFovY);
+            // if not in frustum, don't continue here
+
+            // distance
+            float distance = dot(delta_position, delta_position) / 500.0f;
+            // if really far, just directly write one visible instance, instead of 64 tile objects
+            // else write 64 objects
+        }
+    }
+    // OBJECT PASS
+    else if (PUSH_CONSTANTS.mode == 1) {
         // same fetches for whole workgroup
         uint stride; uint mesh_count; uint instance_count;
         INSTANCES.GetDimensions(instance_count, stride);
         MESH_INFO.GetDimensions(mesh_count, stride);
-        uint4 camera = CAMERA_DATA.xyzw; // 16 bytes
-        
+
         // fetches per instance
         uint instance_id = tid.x; 
         if (instance_id >= instance_count) return; // early out
         uint2 instance = INSTANCES[instance_id];    // 8 bytes
         
-        // same calculation for whole workgroup
-        float3 camera_position = float3(
-            (int16_t) (camera.x        & 0xFFFF),
-            (int16_t)((camera.x >> 16) & 0xFFFF),
-            (int16_t) (camera.y        & 0xFFFF)
-        );
-        float camera_pitch_sin = float((int16_t)(camera.z        & 0xFFFF)) * divide_by_32767;
-        float camera_pitch_cos = float((int16_t)(camera.z  >> 16 & 0xFFFF)) * divide_by_32767;
-        float camera_yaw_sin   = float((int16_t)(camera.w        & 0xFFFF)) * divide_by_32767;
-        float camera_yaw_cos   = float((int16_t)(camera.w  >> 16 & 0xFFFF)) * divide_by_32767;
         // unpack instance position and move to camera space
         float3 instance_position = float3(
             ((int16_t) (instance.x        & 0xFFFF)),
@@ -103,19 +128,17 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
         // unpack yaw and pitch
         float instance_yaw_cos = float((int8_t)(instance.y >> 16 & 0xFF)) * divide_by_127;
         float instance_yaw_sin = float((int8_t)(instance.y >> 24 & 0xFF)) * divide_by_127;
-        // compute combined yaw between instance and camera
+        // compute combined yaw between instance and camera (to send to instance later)
         float cos_delta =  instance_yaw_cos * camera_yaw_cos + instance_yaw_sin * camera_yaw_sin; // cos(a-b)
         float sin_delta =  instance_yaw_sin * camera_yaw_cos - instance_yaw_cos * camera_yaw_sin; // sin(a-b)
-        // apply -yaw
-        float3 t_yaw;
-        t_yaw.x =  camera_yaw_cos * position.x - camera_yaw_sin * position.z; // apply -yaw to X/Z
-        t_yaw.z =  camera_yaw_sin * position.x + camera_yaw_cos * position.z; // apply -yaw to X/Z
-        t_yaw.y =  position.y;
-        // apply -pitch
-        float3 t_view;
-        t_view.y =  camera_pitch_cos * t_yaw.y + camera_pitch_sin * t_yaw.z; // apply -pitch to Y/Z
-        t_view.z = -camera_pitch_sin * t_yaw.y + camera_pitch_cos * t_yaw.z; // apply -pitch to Y/Z
-        t_view.x =  t_yaw.x;
+
+        // apply camera yaw and pitch to get position in view
+        float position_yaw_z =  camera_yaw_sin * position.x + camera_yaw_cos * position.z; // apply yaw to Z
+        float3 view_position = float3(
+             camera_yaw_cos   * position.x - camera_yaw_sin   * position.z, // apply yaw to X
+             camera_pitch_cos * position.y + camera_pitch_sin * position_yaw_z, // apply pitch to Y (using new z)
+            -camera_pitch_sin * position.y + camera_pitch_cos * position_yaw_z // apply pitch to Z (using new z)
+        );
 
         // pick lod level
         uint base_mesh_id = find_mesh_id(instance_id, mesh_count);
@@ -124,84 +147,37 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
         uint mesh_id = base_mesh_id + lod_level;
         
         // calculate frustrum
-        bool outside_frustrum = abs(t_view.x) > (t_view.z * tanHalfFovX) || abs(t_view.y) > (t_view.z * tanHalfFovY);
+        bool outside_frustrum = abs(view_position.x) > (view_position.z * tanHalfFovX) || abs(view_position.y) > (view_position.z * tanHalfFovY);
 
-        // for terrain we need:
-        // 64 tiles
-        // for each tile: calculate position based on % 8 and / 8
-        // assuming each tile is 1024m wide, and we use meters instead of dm now
-        float3 chunk_position = float3((instance_id / 8) * 1024, 0, (instance_id % 8) * 1024);
-        float3 position = chunk_position - camera_position;
-        float distance = dot(position, position) / 500.0f;
-        const float d = {
-            3000000.0, // lod5
-            1000000.0, // lod4
-            400000.0, // lod3
-            50000.0, // lod2
-            10000.0, // lod1
-            1000.0 // full size if closer than this
-        };
-        
+        // TERRAIN
         // todo: instead of tree splitting per 4, split only once in 64
         // 1 chunk -> 64 tiles (1024m each) -> 64 pieces (128m each) -> potentially split into 4 (64m) or 16 (32m) each
         // we can keep 'chunk' count cpu decided, and just do the 'chunk' shader with the tiles directly
-        // and either split into 64 new ones, OR just write a big visible instance directly
-        // then in the per-instance shader decide to write either 1, 4, or 16 actual rendered instances (like how units will also do)
+        // and either split into 64 objects, OR just write a big visible instance directly
+        // then in the per-object shader decide to write either 1, 4, or 16 actual rendered instances (like how units will also do)
         // now, for 80km we would have 100 'chunks' -> 6400 'chunk shader' invocations, each a workgroup
-        // those can potentially become between 6400 and 400.000 'instance shader' invocations, but usually <10.000
-        if (frustumCull(0, 0, 0)) {
-            if (0 == L-1 || distance(0, 0, 0) > d[0]) {
-                visibleCount[0]++;
-            } else {
-                // ---- level 1 ----
-                [unroll] for (uint c1 = 0; c1 < 4; ++c1) {
-                    uint x1 =  (c1 & 1u);
-                    uint y1 =  (c1 >> 1);
-                    if (!frustumCull(1, x1, y1)) continue;
-                    if (1 == L-1 || distance(1, x1, y1) > d[1]) {
-                        visibleCount[1]++; continue;
-                    }
+        // those can potentially become between 6400 and 400.000 'object shader' invocations, but usually <10.000
+        {
+            const float d[6] = { 3000000.0, 1000000.0, 400000.0, 50000.0, 10000.0, 1000.0 };
+            // 64 tile objects for every tile
+            {
+                // assuming each object is 128m wide
+                float3 object_position = float3((instance_id / 8) * 128, 0, (instance_id % 8) * 128);
+                float3 delta_position = object_position - camera_position;
+                // frustum
+                float position_yaw_z =  camera_yaw_sin * delta_position.x + camera_yaw_cos * delta_position.z; // apply yaw to Z
+                float3 view = float3(
+                     camera_yaw_cos   * delta_position.x - camera_yaw_sin   * delta_position.z, // apply yaw to X
+                     camera_pitch_cos * delta_position.y + camera_pitch_sin * position_yaw_z, // apply pitch to Y (using new z)
+                    -camera_pitch_sin * delta_position.y + camera_pitch_cos * position_yaw_z // apply pitch to Z (using new z)
+                );
+                bool frustum = abs(view.x) > (view.z * tanHalfFovX) || abs(view.y) > (view.z * tanHalfFovY);
+                // if not in frustum, don't continue here
 
-                    // ---- level 2 ----
-                    [unroll] for (uint c2 = 0; c2 < 4; ++c2) {
-                        uint x2 = (x1 << 1) | (c2 & 1u);
-                        uint y2 = (y1 << 1) | (c2 >> 1);
-                        if (!frustumCull(2, x2, y2)) continue;
-                        if (2 == L-1 || distance(2, x2, y2) > d[2]) {
-                            visibleCount[2]++; continue;
-                        }
-
-                        // ---- level 3 ----
-                        [unroll] for (uint c3 = 0; c3 < 4; ++c3) {
-                            uint x3 = (x2 << 1) | (c3 & 1u);
-                            uint y3 = (y2 << 1) | (c3 >> 1);
-                            if (!frustumCull(3, x3, y3)) continue;
-                            if (3 == L-1 || distance(3, x3, y3) > d[3]) {
-                                visibleCount[3]++; continue;
-                            }
-
-                            // ---- level 4 ----
-                            [unroll] for (uint c4 = 0; c4 < 4; ++c4) {
-                                uint x4 = (x3 << 1) | (c4 & 1u);
-                                uint y4 = (y3 << 1) | (c4 >> 1);
-                                if (!frustumCull(4, x4, y4)) continue;
-                                if (4 == L-1 || distance(4, x4, y4) > d[4]) {
-                                    visibleCount[4]++; continue;
-                                }
-
-                                // ---- level 5 (deepest) ----
-                                [unroll] for (uint c5 = 0; c5 < 4; ++c5) {
-                                    uint x5 = (x4 << 1) | (c5 & 1u);
-                                    uint y5 = (y4 << 1) | (c5 >> 1);
-                                    if (!frustumCull(5, x5, y5)) continue;
-                                    // deepest level is always a stop:
-                                    // either 5==L-1 or treat as leaf
-                                    visibleCount[5]++;
-                                }
-                            }
-                        }
-                    }
-                }
+                // distance
+                float distance = dot(delta_position, delta_position) / 500.0f;
+                // if far, just the one instance
+                // if close, create 4 or 16 instances
             }
         }
 
@@ -209,9 +185,9 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
         // frustrum cull
         if (outside_frustrum) valid = false;
         // overflow cull
-        if (t_view.x > 32767 || t_view.z > 32767 || t_view.x < -32767 || t_view.z < -32767) valid = false;
+        if (view_position.x > 32767 || view_position.z > 32767 || view_position.x < -32767 || view_position.z < -32767) valid = false;
         // near cull
-        if (t_view.z < 0) valid = false;
+        if (view_position.z < 0) valid = false;
 
         // increment counter
         if (valid) {
@@ -222,7 +198,7 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
         }
     }
     // prefix sum
-    else if (PUSH_CONSTANTS.mode == 1) {
+    else if (PUSH_CONSTANTS.mode == 2) {
         // run on a single thread; tiny work
         if (tid.x != 0) return;
         uint mesh_count, stride; 
@@ -249,7 +225,7 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
         return;
     }
     // scatter
-    else if (PUSH_CONSTANTS.mode == 2) {
+    else if (PUSH_CONSTANTS.mode == 3) {
         uint stride, mesh_count, instance_count;
         INSTANCES.GetDimensions(instance_count, stride);
         MESH_INFO.GetDimensions(mesh_count, stride);
@@ -265,19 +241,7 @@ void cs_main(uint3 tid : SV_DispatchThreadID) {
         const uint dst = OFFSETS[mesh_id] + slot;
 
         // WRITE PACKED INSTANCE
-        uint4 camera = CAMERA_DATA.xyzw; // 16 bytes
         uint2 instance = INSTANCES[instance_id];    // 8 bytes
-        // same calculation for whole workgroup
-        int3 camera_position = int3(
-            (int16_t) (camera.x        & 0xFFFF),
-            (int16_t)((camera.x >> 16) & 0xFFFF),
-            (int16_t) (camera.y        & 0xFFFF)
-        );
-        float camera_pitch_sin = float((int16_t)(camera.z        & 0xFFFF)) * divide_by_32767;
-        float camera_pitch_cos = float((int16_t)(camera.z  >> 16 & 0xFFFF)) * divide_by_32767;
-        float camera_yaw_sin   = float((int16_t)(camera.w        & 0xFFFF)) * divide_by_32767;
-        float camera_yaw_cos   = float((int16_t)(camera.w  >> 16 & 0xFFFF)) * divide_by_32767;
-
         // unpack instance position and move to camera space
         float3 instance_position = float3(
             ((int16_t) (instance.x        & 0xFFFF)),
