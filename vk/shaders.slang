@@ -10,46 +10,48 @@ static const float divide_by_32767    = float(1.0/32767.0);
 
 static const float tanHalfFovY = tan(0.5 * fov_y_radians); // for frustrum culling
 static const float tanHalfFovX = tanHalfFovY * aspect_ratio;
+static const float d[6] = { 3000000.0, 1000000.0, 400000.0, 50000.0, 10000.0, 1000.0 };
 
-struct push_constants {
-    uint mode; // 0 = normal mesh draw, 1 = sky
-};
-[[vk::push_constant]] push_constants PUSH_CONSTANTS;
-
-// this will be the 'high level' instance, that can be a group of instances for smaller things
-// unit instance: torso + head + shield + weapon
-// grass: bunch of grass together (although grass is procedurally generated with noise so not in instance buffer)
-// terrain: bunch of tiles together (current 2601 instances split into more granular)
-[[vk::binding(0,0)]] StructuredBuffer<uint2>    INSTANCES; // 6 bytes position + 2 bytes cos/sin
-// todo: we'll probably need 4 bytes for cos/sin as it includes camera yaw
-
-[[vk::binding(1,0)]] RWStructuredBuffer<uint>     COUNTS;
-[[vk::binding(2,0)]] RWStructuredBuffer<uint>     OFFSETS;
-[[vk::binding(3,0)]] RWStructuredBuffer<uint>     VISIBLE_IDS;
-
-struct visible {uint a, b, c, pad;};
-[[vk::binding(4,0)]] RWStructuredBuffer<visible> VISIBLE; // 6 bytes position + 2 bytes cos/sin
-
-// we know for a given scene, up front how many instances at most can be visible anyway, except for particles etc.
 struct mdi {uint index_count, instance_count, first_index, base_vertex, first_instance;};
-[[vk::binding(5,0)]] RWStructuredBuffer<mdi>    MESH_INFO; // MDI, instance_count is 'max visible of this mesh in this scene'
-[[vk::binding(6,0)]] RWStructuredBuffer<mdi>    DRAW_CALLS;  // MDI, one struct per mesh type, index is mesh id
+struct di {uint group_count_x, group_count_y, group_count_z;};
+struct instance {uint a, b, c, pad;};
 
-[[vk::binding(7,0)]] StructuredBuffer<uint>     POSITIONS; // R10G10B10A2
-[[vk::binding(8,0)]] StructuredBuffer<uint>     NORMALS;   // R10G10B10A2_SNORM
-[[vk::binding(9,0)]] StructuredBuffer<uint>     UVS;       // R16G16_UNORM
-[[vk::binding(10,0)]]
+// pre-filled data
+[[vk::binding(9,0)]]  StructuredBuffer<mdi>    MESH_INFO; // MDI, instance_count is 'max visible of this mesh in this scene'
+[[vk::binding(0,0)]]  StructuredBuffer<uint2>  CHUNKS;    // size is # of chunks
+[[vk::binding(4,0)]]  StructuredBuffer<uint2>  OBJECTS;   // size is total # of objects in scene
+[[vk::binding(11,0)]] StructuredBuffer<uint>   POSITIONS; // R10G10B10A2
+[[vk::binding(12,0)]] StructuredBuffer<uint>   NORMALS;   // R10G10B10A2_SNORM
+[[vk::binding(13,0)]] StructuredBuffer<uint>   UVS;       // R16G16_UNORM
+// chunk buffers
+[[vk::binding(1,0)]] RWStructuredBuffer<uint>  VISIBLE_CHUNK_IDS;     // size is # of chunks
+[[vk::binding(2,0)]] RWStructuredBuffer<di>    INDIRECT_WORKGROUPS;   // append per 64 directly in chunk pass
+// object buffers
+[[vk::binding(3,0)]] RWStructuredBuffer<uint>  VISIBLE_OBJECT_COUNT; // compute this in prefix pass
+[[vk::binding(7,0)]] RWStructuredBuffer<uint>  VISIBLE_OBJECT_IDS;    // size is # of objects in visible chunks
+[[vk::binding(5,0)]] RWStructuredBuffer<uint>  COUNT_PER_MESH;        // size is # of mesh types
+[[vk::binding(6,0)]] RWStructuredBuffer<uint>  OFFSET_PER_MESH;       // size is # of mesh types
+// final resulting rendering data
+[[vk::binding(10,0)]] RWStructuredBuffer<mdi>      DRAW_CALLS;         // MDI, one struct per mesh type, index is mesh id
+[[vk::binding(8,0)]]  RWStructuredBuffer<instance> RENDERED_INSTANCES; // size is max # of visible mesh instances
+// uniforms
+[[vk::binding(14,0)]]
 cbuffer uniforms {
     uint4 CAMERA_DATA; // packed camera data (position + orientation)
 };
+// push constants
+struct push_constants {
+    uint mode;
+};
+[[vk::push_constant]] push_constants PUSH_CONSTANTS;
 
-uint find_mesh_id(uint instance_id, uint mesh_count) {
+uint find_mesh_id(uint object_id, uint mesh_count) {
     uint lo = 0, hi = mesh_count;
     // log(N) search, finds among 1000 in appr. 10 iterations
     while (lo < hi) {
         uint mid = (lo + hi) >> 1;
         uint start = MESH_INFO[mid].first_instance;
-        if (start <= instance_id) lo = mid + 1;
+        if (start <= object_id) lo = mid + 1;
         else hi = mid;
     }
     return (lo - 1) - ((lo-1) % 7);
@@ -67,7 +69,8 @@ uint choose_lod_step(float distance) {
 
 [shader("compute")] [numthreads(64,1,1)]
 void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_DispatchThreadID) {
-  // todo: just store full float camera position + sin/cos values; uniform bandwidth is free anyway
+    // CAMERA
+    // todo: just store full float camera position + sin/cos values; uniform bandwidth is free anyway
     uint4 camera = CAMERA_DATA.xyzw; // 16 bytes
     float3 camera_position = float3(
         (int16_t) (camera.x        & 0xFFFF),
@@ -78,123 +81,109 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
     float camera_pitch_cos = float((int16_t)(camera.z  >> 16 & 0xFFFF)) * divide_by_32767;
     float camera_yaw_sin   = float((int16_t)(camera.w        & 0xFFFF)) * divide_by_32767;
     float camera_yaw_cos   = float((int16_t)(camera.w  >> 16 & 0xFFFF)) * divide_by_32767;
+
     // CHUNK PASS
     if (PUSH_CONSTANTS.mode == 0) {
-        uint instance_id = tid.x;
+        uint stride, chunk_count;
+        CHUNKS.GetDimensions(chunk_count, stride);
+        uint chunk_id = tid.x;
+        if (chunk_id >= chunk_count) return;
         // 64 tile chunks (64 for every 1 actual 8192m chunk)
-        if (gid.x == 0) { // for now assume just the first chunk hardcoded
+        float3 chunk_position;
+        if (chunk_id < 64) {
             // assuming each tile is 1024m wide, and we use meters instead of dm now
-            float3 tile_position = float3((instance_id / 8) * 1024, 0, (instance_id % 8) * 1024);
-            float3 delta_position = tile_position - camera_position;
-            // frustum
-            float position_yaw_z =  camera_yaw_sin * delta_position.x + camera_yaw_cos * delta_position.z; // apply yaw to Z
-            float3 view = float3(
-                 camera_yaw_cos   * delta_position.x - camera_yaw_sin   * delta_position.z, // apply yaw to X
-                 camera_pitch_cos * delta_position.y + camera_pitch_sin * position_yaw_z, // apply pitch to Y (using new z)
-                -camera_pitch_sin * delta_position.y + camera_pitch_cos * position_yaw_z // apply pitch to Z (using new z)
-            );
-            bool frustum = abs(view.x) > (view.z * tanHalfFovX) || abs(view.y) > (view.z * tanHalfFovY);
-            // if not in frustum, don't continue here
+            chunk_position = float3((chunk_id / 8) * 1024, 0, (chunk_id % 8) * 1024);
+        } else {
+            uint2 object = OBJECTS[chunk_id * 64];    // 8 bytes
+            chunk_position = float3(((int16_t) (object.x & 0xFFFF)), ((int16_t)((object.x >> 16) & 0xFFFF)), ((int16_t) (object.y & 0xFFFF)));
+        }
+        float3 delta_position = chunk_position - camera_position;
+        // frustum
+        float position_yaw_z =  camera_yaw_sin * delta_position.x + camera_yaw_cos * delta_position.z; // apply yaw to Z
+        float3 view = float3(
+             camera_yaw_cos   * delta_position.x - camera_yaw_sin   * delta_position.z, // apply yaw to X
+             camera_pitch_cos * delta_position.y + camera_pitch_sin * position_yaw_z, // apply pitch to Y (using new z)
+            -camera_pitch_sin * delta_position.y + camera_pitch_cos * position_yaw_z // apply pitch to Z (using new z)
+        );
+        bool frustum = abs(view.x) > (view.z * tanHalfFovX) || abs(view.y) > (view.z * tanHalfFovY);
+        if (frustum) return;
 
-            // distance
-            float distance = dot(delta_position, delta_position) / 500.0f;
+        // distance
+        float distance = dot(delta_position, delta_position) / 500.0f;
+        if (distance > d[0] * 100) return;
+        if (distance > d[0] * 10) {
             // if really far, just directly write one visible instance, instead of 64 tile objects
-            // else write 64 objects
+            uint stride; uint mesh_count;
+            MESH_INFO.GetDimensions(mesh_count, stride);
+            uint base_mesh_id = find_mesh_id(chunk_id * 64, mesh_count);
+            uint slot;  InterlockedAdd(COUNT_PER_MESH[base_mesh_id], 1, slot);
+            uint slot1; InterlockedAdd(VISIBLE_OBJECT_COUNT[0], 1, slot1); // keep a count for later
+            VISIBLE_OBJECT_IDS[slot1] = 1000000 + chunk_id; // add a visible object
+        } else {
+            // else spawn a workgroup of 64 objects
+            uint slot; InterlockedAdd(INDIRECT_WORKGROUPS[0].group_count_x, 1, slot);
+            INDIRECT_WORKGROUPS[0].group_count_y = 1;
+            INDIRECT_WORKGROUPS[0].group_count_z = 1;
+            VISIBLE_CHUNK_IDS[slot] = chunk_id;
         }
     }
     // OBJECT PASS
     else if (PUSH_CONSTANTS.mode == 1) {
         // same fetches for whole workgroup
-        uint stride; uint mesh_count; uint instance_count;
-        INSTANCES.GetDimensions(instance_count, stride);
+        uint stride, mesh_count, object_count, chunk_count;
+        OBJECTS.GetDimensions(object_count, stride);
         MESH_INFO.GetDimensions(mesh_count, stride);
+        CHUNKS.GetDimensions(chunk_count, stride);
+        uint chunk_id = VISIBLE_CHUNK_IDS[gid.x]; // id in global chunk buffer
 
-        // fetches per instance
-        uint instance_id = tid.x; 
-        if (instance_id >= instance_count) return; // early out
-        uint2 instance = INSTANCES[instance_id];    // 8 bytes
-        
-        // unpack instance position and move to camera space
-        float3 instance_position = float3(
-            ((int16_t) (instance.x        & 0xFFFF)),
-            ((int16_t)((instance.x >> 16) & 0xFFFF)),
-            ((int16_t) (instance.y        & 0xFFFF))
-        );
-        float3 position = float3(
-            instance_position.x - camera_position.x,
-            instance_position.y - camera_position.y,
-            instance_position.z - camera_position.z
-        );
-        // unpack yaw and pitch
-        float instance_yaw_cos = float((int8_t)(instance.y >> 16 & 0xFF)) * divide_by_127;
-        float instance_yaw_sin = float((int8_t)(instance.y >> 24 & 0xFF)) * divide_by_127;
-        // compute combined yaw between instance and camera (to send to instance later)
-        float cos_delta =  instance_yaw_cos * camera_yaw_cos + instance_yaw_sin * camera_yaw_sin; // cos(a-b)
-        float sin_delta =  instance_yaw_sin * camera_yaw_cos - instance_yaw_cos * camera_yaw_sin; // sin(a-b)
+        // fetches per object
+        uint id_within_chunk = gtid.x;
+        uint object_id = (chunk_id * 64) + id_within_chunk; // id in global objects buffer
+        if (object_id >= object_count) return; // early out
 
-        // apply camera yaw and pitch to get position in view
+        // unpack object position and move to camera space
+        float3 position;
+        if (chunk_id < 64) {
+            // terrain: assuming each object is 128m wide
+            float3 chunk_position = float3((chunk_id / 8) * 1024, 0, (chunk_id % 8) * 1024);
+            float3 object_position = float3((id_within_chunk / 8) * 128, 0, (id_within_chunk % 8) * 128);
+            object_position += chunk_position;
+            position = object_position - (camera_position / 10); // in meters
+        } else {
+            uint2 object = OBJECTS[object_id];    // 8 bytes
+            float3 object_position = float3(((int16_t) (object.x & 0xFFFF)), ((int16_t)((object.x >> 16) & 0xFFFF)), ((int16_t) (object.y & 0xFFFF)));
+            position = object_position - camera_position;
+        }
         float position_yaw_z =  camera_yaw_sin * position.x + camera_yaw_cos * position.z; // apply yaw to Z
-        float3 view_position = float3(
+        float3 view = float3(
              camera_yaw_cos   * position.x - camera_yaw_sin   * position.z, // apply yaw to X
              camera_pitch_cos * position.y + camera_pitch_sin * position_yaw_z, // apply pitch to Y (using new z)
             -camera_pitch_sin * position.y + camera_pitch_cos * position_yaw_z // apply pitch to Z (using new z)
         );
 
         // pick lod level
-        uint base_mesh_id = find_mesh_id(instance_id, mesh_count);
+        uint base_mesh_id = find_mesh_id(object_id, mesh_count);
         float distance = dot(position,position) / 500.0f;
-        uint lod_level = choose_lod_step(distance);
+        uint lod_level = 0;//choose_lod_step(distance);
         uint mesh_id = base_mesh_id + lod_level;
         
         // calculate frustrum
-        bool outside_frustrum = abs(view_position.x) > (view_position.z * tanHalfFovX) || abs(view_position.y) > (view_position.z * tanHalfFovY);
-
-        // TERRAIN
-        // todo: instead of tree splitting per 4, split only once in 64
-        // 1 chunk -> 64 tiles (1024m each) -> 64 pieces (128m each) -> potentially split into 4 (64m) or 16 (32m) each
-        // we can keep 'chunk' count cpu decided, and just do the 'chunk' shader with the tiles directly
-        // and either split into 64 objects, OR just write a big visible instance directly
-        // then in the per-object shader decide to write either 1, 4, or 16 actual rendered instances (like how units will also do)
-        // now, for 80km we would have 100 'chunks' -> 6400 'chunk shader' invocations, each a workgroup
-        // those can potentially become between 6400 and 400.000 'object shader' invocations, but usually <10.000
-        {
-            const float d[6] = { 3000000.0, 1000000.0, 400000.0, 50000.0, 10000.0, 1000.0 };
-            // 64 tile objects for every tile
-            {
-                // assuming each object is 128m wide
-                float3 object_position = float3((instance_id / 8) * 128, 0, (instance_id % 8) * 128);
-                float3 delta_position = object_position - camera_position;
-                // frustum
-                float position_yaw_z =  camera_yaw_sin * delta_position.x + camera_yaw_cos * delta_position.z; // apply yaw to Z
-                float3 view = float3(
-                     camera_yaw_cos   * delta_position.x - camera_yaw_sin   * delta_position.z, // apply yaw to X
-                     camera_pitch_cos * delta_position.y + camera_pitch_sin * position_yaw_z, // apply pitch to Y (using new z)
-                    -camera_pitch_sin * delta_position.y + camera_pitch_cos * position_yaw_z // apply pitch to Z (using new z)
-                );
-                bool frustum = abs(view.x) > (view.z * tanHalfFovX) || abs(view.y) > (view.z * tanHalfFovY);
-                // if not in frustum, don't continue here
-
-                // distance
-                float distance = dot(delta_position, delta_position) / 500.0f;
-                // if far, just the one instance
-                // if close, create 4 or 16 instances
-            }
-        }
+        bool outside_frustrum = abs(view.x) > (view.z * tanHalfFovX) || abs(view.y) > (view.z * tanHalfFovY);
 
         bool valid = true;
         // frustrum cull
         if (outside_frustrum) valid = false;
         // overflow cull
-        if (view_position.x > 32767 || view_position.z > 32767 || view_position.x < -32767 || view_position.z < -32767) valid = false;
+        if (view.x > 32767 || view.z > 32767 || view.x < -32767 || view.z < -32767) valid = false;
         // near cull
-        if (view_position.z < 0) valid = false;
+        if (view.z < 0) valid = false;
 
-        // increment counter
         if (valid) {
-            uint slot; InterlockedAdd(COUNTS[mesh_id], 1, slot);
-            VISIBLE_IDS[instance_id] = mesh_id;
-        } else {
-            VISIBLE_IDS[instance_id] = 0xFFFFFFFF;
+            // todo: we will write multiple mesh instances here; ie. a torso + head + shield + weapon
+            uint slot;  InterlockedAdd(COUNT_PER_MESH[mesh_id], 1, slot);
+            // todo: we will use per-workgroup count here to have only one atomic add per 64 (this is possible)
+            uint slot1; InterlockedAdd(VISIBLE_OBJECT_COUNT[0], 1, slot1);
+            VISIBLE_OBJECT_IDS[slot1] = object_id;
         }
     }
     // prefix sum
@@ -205,14 +194,15 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         MESH_INFO.GetDimensions(mesh_count, stride);
         static const uint LOD_COUNT = 7;
 
+        // task 1: calculate the offset for the first instance of each mesh type
         for (uint base_mesh_id = 0; base_mesh_id < mesh_count; base_mesh_id += LOD_COUNT) {
             const uint base_instance = MESH_INFO[base_mesh_id].first_instance;
             uint total_count = 0;
             [unroll] for (uint j = 0; j < 7; ++j) {
                 uint mesh_id = base_mesh_id + j;
                 uint first_instance = base_instance + total_count;
-                OFFSETS[mesh_id] = first_instance;
-                total_count += COUNTS[mesh_id];
+                OFFSET_PER_MESH[mesh_id] = first_instance;
+                total_count += COUNT_PER_MESH[mesh_id];
                 mdi mi = MESH_INFO[mesh_id];
                 DRAW_CALLS[mesh_id].index_count   = mi.index_count;
                 DRAW_CALLS[mesh_id].first_index   = mi.first_index;
@@ -222,69 +212,83 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
                 DRAW_CALLS[mesh_id].instance_count = 0u;
             }
         }
+
+        // task 2: fill the indirect dispatch buffer with the sum of visible objects
+        uint object_count, chunk_count;
+        OBJECTS.GetDimensions(object_count, stride);
+        CHUNKS.GetDimensions(chunk_count, stride);
+        INDIRECT_WORKGROUPS[0].group_count_x = (VISIBLE_OBJECT_COUNT[0] + 63) / 64;
+        INDIRECT_WORKGROUPS[0].group_count_y = 1;
+        INDIRECT_WORKGROUPS[0].group_count_z = 1;
+        
         return;
     }
     // scatter
     else if (PUSH_CONSTANTS.mode == 3) {
-        uint stride, mesh_count, instance_count;
-        INSTANCES.GetDimensions(instance_count, stride);
+        uint stride, mesh_count;
         MESH_INFO.GetDimensions(mesh_count, stride);
 
-        uint instance_id = tid.x;
-        if (instance_id >= instance_count) return;
+        uint visible_id = tid.x;
+        if (visible_id >= VISIBLE_OBJECT_COUNT[0]) return;
 
-        uint mesh_id = VISIBLE_IDS[instance_id];
-        if ((mesh_id) == 0xFFFFFFFF) return;
-
-        // Grab slot via atomic write head on the draw call
-        uint slot; InterlockedAdd(DRAW_CALLS[mesh_id].instance_count, 1, slot);
-        const uint dst = OFFSETS[mesh_id] + slot;
+        uint object_id = VISIBLE_OBJECT_IDS[visible_id];
 
         // WRITE PACKED INSTANCE
-        uint2 instance = INSTANCES[instance_id];    // 8 bytes
-        // unpack instance position and move to camera space
-        float3 instance_position = float3(
-            ((int16_t) (instance.x        & 0xFFFF)),
-            ((int16_t)((instance.x >> 16) & 0xFFFF)),
-            ((int16_t) (instance.y        & 0xFFFF))
+        // unpack object position and move to camera space
+        uint chunk_id = object_id / 64;
+        uint id_within_chunk = object_id - (chunk_id * 64);
+        float3 position;
+        float object_yaw_cos = 1;
+        float object_yaw_sin = 0;
+        if (object_id > 1000000) {
+            chunk_id = object_id - 1000000;
+            float3 object_position = float3((chunk_id / 8) * 1024, 0, (chunk_id % 8) * 1024);
+            position = object_position - (camera_position / 10); // in meters
+        } else if (object_id < 64 * 64) {
+            float3 chunk_position = float3((chunk_id / 8) * 1024, 0, (chunk_id % 8) * 1024);
+            float3 object_position = float3((id_within_chunk / 8) * 128, 0, (id_within_chunk % 8) * 128);
+            object_position += chunk_position;
+            position = object_position - (camera_position / 10); // in meters
+        } else {
+            uint2 object = OBJECTS[object_id];    // 8 bytes
+            float3 object_position = float3(((int16_t) (object.x & 0xFFFF)), ((int16_t)((object.x >> 16) & 0xFFFF)), ((int16_t) (object.y & 0xFFFF)));
+            position = object_position - camera_position;
+            // unpack yaw and pitch
+            object_yaw_cos = float((int8_t)(object.y >> 16 & 0xFF)) * divide_by_127;
+            object_yaw_sin = float((int8_t)(object.y >> 24 & 0xFF)) * divide_by_127;
+        }
+
+        float position_yaw_z =  camera_yaw_sin * position.x + camera_yaw_cos * position.z; // apply yaw to Z
+        float3 view = float3(
+             camera_yaw_cos   * position.x - camera_yaw_sin   * position.z, // apply yaw to X
+             camera_pitch_cos * position.y + camera_pitch_sin * position_yaw_z, // apply pitch to Y (using new z)
+            -camera_pitch_sin * position.y + camera_pitch_cos * position_yaw_z // apply pitch to Z (using new z)
         );
-        float3 position = float3(
-            instance_position.x - camera_position.x,
-            instance_position.y - camera_position.y,
-            instance_position.z - camera_position.z
-        );
 
-        // unpack yaw and pitch
-        float instance_yaw_cos = float((int8_t)(instance.y >> 16 & 0xFF)) * divide_by_127;
-        float instance_yaw_sin = float((int8_t)(instance.y >> 24 & 0xFF)) * divide_by_127;
-
-        // compute combined yaw between instance and camera
-        float cos_delta =  instance_yaw_cos * camera_yaw_cos + instance_yaw_sin * camera_yaw_sin; // cos(a-b)
-        float sin_delta =  instance_yaw_sin* camera_yaw_cos - instance_yaw_cos * camera_yaw_sin; // sin(a-b)
-
-        // apply -yaw
-        float3 t_yaw;
-        t_yaw.x =  camera_yaw_cos * position.x - camera_yaw_sin * position.z; // apply -yaw to X/Z
-        t_yaw.z =  camera_yaw_sin * position.x + camera_yaw_cos * position.z; // apply -yaw to X/Z
-        t_yaw.y =  position.y;
-
-        // apply -pitch
-        float3 t_view;
-        t_view.y =  camera_pitch_cos * t_yaw.y + camera_pitch_sin * t_yaw.z; // apply -pitch to Y/Z
-        t_view.z = -camera_pitch_sin * t_yaw.y + camera_pitch_cos * t_yaw.z; // apply -pitch to Y/Z
-        t_view.x =  t_yaw.x;
-
+        // pick lod level
+        uint base_mesh_id = find_mesh_id(object_id, mesh_count);
+        float distance = dot(position,position) / 500.0f;
+        uint lod_level = 0;//choose_lod_step(distance);
+        uint mesh_id = base_mesh_id + lod_level;
+        
         // convert to int again
-        int tx_dm = (int)round(t_view.x);
-        int ty_dm = (int)round(t_view.y);
-        int tz_dm = (int)round(t_view.z);
+        int tx_dm = (int)round(view.x);
+        int ty_dm = (int)round(view.y);
+        int tz_dm = (int)round(view.z);
+
+        // compute combined yaw between object and camera
+        float cos_delta =  object_yaw_cos * camera_yaw_cos + object_yaw_sin * camera_yaw_sin; // cos(a-b)
+        float sin_delta =  object_yaw_sin* camera_yaw_cos - object_yaw_cos * camera_yaw_sin; // sin(a-b)
 
         // pack rotated by yaw
         uint packed0 = (uint)((tx_dm & 0xFFFF) | ((ty_dm & 0xFFFF) << 16));
         uint packed1 = (uint)((tz_dm & 0xFFFF) | ((int)round(cos_delta * 32767.0f) & 0xFFFF) << 16);
         uint packed2 = (uint)(((int)round(sin_delta * 32767.0f) & 0xFFFF));
 
-        VISIBLE[dst] = visible(packed0,packed1,packed2,0);
+        // Grab slot via atomic write head on the draw call
+        uint slot; InterlockedAdd(DRAW_CALLS[mesh_id].instance_count, 1, slot);
+        const uint dst = OFFSET_PER_MESH[mesh_id] + slot;
+        RENDERED_INSTANCES[dst] = instance(packed0,packed1,packed2,0);
     }
 }
 
@@ -344,6 +348,9 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] uint4 INSTANCE,
         uint grid_scale = 6 - (DRAW_ID % 7);
         vertex = plane_position(VERTEX_ID, grid_scale);
         normal = float3(0.5, 1.0, 0.2);
+        instance_x *= 10;
+        instance_y *= 10;
+        instance_z *= 10;
     } else {
         // we need to know the offset into the position (4 bytes)
         uint base_vertex = MESH_INFO[DRAW_ID].base_vertex;

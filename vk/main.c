@@ -34,13 +34,17 @@ struct Renderer {
     VkDescriptorPool          descriptor_pool;
     VkDescriptorSet           descriptor_set;
     // buffers
-    VkBuffer                  buffer_instances;  VkDeviceMemory memory_instances;
-    VkBuffer                  buffer_counts;     VkDeviceMemory memory_counts;
-    VkBuffer                  buffer_offsets;    VkDeviceMemory memory_offsets;
+    VkBuffer                  buffer_chunks;  VkDeviceMemory memory_chunks;
+    VkBuffer                  buffer_visible_chunk_ids;  VkDeviceMemory memory_visible_chunk_ids;
+    VkBuffer                  buffer_indirect_workgroups;  VkDeviceMemory memory_indirect_workgroups;
+    VkBuffer                  buffer_visible_object_count;  VkDeviceMemory memory_visible_object_count;
+    VkBuffer                  buffer_objects;  VkDeviceMemory memory_objects;
+    VkBuffer                  buffer_count_per_mesh;     VkDeviceMemory memory_count_per_mesh;
+    VkBuffer                  buffer_offset_per_mesh;    VkDeviceMemory memory_offset_per_mesh;
     VkBuffer                  buffer_visible_ids;VkDeviceMemory memory_visible_ids;
     VkBuffer                  buffer_visible;    VkDeviceMemory memory_visible;
     VkBuffer                  buffer_mesh_info;  VkDeviceMemory memory_mesh_info;
-    VkBuffer                  buffer_counters;   VkDeviceMemory memory_counters;
+    VkBuffer                  buffer_draw_calls;   VkDeviceMemory memory_draw_calls;
     VkBuffer                  buffer_positions;  VkDeviceMemory memory_positions;
     VkBuffer                  buffer_normals;    VkDeviceMemory memory_normals;
     VkBuffer                  buffer_uvs;        VkDeviceMemory memory_uvs;
@@ -269,7 +273,7 @@ int main(void) {
     VkShaderModule shader_module; VK_CHECK(vkCreateShaderModule(machine.device,&smci,NULL,&shader_module));
 
     #pragma region COMPUTE PIPELINE
-    #define BINDINGS 11
+    #define BINDINGS 15
     #define UNIFORM_BINDING (BINDINGS-1)
     VkDescriptorSetLayoutBinding bindings[BINDINGS];
     for (uint32_t i = 0; i < BINDINGS; ++i) {
@@ -407,46 +411,51 @@ int main(void) {
     #include "plane_lod6.h"
     #define MESH_COUNT 14
 
+    struct gpu_chunk { uint32_t x,y; };
     struct gpu_instance { uint32_t xy_dm; uint32_t z_cs; };
     struct mesh_info {
-        u32 vertex_count, index_count, instance_count;
-        const struct gpu_instance *instances;
+        u32 vertex_count, index_count, chunk_count;
+        const struct gpu_chunk *chunks;
+        const struct gpu_instance *instances; // count is 64 x chunks
         const u16 *indices;
         const u32 *positions, *normals, *uvs;
     };
     #include "plane_instances.h"
 
-    struct gpu_instance mesh_inst[100];
+    static struct gpu_chunk plane_chunks[64] = {0};
+    static struct gpu_instance plane_inst[64 * 64];
+    static struct gpu_chunk mesh_chunk = {0};
+    static struct gpu_instance mesh_inst[64];
     // steps of 1dm, we want i to move 1 meter for each, and form a square of instances 1 meter apart
-    for (int i = 0; i < 100; ++i) {
-        mesh_inst[i].xy_dm = ((uint16_t)((15)) << 16 | ((uint16_t)(i % 10) * 20));
+    for (int i = 0; i < 64; ++i) {
+        mesh_inst[i].xy_dm = ((uint16_t)((15)) << 16 | ((uint16_t)(i % 8) * 20));
         {
             float yaw = 0.0f;
-            mesh_inst[i].z_cs = ((uint16_t)((i / 10) * 20))
+            mesh_inst[i].z_cs = ((uint16_t)((i / 8) * 20))
                 | (((uint8_t)lrintf(cosf(yaw) * 127.0f)) << 16)
                 | (((uint8_t)lrintf(sinf(yaw) * 127.0f)) << 24);
         }
     }
     const struct mesh_info meshes[MESH_COUNT] = {
-        // todo: add chunk compute pass for 64 instance chunks
-        {g_vertex_count_plane_lod6, g_index_count_plane_lod6, 64, g_plane_instances, g_indices_plane_lod6, NULL,NULL,NULL},
-        {g_vertex_count_plane_lod5, g_index_count_plane_lod5, 0,    g_plane_instances, g_indices_plane_lod5, NULL,NULL,NULL},
-        {g_vertex_count_plane_lod4, g_index_count_plane_lod4, 0,    g_plane_instances, g_indices_plane_lod4, NULL,NULL,NULL},
-        {g_vertex_count_plane_lod3, g_index_count_plane_lod3, 0,    g_plane_instances, g_indices_plane_lod3, NULL,NULL,NULL},
-        {g_vertex_count_plane_lod2, g_index_count_plane_lod2, 0,    g_plane_instances, g_indices_plane_lod2, NULL,NULL,NULL},
-        {g_vertex_count_plane_lod1, g_index_count_plane_lod1, 0,    g_plane_instances, g_indices_plane_lod1, NULL,NULL,NULL},
-        {g_vertex_count_plane_lod0, g_index_count_plane_lod0, 0,    g_plane_instances, g_indices_plane_lod0, NULL,NULL,NULL},
-        {g_vertex_count_mesh,       g_index_count_mesh,       64,    &mesh_inst,        g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
-        {g_vertex_count_mesh,       g_index_count_mesh,       0,    &mesh_inst,        g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
-        {g_vertex_count_mesh,       g_index_count_mesh,       0,    &mesh_inst,        g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
-        {g_vertex_count_mesh,       g_index_count_mesh,       0,    &mesh_inst,        g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
-        {g_vertex_count_mesh,       g_index_count_mesh,       0,    &mesh_inst,        g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
-        {g_vertex_count_mesh,       g_index_count_mesh,       0,    &mesh_inst,        g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
-        {g_vertex_count_mesh,       g_index_count_mesh,       0,    &mesh_inst,        g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh}
+        {g_vertex_count_plane_lod6, g_index_count_plane_lod6, 64, &plane_chunks, &plane_inst, g_indices_plane_lod6, NULL,NULL,NULL},
+        {g_vertex_count_plane_lod5, g_index_count_plane_lod5, 0, NULL, NULL, g_indices_plane_lod5, NULL,NULL,NULL},
+        {g_vertex_count_plane_lod4, g_index_count_plane_lod4, 0, NULL, NULL, g_indices_plane_lod4, NULL,NULL,NULL},
+        {g_vertex_count_plane_lod3, g_index_count_plane_lod3, 0, NULL, NULL, g_indices_plane_lod3, NULL,NULL,NULL},
+        {g_vertex_count_plane_lod2, g_index_count_plane_lod2, 0, NULL, NULL, g_indices_plane_lod2, NULL,NULL,NULL},
+        {g_vertex_count_plane_lod1, g_index_count_plane_lod1, 0, NULL, NULL, g_indices_plane_lod1, NULL,NULL,NULL},
+        {g_vertex_count_plane_lod0, g_index_count_plane_lod0, 0, NULL, NULL, g_indices_plane_lod0, NULL,NULL,NULL},
+        {g_vertex_count_mesh,       g_index_count_mesh,       1, &mesh_chunk, &mesh_inst,  g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
+        {g_vertex_count_mesh,       g_index_count_mesh,       0, NULL, NULL,      g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
+        {g_vertex_count_mesh,       g_index_count_mesh,       0, NULL, NULL,      g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
+        {g_vertex_count_mesh,       g_index_count_mesh,       0, NULL, NULL,      g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
+        {g_vertex_count_mesh,       g_index_count_mesh,       0, NULL, NULL,      g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
+        {g_vertex_count_mesh,       g_index_count_mesh,       0, NULL, NULL,      g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
+        {g_vertex_count_mesh,       g_index_count_mesh,       0, NULL, NULL,      g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh}
     };
 
     u32 total_vertex_count = 0;
     u32 total_index_count = 0;
+    u32 total_chunk_count = 0;
     u32 total_instance_count = 0;
     struct VkDrawIndexedIndirectCommand mesh_info[MESH_COUNT];
     for (u32 i = 0; i < MESH_COUNT; ++i) {
@@ -454,19 +463,25 @@ int main(void) {
         mesh_info[i].vertexOffset  = total_vertex_count;
         mesh_info[i].indexCount    = meshes[i].index_count;
         mesh_info[i].firstInstance = total_instance_count;
-        mesh_info[i].instanceCount = meshes[i].instance_count;
+        mesh_info[i].instanceCount = meshes[i].chunk_count * 64;
         total_vertex_count   += meshes[i].vertex_count;
         total_index_count    += meshes[i].index_count;
-        total_instance_count += meshes[i].instance_count;
+        total_instance_count += meshes[i].chunk_count * 64;
+        total_chunk_count += meshes[i].chunk_count;
     }
 
-    VkDeviceSize size_instances = total_instance_count * sizeof(uint64_t);
-    VkDeviceSize size_counts = MESH_COUNT * sizeof(uint32_t);
-    VkDeviceSize size_offsets = MESH_COUNT * sizeof(uint32_t);
+    VkDeviceSize size_visible_chunk_ids = total_chunk_count * sizeof(uint32_t);
+    VkDeviceSize size_indirect_workgroups = 3 * sizeof(uint32_t);
+    VkDeviceSize size_visible_object_count = 3 * sizeof(uint32_t);
+    VkDeviceSize size_count_per_mesh = MESH_COUNT * sizeof(uint32_t);
+    VkDeviceSize size_offset_per_mesh = MESH_COUNT * sizeof(uint32_t);
     VkDeviceSize size_visible_ids = total_instance_count * sizeof(uint32_t);
-    VkDeviceSize size_visible   = total_instance_count * sizeof(uint32_t) * 4;
+    VkDeviceSize size_rendered_instances   = total_instance_count * sizeof(uint32_t) * 4;
+    VkDeviceSize size_draw_calls  = MESH_COUNT * sizeof(VkDrawIndexedIndirectCommand);
+    
+    VkDeviceSize size_chunks = total_chunk_count * sizeof(uint64_t);
+    VkDeviceSize size_objects = total_instance_count * sizeof(uint64_t);
     VkDeviceSize size_mesh_info = MESH_COUNT * sizeof(VkDrawIndexedIndirectCommand);
-    VkDeviceSize size_counters  = MESH_COUNT * sizeof(VkDrawIndexedIndirectCommand);
     VkDeviceSize size_positions = total_vertex_count * sizeof(uint32_t);
     VkDeviceSize size_normals   = total_vertex_count * sizeof(uint32_t);
     VkDeviceSize size_uvs       = total_vertex_count * sizeof(uint32_t);
@@ -479,76 +494,92 @@ int main(void) {
     };
     VkCommandPool upload_pool; VK_CHECK(vkCreateCommandPool(machine.device, &pool_info, NULL, &upload_pool));
 
-    // INSTANCES (SSBO, read by compute)  -> DEVICE_LOCAL + upload
-    create_and_upload_device_local_buffer(
-        machine.device, machine.physical_device, machine.queue_graphics, upload_pool,
-        size_instances, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        NULL,
-        &renderer.buffer_instances, &renderer.memory_instances, 0);
-
-    // COUNTS
-    create_buffer_and_memory(machine.device, machine.physical_device, size_counts,
+    // VISIBLE CHUNK IDS
+    create_buffer_and_memory(machine.device, machine.physical_device, size_visible_chunk_ids,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &renderer.buffer_counts, &renderer.memory_counts);
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &renderer.buffer_visible_chunk_ids, &renderer.memory_visible_chunk_ids);
 
-    // OFFSETS
-    create_buffer_and_memory(machine.device, machine.physical_device, size_offsets,
+    // INDIRECT WORKGROUPS
+    create_buffer_and_memory(machine.device, machine.physical_device, size_indirect_workgroups,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &renderer.buffer_indirect_workgroups, &renderer.memory_indirect_workgroups);
+    
+    // VISIBLE OBJECT COUNT
+    create_buffer_and_memory(machine.device, machine.physical_device, size_visible_object_count,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &renderer.buffer_offsets, &renderer.memory_offsets);
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &renderer.buffer_visible_object_count, &renderer.memory_visible_object_count);
+    
+    // COUNT PER MESH
+    create_buffer_and_memory(machine.device, machine.physical_device, size_count_per_mesh,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &renderer.buffer_count_per_mesh, &renderer.memory_count_per_mesh);
 
-    // VISIBLE IDS
+    // OFFSET PER MESH
+    create_buffer_and_memory(machine.device, machine.physical_device, size_offset_per_mesh,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &renderer.buffer_offset_per_mesh, &renderer.memory_offset_per_mesh);
+
+    // VISIBLE OBJECT IDS
     create_buffer_and_memory(machine.device, machine.physical_device, size_visible_ids,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &renderer.buffer_visible_ids, &renderer.memory_visible_ids);
 
-    // VISIBLE
-    create_buffer_and_memory(machine.device, machine.physical_device, size_visible,
+    // RENDERED INSTANCES
+    create_buffer_and_memory(machine.device, machine.physical_device, size_rendered_instances,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &renderer.buffer_visible, &renderer.memory_visible);
 
     // DRAW_CALLS
-    create_buffer_and_memory(machine.device, machine.physical_device, size_counters,
+    create_buffer_and_memory(machine.device, machine.physical_device, size_draw_calls,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &renderer.buffer_counters, &renderer.memory_counters);
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &renderer.buffer_draw_calls, &renderer.memory_draw_calls);
 
-    // MESH INFO (INDIRECT + sometimes read in compute) -> DEVICE_LOCAL + upload once
-    create_and_upload_device_local_buffer(
-        machine.device, machine.physical_device, machine.queue_graphics, upload_pool,
-        size_mesh_info, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
-        mesh_info, &renderer.buffer_mesh_info, &renderer.memory_mesh_info, 0);
-
-    // POSITIONS / NORMALS / UVS (SSBOs) -> DEVICE_LOCAL; upload per-mesh ranges below
-    create_and_upload_device_local_buffer(
-        machine.device, machine.physical_device, machine.queue_graphics, upload_pool,
-        size_positions, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        /*src*/ NULL, &renderer.buffer_positions, &renderer.memory_positions, 0);
-    create_and_upload_device_local_buffer(
-        machine.device, machine.physical_device, machine.queue_graphics, upload_pool,
-        size_normals, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        /*src*/ NULL, &renderer.buffer_normals, &renderer.memory_normals, 0);
-    create_and_upload_device_local_buffer(
-        machine.device, machine.physical_device, machine.queue_graphics, upload_pool,
-        size_uvs, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        /*src*/ NULL, &renderer.buffer_uvs, &renderer.memory_uvs, 0);
-
-    // INDEX BUFFER -> DEVICE_LOCAL + upload once
-    create_and_upload_device_local_buffer(
-        machine.device, machine.physical_device, machine.queue_graphics, upload_pool,
-        size_indices, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-        /*src*/ NULL, &renderer.buffer_index_ib, &renderer.memory_indices, 0);
-
-    // UNIFORMS: keep tiny UBO host-visible (or convert to push constants later)
+    // UNIFORMS (host visible)
     create_buffer_and_memory(machine.device, machine.physical_device, sizeof(struct Uniforms),
         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         &renderer.buffer_uniforms, &renderer.memory_uniforms);
 
-    pf_timestamp("Buffers created (DEVICE_LOCAL + staging)");
+    // MESH INFO / POSITIONS / NORMALS / UVS / INDICES / CHUNKS / INSTANCES
+    create_and_upload_device_local_buffer(
+        machine.device, machine.physical_device, machine.queue_graphics, upload_pool,
+        size_mesh_info, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+        mesh_info, // uploaded immediately here
+        &renderer.buffer_mesh_info, &renderer.memory_mesh_info, 0);
+    create_and_upload_device_local_buffer(
+        machine.device, machine.physical_device, machine.queue_graphics, upload_pool,
+        size_positions, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        NULL, // uploaded later per mesh
+        &renderer.buffer_positions, &renderer.memory_positions, 0);
+    create_and_upload_device_local_buffer(
+        machine.device, machine.physical_device, machine.queue_graphics, upload_pool,
+        size_normals, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        NULL, // uploaded later per mesh
+        &renderer.buffer_normals, &renderer.memory_normals, 0);
+    create_and_upload_device_local_buffer(
+        machine.device, machine.physical_device, machine.queue_graphics, upload_pool,
+        size_uvs, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        NULL, // uploaded later per mesh
+        &renderer.buffer_uvs, &renderer.memory_uvs, 0);
+    create_and_upload_device_local_buffer(
+        machine.device, machine.physical_device, machine.queue_graphics, upload_pool,
+        size_indices, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+        NULL, // uploaded later per mesh
+        &renderer.buffer_index_ib, &renderer.memory_indices, 0);
+    create_and_upload_device_local_buffer(
+        machine.device, machine.physical_device, machine.queue_graphics, upload_pool,
+        size_chunks, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        NULL, // uploaded later per mesh
+        &renderer.buffer_chunks, &renderer.memory_chunks, 0);
+    create_and_upload_device_local_buffer(
+        machine.device, machine.physical_device, machine.queue_graphics, upload_pool,
+        size_objects, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        NULL, // uploaded later per mesh
+        &renderer.buffer_objects, &renderer.memory_objects, 0);
 
-    // ---- Upload per-mesh data into the big DEVICE_LOCAL buffers ----
-    // We batch copies by repeatedly calling create_and_upload_device_local_buffer with dstOffset.
-    // (For simplicity, we create a staging buffer per upload. For large games, batch copies into one cmd.)
+    pf_timestamp("Buffers created");
 
+    // upload the data per mesh (later, when data is huge, batch into one big command to upload everything)
     for (u32 i = 0; i < MESH_COUNT; ++i) {
         // Vertex attributes
         if (meshes[i].positions) {
@@ -622,22 +653,43 @@ int main(void) {
             vkFreeMemory(machine.device, staging_mem, NULL);
         }
 
-        // Instances
-        if (meshes[i].instance_count > 0) {
-            VkDeviceSize bytes = meshes[i].instance_count * sizeof(struct gpu_instance);
-            VkDeviceSize dstOfs = (VkDeviceSize)mesh_info[i].firstInstance * sizeof(struct gpu_instance);
-            VkBuffer staging; VkDeviceMemory staging_mem;
-            create_buffer_and_memory(machine.device, machine.physical_device, bytes,
-                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                &staging, &staging_mem);
-            upload_to_buffer(machine.device, staging_mem, 0, meshes[i].instances, (size_t)bytes);
-            VkCommandBuffer cmd = begin_single_use_cmd(machine.device, upload_pool);
-            VkBufferCopy c = { .srcOffset = 0, .dstOffset = dstOfs, .size = bytes };
-            vkCmdCopyBuffer(cmd, staging, renderer.buffer_instances, 1, &c);
-            end_single_use_cmd(machine.device, machine.queue_graphics, upload_pool, cmd);
-            vkDestroyBuffer(machine.device, staging, NULL);
-            vkFreeMemory(machine.device, staging_mem, NULL);
+        // instances
+        if (meshes[i].chunk_count > 0) {
+            // chunks
+            {
+                VkDeviceSize bytes = meshes[i].chunk_count * sizeof(struct gpu_chunk);
+                VkDeviceSize dstOfs = (VkDeviceSize)mesh_info[i].firstInstance / 64 * sizeof(struct gpu_chunk);
+                VkBuffer staging; VkDeviceMemory staging_mem;
+                create_buffer_and_memory(machine.device, machine.physical_device, bytes,
+                    VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                    &staging, &staging_mem);
+                upload_to_buffer(machine.device, staging_mem, 0, meshes[i].chunks, (size_t)bytes);
+                VkCommandBuffer cmd = begin_single_use_cmd(machine.device, upload_pool);
+                VkBufferCopy c = { .srcOffset = 0, .dstOffset = dstOfs, .size = bytes };
+                vkCmdCopyBuffer(cmd, staging, renderer.buffer_chunks, 1, &c);
+                end_single_use_cmd(machine.device, machine.queue_graphics, upload_pool, cmd);
+                vkDestroyBuffer(machine.device, staging, NULL);
+                vkFreeMemory(machine.device, staging_mem, NULL);
+            }
+            
+            // instances
+            {
+                VkDeviceSize bytes = meshes[i].chunk_count * 64 * sizeof(struct gpu_instance);
+                VkDeviceSize dstOfs = (VkDeviceSize)mesh_info[i].firstInstance * sizeof(struct gpu_instance);
+                VkBuffer staging; VkDeviceMemory staging_mem;
+                create_buffer_and_memory(machine.device, machine.physical_device, bytes,
+                    VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                    &staging, &staging_mem);
+                upload_to_buffer(machine.device, staging_mem, 0, meshes[i].instances, (size_t)bytes);
+                VkCommandBuffer cmd = begin_single_use_cmd(machine.device, upload_pool);
+                VkBufferCopy c = { .srcOffset = 0, .dstOffset = dstOfs, .size = bytes };
+                vkCmdCopyBuffer(cmd, staging, renderer.buffer_objects, 1, &c);
+                end_single_use_cmd(machine.device, machine.queue_graphics, upload_pool, cmd);
+                vkDestroyBuffer(machine.device, staging, NULL);
+                vkFreeMemory(machine.device, staging_mem, NULL);
+            }
         }
     }
 
@@ -666,17 +718,21 @@ int main(void) {
     VK_CHECK(vkAllocateDescriptorSets(machine.device, &set_alloc_info, &renderer.descriptor_set));
 
     VkDescriptorBufferInfo buffer_infos[BINDINGS] = {
-        { renderer.buffer_instances, 0, size_instances },
-        { renderer.buffer_counts,0, size_counts   },
-        { renderer.buffer_offsets,0, size_offsets   },
-        { renderer.buffer_visible_ids,0, size_visible_ids   },
-        { renderer.buffer_visible,   0, size_visible   },
-        { renderer.buffer_mesh_info, 0, size_mesh_info },
-        { renderer.buffer_counters,  0, size_counters  },
-        { renderer.buffer_positions, 0, size_positions },
-        { renderer.buffer_normals,   0, size_normals   },
-        { renderer.buffer_uvs,       0, size_uvs       },
-        { renderer.buffer_uniforms,  0, sizeof(struct Uniforms) }
+        {renderer.buffer_chunks, 0, size_chunks},
+        {renderer.buffer_visible_chunk_ids, 0, size_visible_chunk_ids},
+        {renderer.buffer_indirect_workgroups, 0, size_indirect_workgroups},
+        {renderer.buffer_visible_object_count, 0, size_visible_object_count},
+        {renderer.buffer_objects, 0, size_objects},
+        {renderer.buffer_count_per_mesh, 0, size_count_per_mesh},
+        {renderer.buffer_offset_per_mesh, 0, size_offset_per_mesh},
+        {renderer.buffer_visible_ids, 0, size_visible_ids},
+        {renderer.buffer_visible, 0, size_rendered_instances},
+        {renderer.buffer_mesh_info, 0, size_mesh_info},
+        {renderer.buffer_draw_calls, 0, size_draw_calls},
+        {renderer.buffer_positions, 0, size_positions},
+        {renderer.buffer_normals, 0, size_normals},
+        {renderer.buffer_uvs, 0, size_uvs},
+        {renderer.buffer_uniforms, 0, sizeof(struct Uniforms)}
     };
     VkWriteDescriptorSet writes[BINDINGS];
     for (uint32_t i = 0; i < BINDINGS; ++i) {
@@ -878,8 +934,10 @@ int main(void) {
             });
             
             // ZERO THE DRAW CALL BUFFER (todo: will not be needed anymore after adding counts pass setup)
-            vkCmdFillBuffer(cmd, renderer.buffer_counters, 0, size_counters, 0);
-            vkCmdFillBuffer(cmd, renderer.buffer_counts, 0, size_counts, 0);
+            vkCmdFillBuffer(cmd, renderer.buffer_draw_calls, 0, size_draw_calls, 0);
+            vkCmdFillBuffer(cmd, renderer.buffer_count_per_mesh, 0, size_count_per_mesh, 0);
+            vkCmdFillBuffer(cmd, renderer.buffer_indirect_workgroups, 0, size_indirect_workgroups, 0);
+            vkCmdFillBuffer(cmd, renderer.buffer_visible_object_count, 0, size_visible_object_count, 0);
             VkMemoryBarrier2 xfer_to_compute = {
                 .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
                 .srcStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
@@ -893,7 +951,34 @@ int main(void) {
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, swapchain.query_pool, q0 + Q_AFTER_ZERO);
             #endif
 
-            // VISIBLE COUNT PASS
+            // VISIBLE CHUNKS PASS
+            vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,renderer.common_pipeline_layout, 0, 1, &renderer.descriptor_set, 0, NULL);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, renderer.compute_pipeline);
+            uint32_t mode_chunks = 0;
+            vkCmdPushConstants(cmd,
+                renderer.common_pipeline_layout,
+                VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                0, sizeof(uint32_t), &mode_chunks);
+            vkCmdDispatch(cmd, (total_chunk_count+63)/64, 1, 1);
+            VkBufferMemoryBarrier2 to_indirect = {
+                .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+                .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+                .dstStageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
+                .dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .buffer = renderer.buffer_indirect_workgroups,
+                .offset = 0,
+                .size = VK_WHOLE_SIZE,
+            };
+            vkCmdPipelineBarrier2(cmd, &(VkDependencyInfo){
+                .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                .bufferMemoryBarrierCount = 1,
+                .pBufferMemoryBarriers = &to_indirect,
+            });
+
+            // VISIBLE OBJECTS PASS
             vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,renderer.common_pipeline_layout, 0, 1, &renderer.descriptor_set, 0, NULL);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, renderer.compute_pipeline);
             uint32_t mode_counts = 1;
@@ -901,20 +986,20 @@ int main(void) {
                 renderer.common_pipeline_layout,
                 VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                 0, sizeof(uint32_t), &mode_counts);
-            vkCmdDispatch(cmd, (total_instance_count+63)/64, 1, 1);
-            VkMemoryBarrier2 after_count = {
+            vkCmdDispatchIndirect(cmd, renderer.buffer_indirect_workgroups, 0);
+            VkMemoryBarrier2 after_count_2 = {
                 .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
                 .srcStageMask = CS,
                 .srcAccessMask = SSW,                  // pass 0 wrote SSBOs
                 .dstStageMask = CS,
                 .dstAccessMask = SSR | SSW,            // pass 1 will read & write SSBOs
             };
-            VkDependencyInfo dep_after_count = {
+            VkDependencyInfo dep_after_count_2 = {
                 .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
                 .memoryBarrierCount = 1,
-                .pMemoryBarriers = &after_count,
+                .pMemoryBarriers = &after_count_2,
             };
-            vkCmdPipelineBarrier2(cmd, &dep_after_count);
+            vkCmdPipelineBarrier2(cmd, &dep_after_count_2);
 
             #if DEBUG_APP == 1
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, swapchain.query_pool, q0 + Q_AFTER_COMP_BUILD);
@@ -947,7 +1032,7 @@ int main(void) {
                 renderer.common_pipeline_layout,
                 VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                 0, sizeof(uint32_t), &mode_scatter);
-            vkCmdDispatch(cmd, (total_instance_count+63)/64, 1, 1);
+            vkCmdDispatchIndirect(cmd, renderer.buffer_indirect_workgroups, 0);
             
             #if DEBUG_APP == 1
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, swapchain.query_pool, q0 + Q_AFTER_COMP_INDIRECT);
@@ -960,7 +1045,7 @@ int main(void) {
                 .dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
                 .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                 .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .buffer = renderer.buffer_counters,  // backing buffer for DRAW_CALLS
+                .buffer = renderer.buffer_draw_calls,  // backing buffer for DRAW_CALLS
                 .offset = 0,
                 .size = VK_WHOLE_SIZE,
             };
@@ -1065,7 +1150,7 @@ int main(void) {
                 renderer.common_pipeline_layout,
                 VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                 0, sizeof(uint32_t), &mode_mesh);
-            vkCmdDrawIndexedIndirect(cmd, renderer.buffer_counters, 0, MESH_COUNT, sizeof(VkDrawIndexedIndirectCommand));
+            vkCmdDrawIndexedIndirect(cmd, renderer.buffer_draw_calls, 0, MESH_COUNT, sizeof(VkDrawIndexedIndirectCommand));
             #if DEBUG_APP == 1
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, swapchain.query_pool, q0 + Q_AFTER_RENDERPASS);
             #endif
