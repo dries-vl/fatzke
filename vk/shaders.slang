@@ -89,15 +89,16 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         uint chunk_id = tid.x;
         if (chunk_id >= chunk_count) return;
         // 64 tile chunks (64 for every 1 actual 8192m chunk)
-        float3 chunk_position;
+        float3 delta_position;
         if (chunk_id < 64) {
             // assuming each tile is 1024m wide, and we use meters instead of dm now
-            chunk_position = float3((chunk_id / 8) * 1024, 0, (chunk_id % 8) * 1024);
+            float3 chunk_position = float3((chunk_id / 8) * 1024, 0, (chunk_id % 8) * 1024);
+            delta_position = chunk_position - (camera_position / 10); // in meters
         } else {
             uint2 object = OBJECTS[chunk_id * 64];    // 8 bytes
-            chunk_position = float3(((int16_t) (object.x & 0xFFFF)), ((int16_t)((object.x >> 16) & 0xFFFF)), ((int16_t) (object.y & 0xFFFF)));
+            float3 chunk_position = float3(((int16_t) (object.x & 0xFFFF)), ((int16_t)((object.x >> 16) & 0xFFFF)), ((int16_t) (object.y & 0xFFFF)));
+            delta_position = chunk_position - camera_position;
         }
-        float3 delta_position = chunk_position - camera_position;
         // frustum
         float position_yaw_z =  camera_yaw_sin * delta_position.x + camera_yaw_cos * delta_position.z; // apply yaw to Z
         float3 view = float3(
