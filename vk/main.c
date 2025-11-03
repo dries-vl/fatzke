@@ -184,13 +184,21 @@ i32 buttons[BUTTON_COUNT];
 i16 cam_x = 0, cam_y = 2, cam_z = -5, cam_yaw = 0, cam_pitch = 0;
 void move_forward(int amount) {
     double rad = (double)(cam_yaw) * 3.14159265f / 32767.0f;
-    cam_x += (i16)lroundf(sinf(rad) * amount);
-    cam_z += (i16)lroundf(cosf(rad) * amount);
+    i16 x_amount = (i16)lroundf(sinf(rad) * amount);
+    i16 z_amount = (i16)lroundf(cosf(rad) * amount);
+    if (cam_x + x_amount < 32767 && cam_x + x_amount > -32768)
+        cam_x += x_amount;
+    if (cam_z + z_amount < 32767 && cam_z + z_amount > -32768)
+        cam_z += z_amount;
 }
 void move_sideways(int amount) {
     double rad = (double)(cam_yaw) * 3.14159265f / 32767.0f;
-    cam_x += (i16)lroundf(cosf(rad) * amount);
-    cam_z -= (i16)lroundf(sinf(rad) * amount);
+    i16 x_amount = (i16)lroundf(cosf(rad) * amount);
+    i16 z_amount = (i16)lroundf(sinf(rad) * amount);
+    if (cam_x + x_amount < 32767 && cam_x + x_amount > -32768)
+        cam_x += x_amount;
+    if (cam_z - z_amount < 32767 && cam_z - z_amount > -32768)
+        cam_z -= z_amount;
 }
 int scaled(int value) {
     static const int min_in = 0;
@@ -225,15 +233,21 @@ void mouse_input_callback(void* ud, i32 x, i32 y, enum BUTTON button, int state)
 }
 void process_inputs() {
     if (buttons[KEYBOARD_ESCAPE]) {_exit(0);}
-    if (buttons[KEYBOARD_W]) { move_forward(scaled(1)); }
-    if (buttons[KEYBOARD_R]) { move_forward(-scaled(1)); }
-    if (buttons[KEYBOARD_A]) { move_sideways(-scaled(1)); }
-    if (buttons[KEYBOARD_S]) { move_sideways(scaled(1)); }
+    int amount = 1;
+    if (buttons[KEYBOARD_SHIFT]) { amount = 2; }
+    if (buttons[KEYBOARD_W]) { move_forward(scaled(amount));}
+    if (buttons[KEYBOARD_R]) { move_forward(-scaled(amount)); }
+    if (buttons[KEYBOARD_A]) { move_sideways(-scaled(amount)); }
+    if (buttons[KEYBOARD_S]) { move_sideways(scaled(amount)); }
     if (buttons[MOUSE_MARGIN_LEFT]) { cam_yaw -= buttons[MOUSE_MARGIN_LEFT]; } 
     if (buttons[MOUSE_MARGIN_RIGHT]) { cam_yaw += buttons[MOUSE_MARGIN_RIGHT]; }
     if (buttons[MOUSE_MARGIN_TOP]) { cam_pitch -= buttons[MOUSE_MARGIN_TOP]; }
     if (buttons[MOUSE_MARGIN_BOTTOM]) { cam_pitch += buttons[MOUSE_MARGIN_BOTTOM]; }
-    if (buttons[MOUSE_SCROLL]) { cam_y += buttons[MOUSE_SCROLL]; buttons[MOUSE_SCROLL] = 0; }
+    if (buttons[MOUSE_SCROLL]) { 
+        if (cam_y + buttons[MOUSE_SCROLL] < 32767 && cam_y + buttons[MOUSE_SCROLL] > 10)
+            cam_y += buttons[MOUSE_SCROLL];
+        buttons[MOUSE_SCROLL] = 0;
+    }
     if (buttons[MOUSE_SCROLL_SIDE]) { cam_x -= buttons[MOUSE_SCROLL_SIDE]; buttons[MOUSE_SCROLL_SIDE] = 0; }
 }
 int main(void) {
