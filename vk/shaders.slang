@@ -10,7 +10,6 @@ static const float divide_by_32767    = float(1.0/32767.0);
 
 static const float tanHalfFovY = tan(0.5 * fov_y_radians); // for frustrum culling
 static const float tanHalfFovX = tanHalfFovY * aspect_ratio;
-static const float d[6] = { 3000000.0, 1000000.0, 400000.0, 50000.0, 10000.0, 1000.0 };
 
 struct mdi {uint index_count, instance_count, first_index, base_vertex, first_instance;};
 struct di {uint group_count_x, group_count_y, group_count_z;};
@@ -57,13 +56,14 @@ uint find_mesh_id(uint object_id, uint mesh_count) {
     return (lo - 1) - ((lo-1) % 7);
 }
 
+static const float d[6] = { 25600.0, 6400.0, 1600.0, 400.0, 100.0, 25.0 };
 uint choose_lod_step(float distance) {
-    if (distance >= 3000000.0) return 0;
-    if (distance >= 1000000.0) return 1;
-    if (distance >= 400000.0) return 2;
-    if (distance >= 50000.0) return 3;
-    if (distance >= 10000.0) return 4;
-    if (distance >= 1000.0) return 5;
+    if (distance >= d[0]) return 0; // 2x2 verts
+    if (distance >= d[1]) return 1; // 4x4 verts
+    if (distance >= d[2]) return 2; // 8x8
+    if (distance >= d[3]) return 3; // 16x16
+    if (distance >= d[4]) return 4; // 32x32 (1024)
+    if (distance >= d[5]) return 5;
     return 6;
 }
 
@@ -89,6 +89,8 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         uint chunk_id = tid.x;
         if (chunk_id >= chunk_count) return;
         // 64 tile chunks (64 for every 1 actual 8192m chunk)
+        // each is 1024m wide
+        //
         float3 delta_position;
         if (chunk_id < 64) {
             // assuming each tile is 1024m wide, and we use meters instead of dm now
@@ -111,15 +113,16 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
 
         // distance
         float distance = dot(delta_position, delta_position) / 500.0f;
-        if (distance > d[0] * 100) return;
-        if (distance > d[0] * 10) {
+        if (chunk_id < 64 && distance > d[0] + 50000) {
             // if really far, just directly write one visible instance, instead of 64 tile objects
             uint stride; uint mesh_count;
             MESH_INFO.GetDimensions(mesh_count, stride);
             uint base_mesh_id = find_mesh_id(chunk_id * 64, mesh_count);
-            uint slot;  InterlockedAdd(COUNT_PER_MESH[base_mesh_id], 1, slot);
+            uint lod_level = choose_lod_step(distance);
+            uint mesh_id = base_mesh_id + lod_level;
+            uint slot;  InterlockedAdd(COUNT_PER_MESH[mesh_id], 1, slot);
             uint slot1; InterlockedAdd(VISIBLE_OBJECT_COUNT[0], 1, slot1); // keep a count for later
-            VISIBLE_OBJECT_IDS[slot1] = 1000000 + chunk_id; // add a visible object
+            VISIBLE_OBJECT_IDS[slot1] = 10000 + chunk_id; // add a visible object
         } else {
             // else spawn a workgroup of 64 objects
             uint slot; InterlockedAdd(INDIRECT_WORKGROUPS[0].group_count_x, 1, slot);
@@ -151,7 +154,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
             object_position += chunk_position;
             position = object_position - (camera_position / 10); // in meters
         } else {
-            uint2 object = OBJECTS[object_id];    // 8 bytes
+            uint2 object = OBJECTS[object_id]; // 8 bytes
             float3 object_position = float3(((int16_t) (object.x & 0xFFFF)), ((int16_t)((object.x >> 16) & 0xFFFF)), ((int16_t) (object.y & 0xFFFF)));
             position = object_position - camera_position;
         }
@@ -165,7 +168,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         // pick lod level
         uint base_mesh_id = find_mesh_id(object_id, mesh_count);
         float distance = dot(position,position) / 500.0f;
-        uint lod_level = 0;//choose_lod_step(distance);
+        uint lod_level = choose_lod_step(distance);
         uint mesh_id = base_mesh_id + lod_level;
         
         // calculate frustrum
@@ -215,9 +218,6 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         }
 
         // task 2: fill the indirect dispatch buffer with the sum of visible objects
-        uint object_count, chunk_count;
-        OBJECTS.GetDimensions(object_count, stride);
-        CHUNKS.GetDimensions(chunk_count, stride);
         INDIRECT_WORKGROUPS[0].group_count_x = (VISIBLE_OBJECT_COUNT[0] + 63) / 64;
         INDIRECT_WORKGROUPS[0].group_count_y = 1;
         INDIRECT_WORKGROUPS[0].group_count_z = 1;
@@ -241,8 +241,9 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         float3 position;
         float object_yaw_cos = 1;
         float object_yaw_sin = 0;
-        if (object_id > 1000000) {
-            chunk_id = object_id - 1000000;
+        if (object_id > 10000) {
+            chunk_id = object_id - 10000;
+            object_id = chunk_id * 64;
             float3 object_position = float3((chunk_id / 8) * 1024, 0, (chunk_id % 8) * 1024);
             position = object_position - (camera_position / 10); // in meters
         } else if (object_id < 64 * 64) {
@@ -269,7 +270,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         // pick lod level
         uint base_mesh_id = find_mesh_id(object_id, mesh_count);
         float distance = dot(position,position) / 500.0f;
-        uint lod_level = 0;//choose_lod_step(distance);
+        uint lod_level = choose_lod_step(distance);
         uint mesh_id = base_mesh_id + lod_level;
         
         // convert to int again

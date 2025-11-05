@@ -215,16 +215,16 @@ void key_input_callback(void* ud, enum BUTTON button, enum BUTTON_STATE state) {
 }
 void mouse_input_callback(void* ud, i32 x, i32 y, enum BUTTON button, int state) {
     if (button == MOUSE_MOVED) {
-        if (x < 50) buttons[MOUSE_MARGIN_LEFT] += (50 - x) / 3;
+        if (x < 50) buttons[MOUSE_MARGIN_LEFT] += 15;
         else buttons[MOUSE_MARGIN_LEFT] = 0;
-        if (x > pf_window_width(w) - 50) buttons[MOUSE_MARGIN_RIGHT] += (x - (pf_window_width(w) - 50)) / 3;
+        if (x > pf_window_width(w) - 50) buttons[MOUSE_MARGIN_RIGHT] += 15;
         else buttons[MOUSE_MARGIN_RIGHT] = 0;
-        if (y < 50) buttons[MOUSE_MARGIN_TOP] += (50 - y) / 5;
+        if (y < 50) buttons[MOUSE_MARGIN_TOP] += 5;
         else buttons[MOUSE_MARGIN_TOP] = 0;
-        if (y > pf_window_height(w) - 50) buttons[MOUSE_MARGIN_BOTTOM] += (y - (pf_window_height(w) - 50)) / 5;
+        if (y > pf_window_height(w) - 50) buttons[MOUSE_MARGIN_BOTTOM] += 5;
         else buttons[MOUSE_MARGIN_BOTTOM] = 0;
     }
-    if (button == MOUSE_SCROLL) buttons[MOUSE_SCROLL] += scaled(state / 5);
+    if (button == MOUSE_SCROLL) buttons[MOUSE_SCROLL] += scaled(state);
     if (button == MOUSE_SCROLL_SIDE) buttons[MOUSE_SCROLL_SIDE] -= scaled(state / 5);
     if (button == MOUSE_LEFT || button == MOUSE_RIGHT || button == MOUSE_MIDDLE) {
         if (state == PRESSED) buttons[button] = 1;
@@ -974,11 +974,23 @@ int main(void) {
                 VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                 0, sizeof(uint32_t), &mode_chunks);
             vkCmdDispatch(cmd, (total_chunk_count+63)/64, 1, 1);
+            VkBufferMemoryBarrier2 chunks_to_cs = {
+                .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+                .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,      // mode 0 wrote the array
+                .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,       // mode 1 will read it
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .buffer = renderer.buffer_visible_chunk_ids,        // backing buffer for VISIBLE_CHUNK_IDS
+                .offset = 0,
+                .size = VK_WHOLE_SIZE,
+            };
             VkBufferMemoryBarrier2 to_indirect = {
                 .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
                 .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                 .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
-                .dstStageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
+                .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                 .dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
                 .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                 .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -986,10 +998,50 @@ int main(void) {
                 .offset = 0,
                 .size = VK_WHOLE_SIZE,
             };
+            VkBufferMemoryBarrier2 ids_to_cs = {
+              .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+              .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+              .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,          // mode 0 appended proxy IDs
+              .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+              .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT, // mode 1 appends too
+              .buffer = renderer.buffer_visible_ids,
+              .offset = 0, .size = VK_WHOLE_SIZE
+            };
+            VkBufferMemoryBarrier2 cnt_visible_to_cs = {
+                .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+                .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,           // mode 0 atomically wrote it
+                .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, // mode 1 will atomic RMW
+                .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .buffer = renderer.buffer_visible_object_count,
+                .offset = 0,
+                .size   = VK_WHOLE_SIZE,
+            };
+            VkBufferMemoryBarrier2 cnt_per_mesh_to_cs = {
+                .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+                .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,           // mode 0 atomically wrote it
+                .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .buffer = renderer.buffer_count_per_mesh,
+                .offset = 0,
+                .size   = VK_WHOLE_SIZE,
+            };
+            VkBufferMemoryBarrier2 barriers[5] = {
+                to_indirect,     
+                chunks_to_cs,
+                ids_to_cs,
+                cnt_visible_to_cs,  
+                cnt_per_mesh_to_cs  
+            };
             vkCmdPipelineBarrier2(cmd, &(VkDependencyInfo){
                 .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-                .bufferMemoryBarrierCount = 1,
-                .pBufferMemoryBarriers = &to_indirect,
+                .bufferMemoryBarrierCount = 5,
+                .pBufferMemoryBarriers    = barriers,
             });
 
             // VISIBLE OBJECTS PASS
@@ -1026,19 +1078,21 @@ int main(void) {
                 VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                 0, sizeof(uint32_t), &mode_prepare);
             vkCmdDispatch(cmd, 1, 1, 1);
-            VkMemoryBarrier2 after_prepare = {
-                .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
-                .srcStageMask = CS,
-                .srcAccessMask = SSW,
-                .dstStageMask = CS,
-                .dstAccessMask = SSR | SSW,            // scatter reads OFFSETS & writes VISIBLE, DRAW_CALLS.instance_count
+            VkBufferMemoryBarrier2 prepare_to_scatter_indirect = {
+              .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+              .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+              .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,                 // mode 2 wrote it
+              .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,       // vkCmdDispatchIndirect
+              .dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,        // indirect read
+              .buffer = renderer.buffer_indirect_workgroups,
+              .offset = 0,
+              .size   = VK_WHOLE_SIZE,
             };
-            VkDependencyInfo dep_after_prepare = {
-                .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-                .memoryBarrierCount = 1,
-                .pMemoryBarriers = &after_prepare,
-            };
-            vkCmdPipelineBarrier2(cmd, &dep_after_prepare);
+            vkCmdPipelineBarrier2(cmd, &(VkDependencyInfo){
+              .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+              .bufferMemoryBarrierCount = 1,
+              .pBufferMemoryBarriers = &prepare_to_scatter_indirect,
+            });
 
             // SCATTER PASS
             uint32_t mode_scatter = 3;
