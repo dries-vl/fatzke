@@ -64,7 +64,11 @@ struct Renderer {
     #endif
 };
 
-struct Uniforms { uint32_t uCam[4]; };  // 16 bytes
+struct Uniforms {
+    float camera_position[3]; // xyz
+    float camera_pitch_sin, camera_pitch_cos;
+    float camera_yaw_sin, camera_yaw_cos;
+};
 
 #if DEBUG_APP == 1
 enum {
@@ -177,11 +181,13 @@ static void create_and_upload_device_local_buffer(
     vkFreeMemory(device, staging_mem, NULL);
 }
 
+#include "texture.h"
+
 #pragma region MAIN
 // todo: avoid globals
 WINDOW w;
 i32 buttons[BUTTON_COUNT];
-i16 cam_x = 0, cam_y = 2, cam_z = -5, cam_yaw = 0, cam_pitch = 0;
+float cam_x = 0, cam_y = 2, cam_z = -5, cam_yaw = 0, cam_pitch = 0;
 void move_forward(int amount) {
     double rad = (double)(cam_yaw) * 3.14159265f / 32767.0f;
     i16 x_amount = (i16)lroundf(sinf(rad) * amount);
@@ -287,8 +293,9 @@ int main(void) {
     VkShaderModule shader_module; VK_CHECK(vkCreateShaderModule(machine.device,&smci,NULL,&shader_module));
 
     #pragma region COMPUTE PIPELINE
-    #define BINDINGS 15
-    #define UNIFORM_BINDING (BINDINGS-1)
+    #define BINDINGS 16
+    #define UNIFORM_BINDING (BINDINGS-2)
+    #define TEXTURES_BINDING (BINDINGS-1)
     VkDescriptorSetLayoutBinding bindings[BINDINGS];
     for (uint32_t i = 0; i < BINDINGS; ++i) {
         bindings[i] = (VkDescriptorSetLayoutBinding) {
@@ -296,9 +303,19 @@ int main(void) {
             .descriptorCount = 1,
             .stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT
         };
-        // use uniform for the last one
-        bindings[i].descriptorType = (i != UNIFORM_BINDING) ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     }
+    // uniforms
+    bindings[UNIFORM_BINDING].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    bindings[UNIFORM_BINDING].descriptorCount = 1;
+    bindings[UNIFORM_BINDING].stageFlags |= VK_SHADER_STAGE_FRAGMENT_BIT;
+    // textures
+    bindings[TEXTURES_BINDING] = (VkDescriptorSetLayoutBinding) {
+        .binding         = TEXTURES_BINDING,
+        .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .descriptorCount = MAX_TEXTURES,
+        .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT,
+    };
     VkDescriptorSetLayoutCreateInfo set_layout_info = {
         .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         .bindingCount = BINDINGS,
@@ -436,8 +453,8 @@ int main(void) {
     };
     #include "plane_instances.h"
 
-    static struct gpu_chunk plane_chunks[64] = {0};
-    static struct gpu_instance plane_inst[64 * 64];
+    static struct gpu_chunk plane_chunks[6400] = {0};
+    static struct gpu_instance plane_inst[6400 * 64];
     static struct gpu_chunk mesh_chunk = {0};
     static struct gpu_instance mesh_inst[64];
     // steps of 1dm, we want i to move 1 meter for each, and form a square of instances 1 meter apart
@@ -451,7 +468,7 @@ int main(void) {
         }
     }
     const struct mesh_info meshes[MESH_COUNT] = {
-        {g_vertex_count_plane_lod6, g_index_count_plane_lod6, 64, &plane_chunks, &plane_inst, g_indices_plane_lod6, NULL,NULL,NULL},
+        {g_vertex_count_plane_lod6, g_index_count_plane_lod6, 6400, &plane_chunks, &plane_inst, g_indices_plane_lod6, NULL,NULL,NULL},
         {g_vertex_count_plane_lod5, g_index_count_plane_lod5, 0, NULL, NULL, g_indices_plane_lod5, NULL,NULL,NULL},
         {g_vertex_count_plane_lod4, g_index_count_plane_lod4, 0, NULL, NULL, g_indices_plane_lod4, NULL,NULL,NULL},
         {g_vertex_count_plane_lod3, g_index_count_plane_lod3, 0, NULL, NULL, g_indices_plane_lod3, NULL,NULL,NULL},
@@ -712,8 +729,9 @@ int main(void) {
 
     // --- Descriptor pool & set (unchanged, but note buffers are now DEVICE_LOCAL) ---
     VkDescriptorPoolSize pool_sizes[] = {
-        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,  BINDINGS-1 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,  BINDINGS-2 },
         { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,  1 },
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MAX_TEXTURES },
     };
     VkDescriptorPoolCreateInfo pool_info_desc = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -748,6 +766,16 @@ int main(void) {
         {renderer.buffer_uvs, 0, size_uvs},
         {renderer.buffer_uniforms, 0, sizeof(struct Uniforms)}
     };
+    #pragma region TEXTURES
+    create_textures(&machine, &swapchain);
+    VkDescriptorImageInfo tex_infos[MAX_TEXTURES];
+    for (uint32_t i = 0; i < MAX_TEXTURES; ++i) {
+        tex_infos[i] = (VkDescriptorImageInfo){
+            .sampler     = global_sampler,
+            .imageView   = (i < texture_count) ? textures[i].view : VK_NULL_HANDLE,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+        };
+    }
     VkWriteDescriptorSet writes[BINDINGS];
     for (uint32_t i = 0; i < BINDINGS; ++i) {
         writes[i] = (VkWriteDescriptorSet){
@@ -759,6 +787,14 @@ int main(void) {
             .pBufferInfo = &buffer_infos[i]
         };
     }
+    writes[TEXTURES_BINDING] = (VkWriteDescriptorSet){
+        .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet          = renderer.descriptor_set,
+        .dstBinding      = TEXTURES_BINDING,
+        .descriptorCount = MAX_TEXTURES,
+        .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .pImageInfo      = tex_infos,
+    };
     vkUpdateDescriptorSets(machine.device, BINDINGS, writes, 0, NULL);
     pf_timestamp("Descriptors created (DEVICE_LOCAL)");
 
