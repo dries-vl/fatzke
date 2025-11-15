@@ -250,7 +250,7 @@ void process_inputs() {
     if (buttons[MOUSE_MARGIN_TOP]) { cam_pitch -= buttons[MOUSE_MARGIN_TOP]; }
     if (buttons[MOUSE_MARGIN_BOTTOM]) { cam_pitch += buttons[MOUSE_MARGIN_BOTTOM]; }
     if (buttons[MOUSE_SCROLL]) { 
-        if (cam_y + buttons[MOUSE_SCROLL] < 32767 && cam_y + buttons[MOUSE_SCROLL] > 10)
+        if (cam_y + buttons[MOUSE_SCROLL] < 327670 && cam_y + buttons[MOUSE_SCROLL] > 10)
             cam_y += buttons[MOUSE_SCROLL];
         buttons[MOUSE_SCROLL] = 0;
     }
@@ -384,7 +384,7 @@ int main(void) {
     VkPipelineRasterizationStateCreateInfo raster = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
         .polygonMode = VK_POLYGON_MODE_FILL,
-        .cullMode    = VK_CULL_MODE_BACK_BIT,
+        .cullMode    = VK_CULL_MODE_BACK_BIT, // line for wireframe
         .frontFace   = VK_FRONT_FACE_CLOCKWISE,
         .lineWidth   = 1.0f
     };

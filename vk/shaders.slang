@@ -82,7 +82,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         float3 delta_position;
         if (chunk_id < 6400) {
             // assuming each tile is 1024m wide, and we use meters instead of dm now
-            float3 chunk_position = float3(int(chunk_id / 80) * 1024 - 40960, 0, int(chunk_id % 80) * 1024 - 40960);
+            float3 chunk_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * 1024 - 40960 + 512);
             delta_position = chunk_position - (camera_position / 10); // in meters
         } else {
             uint2 object = OBJECTS[chunk_id * 64];    // 8 bytes
@@ -96,7 +96,8 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
              camera_pitch_cos * delta_position.y + camera_pitch_sin * position_yaw_z, // apply pitch to Y (using new z)
             -camera_pitch_sin * delta_position.y + camera_pitch_cos * position_yaw_z // apply pitch to Z (using new z)
         );
-        bool frustum = abs(view.x) > (view.z * tanHalfFovX) || abs(view.y) > (view.z * tanHalfFovY);
+        uint radius = 1024 / 2;
+        bool frustum = (abs(view.x) - radius) > (view.z * tanHalfFovX) || (abs(view.y) - radius) > (view.z * tanHalfFovY);
         if (frustum) return;
 
         // distance
@@ -135,16 +136,19 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
 
         // unpack object position and move to camera space
         float3 position;
+        uint radius;
         if (chunk_id < 6400) {
             // terrain: assuming each object is 128m wide
-            float3 chunk_position = float3(int(chunk_id / 80) * 1024 - 40960, 0, int(chunk_id % 80) * 1024 - 40960);
-            float3 object_position = float3(int(id_within_chunk / 8) * 128 - 512, 0, int(id_within_chunk % 8) * 128 - 512);
+            float3 chunk_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * 1024 - 40960 + 512);
+            float3 object_position = float3(int(id_within_chunk / 8) * 128 - 512 + 64, 0, int(id_within_chunk % 8) * 128 - 512 + 64);
             object_position += chunk_position;
             position = object_position - (camera_position / 10); // in meters
+            radius = 128 / 2;
         } else {
             uint2 object = OBJECTS[object_id]; // 8 bytes
             float3 object_position = float3(((int16_t) (object.x & 0xFFFF)), ((int16_t)((object.x >> 16) & 0xFFFF)), ((int16_t) (object.y & 0xFFFF)));
             position = object_position - camera_position;
+            radius = 50;
         }
         float position_yaw_z =  camera_yaw_sin * position.x + camera_yaw_cos * position.z; // apply yaw to Z
         float3 view = float3(
@@ -160,13 +164,13 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         uint mesh_id = base_mesh_id + lod_level;
         
         // calculate frustrum
-        bool outside_frustrum = abs(view.x) > (view.z * tanHalfFovX) || abs(view.y) > (view.z * tanHalfFovY);
+        bool outside_frustrum = (abs(view.x) - radius) > (view.z * tanHalfFovX) || (abs(view.y) - radius) > (view.z * tanHalfFovY);
 
         bool valid = true;
         // frustrum cull
         if (outside_frustrum) valid = false;
         // overflow cull
-        if (view.x > 32767 || view.z > 32767 || view.x < -32767 || view.z < -32767) valid = false;
+        if ((view.x > 32767 || view.z > 32767 || view.x < -32767 || view.z < -32767) && chunk_id >= 6400) valid = false;
         // near cull
         if (view.z < 0) valid = false;
 
@@ -229,14 +233,15 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         float3 position;
         float object_yaw_cos = 1;
         float object_yaw_sin = 0;
-        if (object_id > 1000000) {
+        bool is_chunk_object = object_id > 1000000;
+        if (is_chunk_object) {
             chunk_id = object_id - 1000000;
             object_id = chunk_id * 64;
-            float3 object_position = float3(int(chunk_id / 80) * 1024 - 40960, 0, int(chunk_id % 80) * 1024 - 40960);
+            float3 object_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * 1024 - 40960 + 512);
             position = object_position - (camera_position / 10); // in meters
         } else if (object_id < 6400 * 64) {
-            float3 chunk_position = float3(int(chunk_id / 80) * 1024 - 40960, 0, int(chunk_id % 80) * 1024 - 40960);
-            float3 object_position = float3(int(id_within_chunk / 8) * 128 - 512, 0, int(id_within_chunk % 8) * 128 - 512);
+            float3 chunk_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * 1024 - 40960 + 512);
+            float3 object_position = float3(int(id_within_chunk / 8) * 128 - 512 + 64, 0, int(id_within_chunk % 8) * 128 - 512 + 64);
             object_position += chunk_position;
             position = object_position - (camera_position / 10); // in meters
         } else {
@@ -278,33 +283,32 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         // Grab slot via atomic write head on the draw call
         uint slot; InterlockedAdd(DRAW_CALLS[mesh_id].instance_count, 1, slot);
         const uint dst = OFFSET_PER_MESH[mesh_id] + slot;
-        if (object_id < 6400 * 64) {
+        if (is_chunk_object) {
+            RENDERED_INSTANCES[dst] = instance(packed0,packed1,packed2,chunk_id + 1000000);
+        } else if (object_id < 6400 * 64) {
             RENDERED_INSTANCES[dst] = instance(packed0,packed1,packed2,object_id);
         } else {
-            RENDERED_INSTANCES[dst] = instance(packed0,packed1,packed2,0);
+            RENDERED_INSTANCES[dst] = instance(packed0,packed1,packed2,object_id);
         }
     }
 }
 
-// todo 2: procedural terrain elements + height
-// todo 3: small heightmap/groundmap as base
-// todo 5: grid width as uniform value, locations depending on this total size in width
 struct vs_out {
     float4 pos    : SV_Position;                                           // clip-space position
     float2 uv     : TEXCOORD0;                                             // texture coordinates
     float3 normal : TEXCOORD1;                                             // surface normal
 };
 
+static const uint MAX_VERTICES = 128u;
+static const float TILE_SIZE_CM = 128.0 * 100.0; // in cm
 float3 plane_position(uint VERTEX_ID, uint grid_scale) {
-    uint grid_width = 128u >> grid_scale;     // 128, 64, 32, ..., 2
-    uint row = VERTEX_ID % grid_width;        // 0 .. grid_width-1
-    uint col = VERTEX_ID / grid_width;        // 0 .. grid_width-1
-    const float span = 128.0 * 100.0;                 // total width per axis
-    const float half_span = span * 0.5;       // 63.5
-    // Normalize to [0,1] then scale to the fixed span
-    float x = (float(col) / float(grid_width - 1)) * span - half_span;
-    float z = (float(row) / float(grid_width - 1)) * span - half_span;
-    return float3(x, 0.0, z);;
+    uint vertices_per_side = MAX_VERTICES >> grid_scale;     // 128, 64, 32, 16, 8, 4, 2 (ie. scale 6 becomes 2 -> quad)
+    uint row = VERTEX_ID % vertices_per_side;        // 0 .. vertices_per_side-1
+    uint col = VERTEX_ID / vertices_per_side;        // 0 .. vertices_per_side-1
+    // Normalize to [0,1] then scale to the fixed tile size
+    float x = (float(col) / float(vertices_per_side - 1)) * TILE_SIZE_CM - (TILE_SIZE_CM / 2);
+    float z = (float(row) / float(vertices_per_side - 1)) * TILE_SIZE_CM - (TILE_SIZE_CM / 2);
+    return float3(x, 0.0, z);
 }
 
 [shader("vertex")]
@@ -324,9 +328,9 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] uint4 INSTANCE,
  
     // fetch and unpack visible instance data, convert dm to cm (12 bytes)
     uint3 packed_instance = INSTANCE.xyz;
-    int instance_x = 10 * (int)((int16_t)( packed_instance.x        & 0xFFFF));
-    int instance_y = 10 * (int)((int16_t)((packed_instance.x >> 16) & 0xFFFF));
-    int instance_z = 10 * (int)((int16_t)( packed_instance.y        & 0xFFFF));
+    float instance_x = 10.0 * (float)((int16_t)( packed_instance.x        & 0xFFFF));
+    float instance_y = 10.0 * (float)((int16_t)((packed_instance.x >> 16) & 0xFFFF));
+    float instance_z = 10.0 * (float)((int16_t)( packed_instance.y        & 0xFFFF));
     float cos_d = float(((int16_t)((packed_instance.y >> 16) & 0xFFFF))) * divide_by_32767;
     float sin_d = float(((int16_t)((packed_instance.z) & 0xFFFF))) * divide_by_32767;
 
@@ -336,21 +340,51 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] uint4 INSTANCE,
     float2 uv;
     if (DRAW_ID < 7) {
         uint object_id = INSTANCE.w;
+        bool is_chunk_object = object_id > 1000000;
+        if (is_chunk_object) object_id -= 1000000;
         uint chunk_id = object_id / 64;
+        if (is_chunk_object) chunk_id = object_id;
         uint id_within_chunk = object_id - (chunk_id * 64);
-        float3 chunk_position = float3(int(chunk_id / 80) * 1024 - 40960, 0, int(chunk_id % 80) * 1024 - 40960);
-        float3 object_position = float3(int(id_within_chunk / 8) * 128 - 512, 0, int(id_within_chunk % 8) * 128 - 512);
+        float3 chunk_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * 1024 - 40960 + 512);
+        float3 object_position = float3(int(id_within_chunk / 8) * 128 - 512 + 64, 0, int(id_within_chunk % 8) * 128 - 512 + 64);
         object_position += chunk_position;
+        if (is_chunk_object) object_position = chunk_position;
+        float3 position = object_position - (camera_position / 10); // in meters
+        float position_yaw_z =  camera_yaw_sin * position.x + camera_yaw_cos * position.z; // apply yaw to Z
+        float3 view = float3(
+             camera_yaw_cos   * position.x - camera_yaw_sin   * position.z, // apply yaw to X
+             camera_pitch_cos * position.y + camera_pitch_sin * position_yaw_z, // apply pitch to Y (using new z)
+            -camera_pitch_sin * position.y + camera_pitch_cos * position_yaw_z // apply pitch to Z (using new z)
+        );
+        instance_x = 100.0 * view.x; // in cm
+        instance_y = 100.0 * view.y;
+        instance_z = 100.0 * view.z;
         uint grid_scale = 6 - (DRAW_ID % 7);
-        vertex = plane_position(VERTEX_ID, grid_scale);
-        int2 vertex_world = int2(vertex.xz + object_position.xz * 10);
-        // vertex.y = 10 * getTerrainHeight(vertex_world.x, vertex_world.y);
+        vertex = plane_position(VERTEX_ID, grid_scale); // in cm
+        if (is_chunk_object) vertex *= 8;
+        int2 vertex_world = int2(object_position.xz * 100 + vertex.xz);
         normal = float3(0.5, 1.0, 0.2);
-        instance_x *= 10;
-        instance_y *= 10;
-        instance_z *= 10;
-        uv = vertex_world / 100000.0;
+        uv = (object_position.xz + (vertex.xz / 100.0)) / (128.0 * 8.0 * 80.0 / 2.0);
     } else {
+        // instance
+        uint object_id = INSTANCE.w;
+        uint2 object = OBJECTS[object_id];    // 8 bytes
+        float3 object_position = float3(((int16_t) (object.x & 0xFFFF)), ((int16_t)((object.x >> 16) & 0xFFFF)), ((int16_t) (object.y & 0xFFFF)));
+        float3 position = object_position - camera_position;
+        // unpack yaw and pitch
+        float object_yaw_cos = float((int8_t)(object.y >> 16 & 0xFF)) * divide_by_127;
+        float object_yaw_sin = float((int8_t)(object.y >> 24 & 0xFF)) * divide_by_127;
+        float position_yaw_z =  camera_yaw_sin * position.x + camera_yaw_cos * position.z; // apply yaw to Z
+        float3 view = float3(
+             camera_yaw_cos   * position.x - camera_yaw_sin   * position.z, // apply yaw to X
+             camera_pitch_cos * position.y + camera_pitch_sin * position_yaw_z, // apply pitch to Y (using new z)
+            -camera_pitch_sin * position.y + camera_pitch_cos * position_yaw_z // apply pitch to Z (using new z)
+        );
+        instance_x = 10.0 * view.x; // in cm
+        instance_y = 10.0 * view.y;
+        instance_z = 10.0 * view.z;
+        cos_d =  object_yaw_cos * camera_yaw_cos + object_yaw_sin * camera_yaw_sin; // cos(a-b)
+        sin_d =  object_yaw_sin* camera_yaw_cos - object_yaw_cos * camera_yaw_sin; // sin(a-b)
         // we need to know the offset into the position (4 bytes)
         uint base_vertex = MESH_INFO[DRAW_ID].base_vertex;
         // fetch and unpack vertex position, represented as cm (4 bytes)
@@ -406,7 +440,7 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] uint4 INSTANCE,
 [shader("fragment")]
 float4 fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
     if (PUSH_CONSTANTS.mode == 1) return float4(i.normal, 1.0);
-    // debug draw triangles as distinct colors
+    // // debug draw triangles as distinct colors
     // float3 color = frac(sin((primID+43) * 43.5453) * float3(23.1407, 85.928, 43.533));
     // if(color.x+color.y+color.z < 0.1) color = float3(float(primID % 32) / 32, float((primID + 38) % 64) / 64, float((primID + 17) % 32) / 32);
     // return float4(color, 1.0);
