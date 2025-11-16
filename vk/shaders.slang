@@ -364,7 +364,8 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] uint4 INSTANCE,
         if (is_chunk_object) vertex *= 8;
         int2 vertex_world = int2(object_position.xz * 100 + vertex.xz);
         normal = float3(0.5, 1.0, 0.2);
-        uv = (object_position.xz + (vertex.xz / 100.0)) / (128.0 * 8.0 * 80.0 / 2.0);
+        uv = (object_position.xz + (vertex.xz / 100.0) + (128.0 * 8.0 * 80.0 / 2.0)) / (128.0 * 8.0 * 80.0);
+        uv = float2(1,1) + float2(uv.x, -uv.y);
     } else {
         // instance
         uint object_id = INSTANCE.w;
@@ -441,11 +442,11 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] uint4 INSTANCE,
 float4 fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
     if (PUSH_CONSTANTS.mode == 1) return float4(i.normal, 1.0);
     // // debug draw triangles as distinct colors
-    // float3 color = frac(sin((primID+43) * 43.5453) * float3(23.1407, 85.928, 43.533));
-    // if(color.x+color.y+color.z < 0.1) color = float3(float(primID % 32) / 32, float((primID + 38) % 64) / 64, float((primID + 17) % 32) / 32);
+    float3 color = frac(sin((primID+43) * 43.5453) * float3(23.1407, 85.928, 43.533));
+    if(color.x+color.y+color.z < 0.1) color = float3(float(primID % 32) / 32, float((primID + 38) % 64) / 64, float((primID + 17) % 32) / 32);
     // return float4(color, 1.0);
-    float4 color = TEXTURES[0].Sample(i.uv);
-    color += TEXTURES[1].Sample(i.uv);
-    color += TEXTURES[63].Sample(i.uv);
-    return color;
+    // float4 color = TEXTURES[0].Sample(i.uv);
+    float4 output = TEXTURES[1].Sample(i.uv);
+    output.xyz += color / 5;
+    return output;
 }

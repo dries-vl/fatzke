@@ -5,6 +5,9 @@
 extern const unsigned char font_atlas[];
 extern const unsigned char font_atlas_end[];
 #define font_atlas_len ((size_t)(font_atlas_end - font_atlas))
+extern const unsigned char map[];
+extern const unsigned char map_end[];
+#define map_len ((size_t)(map_end - map))
 
 typedef struct Texture {
     VkImage        image;
@@ -349,13 +352,11 @@ void create_textures(struct Machine *machine, struct Swapchain *swapchain) {
     VK_CHECK(vkCreateSampler(machine->device, &sci, NULL, &global_sampler));
 
     // font atlas from KTX2 ASTC
-    uint32_t font_atlas_index = 0;
-    if (!create_texture_from_ktx2_astc(
-            machine, swapchain,
-            font_atlas, font_atlas_len,
-            &textures[font_atlas_index])) {
+    if (!create_texture_from_ktx2_astc(machine, swapchain, font_atlas, font_atlas_len, &textures[0]))
         printf("Failed to create font atlas texture from KTX2\n");
-    }
+    texture_count++;
+    if (!create_texture_from_ktx2_astc(machine, swapchain, map, map_len, &textures[1]))
+        printf("Failed to create map texture from KTX2\n");
     texture_count++;
 
     // later: map/map, world map, per-mesh textures, etc.
