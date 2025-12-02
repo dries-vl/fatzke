@@ -57,7 +57,7 @@ uint find_mesh_id(uint object_id, uint mesh_count) {
         if (start <= object_id) lo = mid + 1;
         else hi = mid;
     }
-    return (lo - 1) - ((lo-1) % 7);
+    return (lo - 1) - ((lo-1) % 5);
 }
 
 static const float d[6] = { 51200.0, 6400.0, 1600.0, 40.0, 0.0, 0.0 };
@@ -96,7 +96,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
              camera_pitch_cos * delta_position.y + camera_pitch_sin * position_yaw_z, // apply pitch to Y (using new z)
             -camera_pitch_sin * delta_position.y + camera_pitch_cos * position_yaw_z // apply pitch to Z (using new z)
         );
-        uint radius = 1024 / 2;
+        uint radius = 1524;
         bool frustum = (abs(view.x) - radius) > (view.z * tanHalfFovX) || (abs(view.y) - radius) > (view.z * tanHalfFovY);
         if (frustum) return;
 
@@ -143,12 +143,12 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
             float3 object_position = float3(int(id_within_chunk / 8) * 128 - 512 + 64, 0, int(id_within_chunk % 8) * 128 - 512 + 64);
             object_position += chunk_position;
             position = object_position - (camera_position / 10); // in meters
-            radius = 128 / 2;
+            radius = 150;
         } else {
             uint2 object = OBJECTS[object_id]; // 8 bytes
             float3 object_position = float3(((int16_t) (object.x & 0xFFFF)), ((int16_t)((object.x >> 16) & 0xFFFF)), ((int16_t) (object.y & 0xFFFF)));
             position = object_position - camera_position;
-            radius = 50;
+            radius = 32;
         }
         float position_yaw_z =  camera_yaw_sin * position.x + camera_yaw_cos * position.z; // apply yaw to Z
         float3 view = float3(
@@ -170,16 +170,20 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         // frustrum cull
         if (outside_frustrum) valid = false;
         // overflow cull
-        if ((view.x > 32767 || view.z > 32767 || view.x < -32767 || view.z < -32767) && chunk_id >= 6400) valid = false;
+        // if ((view.x > 32767 || view.z > 32767 || view.x < -32767 || view.z < -32767) && chunk_id >= 6400) valid = false;
         // near cull
-        if (view.z < 0) valid = false;
+        // if (view.z < 0) valid = false;
 
         if (valid) {
-            // todo: we will write multiple mesh instances here; ie. a torso + head + shield + weapon
-            uint slot;  InterlockedAdd(COUNT_PER_MESH[mesh_id], 1, slot);
+            uint slot; InterlockedAdd(COUNT_PER_MESH[mesh_id], 1, slot);
             // todo: we will use per-workgroup count here to have only one atomic add per 64 (this is possible)
             uint slot1; InterlockedAdd(VISIBLE_OBJECT_COUNT[0], 1, slot1);
             VISIBLE_OBJECT_IDS[slot1] = object_id;
+            // todo: we will write multiple mesh instances here; ie. a torso + head + shield + weapon
+            if (chunk_id >= 6400) {
+                // add a head
+                uint slot2;  InterlockedAdd(COUNT_PER_MESH[mesh_id + 5], 1, slot2);
+            }
         }
     }
     // prefix sum
@@ -188,14 +192,14 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         if (tid.x != 0) return;
         uint mesh_count, stride; 
         MESH_INFO.GetDimensions(mesh_count, stride);
-        static const uint LOD_COUNT = 7;
+        static const uint LOD_COUNT = 5;
 
         // task 1: calculate the offset for the first instance of each mesh type
         for (uint base_mesh_id = 0; base_mesh_id < mesh_count; base_mesh_id += LOD_COUNT) {
             const uint base_instance = MESH_INFO[base_mesh_id].first_instance;
             uint total_count = 0;
-            [unroll] for (uint j = 0; j < 7; ++j) {
-                uint mesh_id = base_mesh_id + j;
+            [unroll] for (uint lod = 0; lod < LOD_COUNT; ++lod) {
+                uint mesh_id = base_mesh_id + lod;
                 uint first_instance = base_instance + total_count;
                 OFFSET_PER_MESH[mesh_id] = first_instance;
                 total_count += COUNT_PER_MESH[mesh_id];
@@ -210,6 +214,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         }
 
         // task 2: fill the indirect dispatch buffer with the sum of visible objects
+        // calculate size of scatter pass
         INDIRECT_WORKGROUPS[0].group_count_x = (VISIBLE_OBJECT_COUNT[0] + 63) / 64;
         INDIRECT_WORKGROUPS[0].group_count_y = 1;
         INDIRECT_WORKGROUPS[0].group_count_z = 1;
@@ -289,6 +294,10 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
             RENDERED_INSTANCES[dst] = instance(packed0,packed1,packed2,object_id);
         } else {
             RENDERED_INSTANCES[dst] = instance(packed0,packed1,packed2,object_id);
+            // add the head
+            uint slot_head; InterlockedAdd(DRAW_CALLS[mesh_id + 5].instance_count, 1, slot_head);
+            const uint head_dst = OFFSET_PER_MESH[mesh_id + 5] + slot_head;
+            RENDERED_INSTANCES[head_dst] = instance(packed0,packed1,packed2,object_id);
         }
     }
 }
@@ -317,8 +326,8 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] uint4 INSTANCE,
     if (PUSH_CONSTANTS.mode == 1) {
         vs_out o;
         float2 p;
-        if (VERTEX_ID == 0) p = float2(-1.0,  3.0); // was (-1,-1)
-        if (VERTEX_ID == 1) p = float2( 3.0, -1.0);
+        if (VERTEX_ID == 1) p = float2(-1.0,  3.0); // was (-1,-1)
+        if (VERTEX_ID == 0) p = float2( 3.0, -1.0);
         if (VERTEX_ID == 2) p = float2(-1.0, -1.0); // was (-1, 3)
         o.pos = float4(p, 0.0000001, 1.0); // 1.0 / 1.0 -> drawn behind everything else
         o.normal = float3(0.3, 0.5, 1.0);
@@ -338,7 +347,7 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] uint4 INSTANCE,
     float3 vertex;
     float3 normal;
     float2 uv;
-    if (DRAW_ID < 7) {
+    if (DRAW_ID < 5) {
         uint object_id = INSTANCE.w;
         bool is_chunk_object = object_id > 1000000;
         if (is_chunk_object) object_id -= 1000000;

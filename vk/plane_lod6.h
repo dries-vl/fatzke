@@ -24,10 +24,10 @@ static const uint32_t g_uvs_plane_lod6[4] = {
 
 static const uint16_t g_indices_plane_lod6[6] = {
   0u,
-  1u,
-  2u,
   2u,
   1u,
+  1u,
+  2u,
   3u,
 };
 

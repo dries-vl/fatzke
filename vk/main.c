@@ -89,6 +89,7 @@ enum {
 #include "vk_machine.h"
 #include "vk_swapchain.h"
 #include "helper.h"
+#include "mesh.h"
 
 #pragma region HELPER
 void create_buffer_and_memory(VkDevice device, VkPhysicalDevice phys,
@@ -385,7 +386,7 @@ int main(void) {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
         .polygonMode = VK_POLYGON_MODE_FILL,
         .cullMode    = VK_CULL_MODE_BACK_BIT, // line for wireframe
-        .frontFace   = VK_FRONT_FACE_CLOCKWISE,
+        .frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE,
         .lineWidth   = 1.0f
     };
     VkPipelineMultisampleStateCreateInfo multisample = {
@@ -432,87 +433,152 @@ int main(void) {
     vkDestroyShaderModule(machine.device, shader_module,  NULL);
 
     #pragma region BUFFERS
-    #include "mesh.h"
-    #include "plane_lod0.h"
-    #include "plane_lod1.h"
     #include "plane_lod2.h"
     #include "plane_lod3.h"
     #include "plane_lod4.h"
     #include "plane_lod5.h"
     #include "plane_lod6.h"
-    #define MESH_COUNT 14
 
-    struct gpu_chunk { uint32_t x,y; };
-    struct gpu_instance { uint32_t xy_dm; uint32_t z_cs; };
-    struct mesh_info {
-        u32 vertex_count, index_count, chunk_count;
-        const struct gpu_chunk *chunks;
-        const struct gpu_instance *instances; // count is 64 x chunks
-        const u16 *indices;
-        const u32 *positions, *normals, *uvs;
+    struct VakfView lod0;
+    if (!vakf_view_init_from_memory(LOD_0, LOD_0_len, &lod0)) {
+        printf("Failed to load LOD0 vakf mesh\n");
+    }
+    struct VakfView head0;
+    if (!vakf_view_init_from_memory(HEAD_0, HEAD_0_len, &head0)) {
+        printf("Failed to load HEAD0 vakf mesh\n");
+    }
+
+    enum meshes {
+        MESH_NONE = -1,
+        MESH_PLANE = 0,
+        MESH_BODY = 1,
+        MESH_HEAD = 2,
+        MESH_TYPE_COUNT
     };
-    #include "plane_instances.h"
+    #define LOD_LEVELS 5
+    #define TOTAL_MESH_COUNT (MESH_TYPE_COUNT * LOD_LEVELS)
+    struct mesh_data {
+        u32 vertex_count, index_count;
+        const u16 *indices;
+        const u32 *vertices, *normals, *uvs;
+    } meshes[MESH_TYPE_COUNT][LOD_LEVELS] = {
+        [MESH_PLANE] = {
+            {g_vertex_count_plane_lod6, g_index_count_plane_lod6, g_indices_plane_lod6, g_positions_plane_lod6,NULL,NULL},
+            {g_vertex_count_plane_lod5, g_index_count_plane_lod5, g_indices_plane_lod5, g_positions_plane_lod5,NULL,NULL},
+            {g_vertex_count_plane_lod4, g_index_count_plane_lod4, g_indices_plane_lod4, g_positions_plane_lod4,NULL,NULL},
+            {g_vertex_count_plane_lod3, g_index_count_plane_lod3, g_indices_plane_lod3, g_positions_plane_lod3,NULL,NULL},
+            {g_vertex_count_plane_lod2, g_index_count_plane_lod2, g_indices_plane_lod2, g_positions_plane_lod2,NULL,NULL},
+        },
+        [MESH_BODY] = {
+            {lod0.hdr->num_vertices,    lod0.hdr->num_indices,   lod0.indices, lod0.frame_data, lod0.frame_data, lod0.uvs},
+            {lod0.hdr->num_vertices,    lod0.hdr->num_indices,   lod0.indices, lod0.frame_data, lod0.frame_data, lod0.uvs},
+            {lod0.hdr->num_vertices,    lod0.hdr->num_indices,   lod0.indices, lod0.frame_data, lod0.frame_data, lod0.uvs},
+            {lod0.hdr->num_vertices,    lod0.hdr->num_indices,   lod0.indices, lod0.frame_data, lod0.frame_data, lod0.uvs},
+            {lod0.hdr->num_vertices,    lod0.hdr->num_indices,   lod0.indices, lod0.frame_data, lod0.frame_data, lod0.uvs},
+        },
+        [MESH_HEAD] = {
+            {head0.hdr->num_vertices,   head0.hdr->num_indices, head0.indices, head0.frame_data, head0.frame_data, head0.uvs},
+            {head0.hdr->num_vertices,   head0.hdr->num_indices, head0.indices, head0.frame_data, head0.frame_data, head0.uvs},
+            {head0.hdr->num_vertices,   head0.hdr->num_indices, head0.indices, head0.frame_data, head0.frame_data, head0.uvs},
+            {head0.hdr->num_vertices,   head0.hdr->num_indices, head0.indices, head0.frame_data, head0.frame_data, head0.uvs},
+            {head0.hdr->num_vertices,   head0.hdr->num_indices, head0.indices, head0.frame_data, head0.frame_data, head0.uvs},
+        },
+    };
 
+    enum object_type {
+        OBJECT_TYPE_PLANE = 0,
+        OBJECT_TYPE_UNIT  = 1,
+        OBJECT_TYPE_COUNT
+    };
+    #define OBJECTS_PER_CHUNK 64
+    struct gpu_chunk { uint32_t x,y; };
+    struct gpu_object { uint16_t x,y,z; uint8_t cos,sin; };
     static struct gpu_chunk plane_chunks[6400] = {0};
-    static struct gpu_instance plane_inst[6400 * 64];
-    static struct gpu_chunk mesh_chunk = {0};
-    static struct gpu_instance mesh_inst[64];
-    // steps of 1dm, we want i to move 1 meter for each, and form a square of instances 1 meter apart
-    for (int i = 0; i < 64; ++i) {
-        mesh_inst[i].xy_dm = ((uint16_t)((15)) << 16 | ((uint16_t)(i % 8) * 20));
+    static struct gpu_object plane_objects[6400 * OBJECTS_PER_CHUNK];
+    static enum meshes plane_meshes[] = { MESH_PLANE };
+    static enum meshes unit_meshes[]  = { MESH_BODY, MESH_HEAD };
+    static struct gpu_chunk units_chunk = {0};
+    static struct gpu_object unit_objects[OBJECTS_PER_CHUNK];
+    // move the unit objects to a square grid for now
+    for (int i = 0; i < OBJECTS_PER_CHUNK; ++i) {
+        unit_objects[i].x = (uint16_t)(i % 8) * 10;
+        unit_objects[i].y = (uint16_t)((0)) << 16;
+        unit_objects[i].z = (uint16_t)((i / 8) * 10);
         {
             float yaw = 0.0f;
-            mesh_inst[i].z_cs = ((uint16_t)((i / 8) * 20))
-                | (((uint8_t)lrintf(cosf(yaw) * 127.0f)) << 16)
-                | (((uint8_t)lrintf(sinf(yaw) * 127.0f)) << 24);
+            unit_objects[i].cos = (((uint8_t)lrintf(cosf(yaw) * 127.0f)));
+            unit_objects[i].sin = (((uint8_t)lrintf(sinf(yaw) * 127.0f)));
         }
     }
-    const struct mesh_info meshes[MESH_COUNT] = {
-        {g_vertex_count_plane_lod6, g_index_count_plane_lod6, 6400, &plane_chunks, &plane_inst, g_indices_plane_lod6, NULL,NULL,NULL},
-        {g_vertex_count_plane_lod5, g_index_count_plane_lod5, 0, NULL, NULL, g_indices_plane_lod5, NULL,NULL,NULL},
-        {g_vertex_count_plane_lod4, g_index_count_plane_lod4, 0, NULL, NULL, g_indices_plane_lod4, NULL,NULL,NULL},
-        {g_vertex_count_plane_lod3, g_index_count_plane_lod3, 0, NULL, NULL, g_indices_plane_lod3, NULL,NULL,NULL},
-        {g_vertex_count_plane_lod2, g_index_count_plane_lod2, 0, NULL, NULL, g_indices_plane_lod2, NULL,NULL,NULL},
-        {g_vertex_count_plane_lod1, g_index_count_plane_lod1, 0, NULL, NULL, g_indices_plane_lod1, NULL,NULL,NULL},
-        {g_vertex_count_plane_lod0, g_index_count_plane_lod0, 0, NULL, NULL, g_indices_plane_lod0, NULL,NULL,NULL},
-        {g_vertex_count_mesh,       g_index_count_mesh,       1, &mesh_chunk, &mesh_inst,  g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
-        {g_vertex_count_mesh,       g_index_count_mesh,       0, NULL, NULL,      g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
-        {g_vertex_count_mesh,       g_index_count_mesh,       0, NULL, NULL,      g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
-        {g_vertex_count_mesh,       g_index_count_mesh,       0, NULL, NULL,      g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
-        {g_vertex_count_mesh,       g_index_count_mesh,       0, NULL, NULL,      g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
-        {g_vertex_count_mesh,       g_index_count_mesh,       0, NULL, NULL,      g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh},
-        {g_vertex_count_mesh,       g_index_count_mesh,       0, NULL, NULL,      g_indices_mesh,       g_positions_mesh, g_normals_mesh, g_uvs_mesh}
+    struct object_data {
+        enum object_type type;
+        u32 mesh_count;
+        enum meshes *meshes;
+        u32 chunk_count;
+        const struct gpu_chunk *chunks;
+        const struct gpu_object *objects; // count is 64 x chunks
+        u32 first_chunk; // index in gpu chunks buffer
+    } objects[OBJECT_TYPE_COUNT] = {
+        [OBJECT_TYPE_PLANE] = {
+            .type        = OBJECT_TYPE_PLANE,
+            .mesh_count = 1,
+            .meshes   = plane_meshes,
+            .chunk_count = 6400,
+            .chunks      = plane_chunks,
+            .objects     = plane_objects,
+        },
+        [OBJECT_TYPE_UNIT] = {
+            .type        = OBJECT_TYPE_UNIT,
+            .mesh_count = 2,
+            .meshes = unit_meshes,
+            .chunk_count = 1,
+            .chunks      = &units_chunk,
+            .objects     = unit_objects,
+        },
     };
 
     u32 total_vertex_count = 0;
     u32 total_index_count = 0;
+    struct VkDrawIndexedIndirectCommand mesh_info[TOTAL_MESH_COUNT];
+    for (u32 m = 0; m < MESH_TYPE_COUNT; ++m) {
+        for (u32 lod = 0; lod < LOD_LEVELS; ++lod) {
+            u32 i = m * LOD_LEVELS + lod;
+            mesh_info[i].firstIndex   = total_index_count;
+            mesh_info[i].vertexOffset = total_vertex_count;
+            mesh_info[i].indexCount   = meshes[m][lod].index_count;
+            total_vertex_count += meshes[m][lod].vertex_count;
+            total_index_count  += meshes[m][lod].index_count;
+        }
+    }
+
     u32 total_chunk_count = 0;
+    u32 total_object_count = 0;
     u32 total_instance_count = 0;
-    struct VkDrawIndexedIndirectCommand mesh_info[MESH_COUNT];
-    for (u32 i = 0; i < MESH_COUNT; ++i) {
-        mesh_info[i].firstIndex    = total_index_count;
-        mesh_info[i].vertexOffset  = total_vertex_count;
-        mesh_info[i].indexCount    = meshes[i].index_count;
-        mesh_info[i].firstInstance = total_instance_count;
-        mesh_info[i].instanceCount = meshes[i].chunk_count * 64;
-        total_vertex_count   += meshes[i].vertex_count;
-        total_index_count    += meshes[i].index_count;
-        total_instance_count += meshes[i].chunk_count * 64;
-        total_chunk_count += meshes[i].chunk_count;
+    for (u32 i = 0; i < OBJECT_TYPE_COUNT; ++i) {
+        for (u32 m = 0; m < objects[i].mesh_count; ++m) {
+            // only base lod gets the objects counted
+            u32 mesh_index = objects[i].meshes[m] * LOD_LEVELS; // times lod levels to get actual index including lods
+            mesh_info[mesh_index].instanceCount = objects[i].chunk_count * OBJECTS_PER_CHUNK;
+            mesh_info[mesh_index].firstInstance = total_instance_count;
+            total_instance_count += objects[i].chunk_count * OBJECTS_PER_CHUNK; // one instance per mesh attached to object
+        }
+        objects[i].first_chunk = total_chunk_count;
+        total_object_count += objects[i].chunk_count * OBJECTS_PER_CHUNK;
+        total_chunk_count += objects[i].chunk_count;
     }
 
     VkDeviceSize size_visible_chunk_ids = total_chunk_count * sizeof(uint32_t);
     VkDeviceSize size_indirect_workgroups = 3 * sizeof(uint32_t);
     VkDeviceSize size_visible_object_count = 3 * sizeof(uint32_t);
-    VkDeviceSize size_count_per_mesh = MESH_COUNT * sizeof(uint32_t);
-    VkDeviceSize size_offset_per_mesh = MESH_COUNT * sizeof(uint32_t);
-    VkDeviceSize size_visible_ids = total_instance_count * sizeof(uint32_t);
+    VkDeviceSize size_count_per_mesh = TOTAL_MESH_COUNT * sizeof(uint32_t);
+    VkDeviceSize size_offset_per_mesh = TOTAL_MESH_COUNT * sizeof(uint32_t);
+    VkDeviceSize size_visible_ids = total_object_count * sizeof(uint32_t);
     VkDeviceSize size_rendered_instances   = total_instance_count * sizeof(uint32_t) * 4;
-    VkDeviceSize size_draw_calls  = MESH_COUNT * sizeof(VkDrawIndexedIndirectCommand);
+    VkDeviceSize size_draw_calls  = TOTAL_MESH_COUNT * sizeof(VkDrawIndexedIndirectCommand);
     
     VkDeviceSize size_chunks = total_chunk_count * sizeof(uint64_t);
-    VkDeviceSize size_objects = total_instance_count * sizeof(uint64_t);
-    VkDeviceSize size_mesh_info = MESH_COUNT * sizeof(VkDrawIndexedIndirectCommand);
+    VkDeviceSize size_objects = total_object_count * sizeof(uint64_t);
+    VkDeviceSize size_mesh_info = TOTAL_MESH_COUNT * sizeof(VkDrawIndexedIndirectCommand);
     VkDeviceSize size_positions = total_vertex_count * sizeof(uint32_t);
     VkDeviceSize size_normals   = total_vertex_count * sizeof(uint32_t);
     VkDeviceSize size_uvs       = total_vertex_count * sizeof(uint32_t);
@@ -611,91 +677,96 @@ int main(void) {
     pf_timestamp("Buffers created");
 
     // upload the data per mesh (later, when data is huge, batch into one big command to upload everything)
-    for (u32 i = 0; i < MESH_COUNT; ++i) {
-        // Vertex attributes
-        if (meshes[i].positions) {
-            VkDeviceSize bytes = meshes[i].vertex_count * sizeof(uint32_t);
-            VkDeviceSize dstOfs = (VkDeviceSize)mesh_info[i].vertexOffset * sizeof(uint32_t);
-            // Create a temp staging and copy into the already-created DEVICE_LOCAL buffer at dstOfs
-            // Reuse the helper by creating a temp device-local “alias” of same buffer & memory? Simpler: a small inline staging+copy:
-            {
+    for (u32 m = 0; m < MESH_TYPE_COUNT; ++m) {
+        for (u32 lod = 0; lod < LOD_LEVELS; ++lod) {
+            u32 i = m * LOD_LEVELS + lod;
+            // Vertex attributes
+            if (meshes[m][lod].vertices) {
+                VkDeviceSize bytes = meshes[m][lod].vertex_count * sizeof(uint32_t);
+                VkDeviceSize dstOfs = (VkDeviceSize)mesh_info[i].vertexOffset * sizeof(uint32_t);
+                // Create a temp staging and copy into the already-created DEVICE_LOCAL buffer at dstOfs
+                // Reuse the helper by creating a temp device-local “alias” of same buffer & memory? Simpler: a small inline staging+copy:
+                {
+                    VkBuffer staging; VkDeviceMemory staging_mem;
+                    create_buffer_and_memory(machine.device, machine.physical_device, bytes,
+                        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                        &staging, &staging_mem);
+                    upload_to_buffer(machine.device, staging_mem, 0, meshes[m][lod].vertices, (size_t)bytes);
+                    VkCommandBuffer cmd = begin_single_use_cmd(machine.device, upload_pool);
+                    VkBufferCopy c = { .srcOffset = 0, .dstOffset = dstOfs, .size = bytes };
+                    vkCmdCopyBuffer(cmd, staging, renderer.buffer_positions, 1, &c);
+                    end_single_use_cmd(machine.device, machine.queue_graphics, upload_pool, cmd);
+                    vkDestroyBuffer(machine.device, staging, NULL);
+                    vkFreeMemory(machine.device, staging_mem, NULL);
+                }
+            }
+            if (meshes[m][lod].normals) {
+                VkDeviceSize bytes = meshes[m][lod].vertex_count * sizeof(uint32_t);
+                VkDeviceSize dstOfs = (VkDeviceSize)mesh_info[i].vertexOffset * sizeof(uint32_t);
                 VkBuffer staging; VkDeviceMemory staging_mem;
                 create_buffer_and_memory(machine.device, machine.physical_device, bytes,
                     VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                     &staging, &staging_mem);
-                upload_to_buffer(machine.device, staging_mem, 0, meshes[i].positions, (size_t)bytes);
+                upload_to_buffer(machine.device, staging_mem, 0, meshes[m][lod].normals, (size_t)bytes);
                 VkCommandBuffer cmd = begin_single_use_cmd(machine.device, upload_pool);
                 VkBufferCopy c = { .srcOffset = 0, .dstOffset = dstOfs, .size = bytes };
-                vkCmdCopyBuffer(cmd, staging, renderer.buffer_positions, 1, &c);
+                vkCmdCopyBuffer(cmd, staging, renderer.buffer_normals, 1, &c);
+                end_single_use_cmd(machine.device, machine.queue_graphics, upload_pool, cmd);
+                vkDestroyBuffer(machine.device, staging, NULL);
+                vkFreeMemory(machine.device, staging_mem, NULL);
+            }
+            if (meshes[m][lod].uvs) {
+                VkDeviceSize bytes = meshes[m][lod].vertex_count * sizeof(uint32_t);
+                VkDeviceSize dstOfs = (VkDeviceSize)mesh_info[i].vertexOffset * sizeof(uint32_t);
+                VkBuffer staging; VkDeviceMemory staging_mem;
+                create_buffer_and_memory(machine.device, machine.physical_device, bytes,
+                    VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                    &staging, &staging_mem);
+                upload_to_buffer(machine.device, staging_mem, 0, meshes[m][lod].uvs, (size_t)bytes);
+                VkCommandBuffer cmd = begin_single_use_cmd(machine.device, upload_pool);
+                VkBufferCopy c = { .srcOffset = 0, .dstOffset = dstOfs, .size = bytes };
+                vkCmdCopyBuffer(cmd, staging, renderer.buffer_uvs, 1, &c);
+                end_single_use_cmd(machine.device, machine.queue_graphics, upload_pool, cmd);
+                vkDestroyBuffer(machine.device, staging, NULL);
+                vkFreeMemory(machine.device, staging_mem, NULL);
+            }
+
+            // Indices
+            {
+                VkDeviceSize bytes = meshes[m][lod].index_count * sizeof(uint16_t);
+                VkDeviceSize dstOfs = (VkDeviceSize)mesh_info[i].firstIndex * sizeof(uint16_t);
+                VkBuffer staging; VkDeviceMemory staging_mem;
+                create_buffer_and_memory(machine.device, machine.physical_device, bytes,
+                    VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                    &staging, &staging_mem);
+                upload_to_buffer(machine.device, staging_mem, 0, meshes[m][lod].indices, (size_t)bytes);
+                VkCommandBuffer cmd = begin_single_use_cmd(machine.device, upload_pool);
+                VkBufferCopy c = { .srcOffset = 0, .dstOffset = dstOfs, .size = bytes };
+                vkCmdCopyBuffer(cmd, staging, renderer.buffer_index_ib, 1, &c);
                 end_single_use_cmd(machine.device, machine.queue_graphics, upload_pool, cmd);
                 vkDestroyBuffer(machine.device, staging, NULL);
                 vkFreeMemory(machine.device, staging_mem, NULL);
             }
         }
-        if (meshes[i].normals) {
-            VkDeviceSize bytes = meshes[i].vertex_count * sizeof(uint32_t);
-            VkDeviceSize dstOfs = (VkDeviceSize)mesh_info[i].vertexOffset * sizeof(uint32_t);
-            VkBuffer staging; VkDeviceMemory staging_mem;
-            create_buffer_and_memory(machine.device, machine.physical_device, bytes,
-                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                &staging, &staging_mem);
-            upload_to_buffer(machine.device, staging_mem, 0, meshes[i].normals, (size_t)bytes);
-            VkCommandBuffer cmd = begin_single_use_cmd(machine.device, upload_pool);
-            VkBufferCopy c = { .srcOffset = 0, .dstOffset = dstOfs, .size = bytes };
-            vkCmdCopyBuffer(cmd, staging, renderer.buffer_normals, 1, &c);
-            end_single_use_cmd(machine.device, machine.queue_graphics, upload_pool, cmd);
-            vkDestroyBuffer(machine.device, staging, NULL);
-            vkFreeMemory(machine.device, staging_mem, NULL);
-        }
-        if (meshes[i].uvs) {
-            VkDeviceSize bytes = meshes[i].vertex_count * sizeof(uint32_t);
-            VkDeviceSize dstOfs = (VkDeviceSize)mesh_info[i].vertexOffset * sizeof(uint32_t);
-            VkBuffer staging; VkDeviceMemory staging_mem;
-            create_buffer_and_memory(machine.device, machine.physical_device, bytes,
-                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                &staging, &staging_mem);
-            upload_to_buffer(machine.device, staging_mem, 0, meshes[i].uvs, (size_t)bytes);
-            VkCommandBuffer cmd = begin_single_use_cmd(machine.device, upload_pool);
-            VkBufferCopy c = { .srcOffset = 0, .dstOffset = dstOfs, .size = bytes };
-            vkCmdCopyBuffer(cmd, staging, renderer.buffer_uvs, 1, &c);
-            end_single_use_cmd(machine.device, machine.queue_graphics, upload_pool, cmd);
-            vkDestroyBuffer(machine.device, staging, NULL);
-            vkFreeMemory(machine.device, staging_mem, NULL);
-        }
+    }
 
-        // Indices
-        {
-            VkDeviceSize bytes = meshes[i].index_count * sizeof(uint16_t);
-            VkDeviceSize dstOfs = (VkDeviceSize)mesh_info[i].firstIndex * sizeof(uint16_t);
-            VkBuffer staging; VkDeviceMemory staging_mem;
-            create_buffer_and_memory(machine.device, machine.physical_device, bytes,
-                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                &staging, &staging_mem);
-            upload_to_buffer(machine.device, staging_mem, 0, meshes[i].indices, (size_t)bytes);
-            VkCommandBuffer cmd = begin_single_use_cmd(machine.device, upload_pool);
-            VkBufferCopy c = { .srcOffset = 0, .dstOffset = dstOfs, .size = bytes };
-            vkCmdCopyBuffer(cmd, staging, renderer.buffer_index_ib, 1, &c);
-            end_single_use_cmd(machine.device, machine.queue_graphics, upload_pool, cmd);
-            vkDestroyBuffer(machine.device, staging, NULL);
-            vkFreeMemory(machine.device, staging_mem, NULL);
-        }
-
+    for (u32 i = 0; i < OBJECT_TYPE_COUNT; ++i) {
         // instances
-        if (meshes[i].chunk_count > 0) {
+        if (objects[i].chunk_count > 0) {
             // chunks
             {
-                VkDeviceSize bytes = meshes[i].chunk_count * sizeof(struct gpu_chunk);
-                VkDeviceSize dstOfs = (VkDeviceSize)mesh_info[i].firstInstance / 64 * sizeof(struct gpu_chunk);
+                VkDeviceSize bytes = objects[i].chunk_count * sizeof(struct gpu_chunk);
+                VkDeviceSize dstOfs = (VkDeviceSize)objects[i].first_chunk * sizeof(struct gpu_chunk);
                 VkBuffer staging; VkDeviceMemory staging_mem;
                 create_buffer_and_memory(machine.device, machine.physical_device, bytes,
                     VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                     &staging, &staging_mem);
-                upload_to_buffer(machine.device, staging_mem, 0, meshes[i].chunks, (size_t)bytes);
+                upload_to_buffer(machine.device, staging_mem, 0, objects[i].chunks, (size_t)bytes);
                 VkCommandBuffer cmd = begin_single_use_cmd(machine.device, upload_pool);
                 VkBufferCopy c = { .srcOffset = 0, .dstOffset = dstOfs, .size = bytes };
                 vkCmdCopyBuffer(cmd, staging, renderer.buffer_chunks, 1, &c);
@@ -704,16 +775,16 @@ int main(void) {
                 vkFreeMemory(machine.device, staging_mem, NULL);
             }
             
-            // instances
+            // objects
             {
-                VkDeviceSize bytes = meshes[i].chunk_count * 64 * sizeof(struct gpu_instance);
-                VkDeviceSize dstOfs = (VkDeviceSize)mesh_info[i].firstInstance * sizeof(struct gpu_instance);
+                VkDeviceSize bytes = objects[i].chunk_count * OBJECTS_PER_CHUNK * sizeof(struct gpu_object);
+                VkDeviceSize dstOfs = (VkDeviceSize)objects[i].first_chunk * OBJECTS_PER_CHUNK * sizeof(struct gpu_object);
                 VkBuffer staging; VkDeviceMemory staging_mem;
                 create_buffer_and_memory(machine.device, machine.physical_device, bytes,
                     VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                     &staging, &staging_mem);
-                upload_to_buffer(machine.device, staging_mem, 0, meshes[i].instances, (size_t)bytes);
+                upload_to_buffer(machine.device, staging_mem, 0, objects[i].objects, (size_t)bytes);
                 VkCommandBuffer cmd = begin_single_use_cmd(machine.device, upload_pool);
                 VkBufferCopy c = { .srcOffset = 0, .dstOffset = dstOfs, .size = bytes };
                 vkCmdCopyBuffer(cmd, staging, renderer.buffer_objects, 1, &c);
@@ -1254,7 +1325,7 @@ int main(void) {
                 renderer.common_pipeline_layout,
                 VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                 0, sizeof(uint32_t), &mode_mesh);
-            vkCmdDrawIndexedIndirect(cmd, renderer.buffer_draw_calls, 0, MESH_COUNT, sizeof(VkDrawIndexedIndirectCommand));
+            vkCmdDrawIndexedIndirect(cmd, renderer.buffer_draw_calls, 0, TOTAL_MESH_COUNT, sizeof(VkDrawIndexedIndirectCommand));
             #if DEBUG_APP == 1
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, swapchain.query_pool, q0 + Q_AFTER_RENDERPASS);
             #endif
