@@ -439,15 +439,7 @@ int main(void) {
     #include "plane_lod5.h"
     #include "plane_lod6.h"
 
-    struct VakfView lod0;
-    if (!vakf_view_init_from_memory(LOD_0, LOD_0_len, &lod0)) {
-        printf("Failed to load LOD0 vakf mesh\n");
-    }
-    struct VakfView head0;
-    if (!vakf_view_init_from_memory(HEAD_0, HEAD_0_len, &head0)) {
-        printf("Failed to load HEAD0 vakf mesh\n");
-    }
-
+    #define MAX_TOTAL_MESH_COUNT 1024
     enum meshes {
         MESH_NONE = -1,
         MESH_PLANE = 0,
@@ -455,35 +447,74 @@ int main(void) {
         MESH_HEAD = 2,
         MESH_TYPE_COUNT
     };
-    #define LOD_LEVELS 5
-    #define TOTAL_MESH_COUNT (MESH_TYPE_COUNT * LOD_LEVELS)
-    struct mesh_data {
-        u32 vertex_count, index_count;
-        const u16 *indices;
-        const u32 *vertices, *normals, *uvs;
-    } meshes[MESH_TYPE_COUNT][LOD_LEVELS] = {
+    static struct Mesh meshes[MESH_TYPE_COUNT] = { // one less for plane mesh
         [MESH_PLANE] = {
-            {g_vertex_count_plane_lod6, g_index_count_plane_lod6, g_indices_plane_lod6, g_positions_plane_lod6,NULL,NULL},
-            {g_vertex_count_plane_lod5, g_index_count_plane_lod5, g_indices_plane_lod5, g_positions_plane_lod5,NULL,NULL},
-            {g_vertex_count_plane_lod4, g_index_count_plane_lod4, g_indices_plane_lod4, g_positions_plane_lod4,NULL,NULL},
-            {g_vertex_count_plane_lod3, g_index_count_plane_lod3, g_indices_plane_lod3, g_positions_plane_lod3,NULL,NULL},
-            {g_vertex_count_plane_lod2, g_index_count_plane_lod2, g_indices_plane_lod2, g_positions_plane_lod2,NULL,NULL},
+            .num_animations = 1,
+            .lods = {
+                {
+                    .num_vertices = g_vertex_count_plane_lod2,
+                    .num_indices  = g_index_count_plane_lod2,
+                    .indices      = g_indices_plane_lod2,
+                    .uvs          = NULL,
+                    .animations = {{.num_frames = 1, .frames = {{.positions = g_positions_plane_lod2, .normals = NULL}}}}
+                },
+                {
+                    .num_vertices = g_vertex_count_plane_lod3,
+                    .num_indices  = g_index_count_plane_lod3,
+                    .indices      = g_indices_plane_lod3,
+                    .uvs          = NULL,
+                    .animations = {{.num_frames = 1, .frames = {{.positions = g_positions_plane_lod3, .normals = NULL}}}}
+                },
+                {
+                    .num_vertices = g_vertex_count_plane_lod4,
+                    .num_indices  = g_index_count_plane_lod4,
+                    .indices      = g_indices_plane_lod4,
+                    .uvs          = NULL,
+                    .animations = {{.num_frames = 1, .frames = {{.positions = g_positions_plane_lod4, .normals = NULL}}}}
+                },
+                {
+                    .num_vertices = g_vertex_count_plane_lod5,
+                    .num_indices  = g_index_count_plane_lod5,
+                    .indices      = g_indices_plane_lod5,
+                    .uvs          = NULL,
+                    .animations = {{.num_frames = 1, .frames = {{.positions = g_positions_plane_lod5, .normals = NULL}}}}
+                },
+                {
+                    .num_vertices = g_vertex_count_plane_lod6,
+                    .num_indices  = g_index_count_plane_lod6,
+                    .indices      = g_indices_plane_lod6,
+                    .uvs          = NULL,
+                    .animations = {{.num_frames = 1, .frames = {{.positions = g_positions_plane_lod6, .normals = NULL}}}}
+                },
+            }
         },
-        [MESH_BODY] = {
-            {lod0.hdr->num_vertices,    lod0.hdr->num_indices,   lod0.indices, lod0.frame_data, lod0.frame_data, lod0.uvs},
-            {lod0.hdr->num_vertices,    lod0.hdr->num_indices,   lod0.indices, lod0.frame_data, lod0.frame_data, lod0.uvs},
-            {lod0.hdr->num_vertices,    lod0.hdr->num_indices,   lod0.indices, lod0.frame_data, lod0.frame_data, lod0.uvs},
-            {lod0.hdr->num_vertices,    lod0.hdr->num_indices,   lod0.indices, lod0.frame_data, lod0.frame_data, lod0.uvs},
-            {lod0.hdr->num_vertices,    lod0.hdr->num_indices,   lod0.indices, lod0.frame_data, lod0.frame_data, lod0.uvs},
-        },
-        [MESH_HEAD] = {
-            {head0.hdr->num_vertices,   head0.hdr->num_indices, head0.indices, head0.frame_data, head0.frame_data, head0.uvs},
-            {head0.hdr->num_vertices,   head0.hdr->num_indices, head0.indices, head0.frame_data, head0.frame_data, head0.uvs},
-            {head0.hdr->num_vertices,   head0.hdr->num_indices, head0.indices, head0.frame_data, head0.frame_data, head0.uvs},
-            {head0.hdr->num_vertices,   head0.hdr->num_indices, head0.indices, head0.frame_data, head0.frame_data, head0.uvs},
-            {head0.hdr->num_vertices,   head0.hdr->num_indices, head0.indices, head0.frame_data, head0.frame_data, head0.uvs},
-        },
+        [MESH_BODY] = {0},
+        [MESH_HEAD] = {0}
     };
+    if (!load_mesh_blob(LOD, LOD_len, &meshes[MESH_BODY])) {
+        printf("Failed to load LOD mesh\n");
+    }
+    if (!load_mesh_blob(HEAD, HEAD_len, &meshes[MESH_HEAD])) {
+        printf("Failed to load HEAD mesh\n");
+    }
+    int total_mesh_count = 0;
+    for (u32 m = 0; m < MESH_TYPE_COUNT; ++m) {
+        for (u32 lod = 0; lod < LOD_LEVELS; ++lod) {
+            for (u32 a = 0; a < meshes[m].num_animations; ++a) {
+                total_mesh_count += meshes[m].lods[lod].animations[a].num_frames;
+            }
+        }
+    }
+    if (total_mesh_count > MAX_TOTAL_MESH_COUNT) {
+        printf("Too many total mesh frames: %d > %d\n", total_mesh_count, MAX_TOTAL_MESH_COUNT);
+        _exit(1);
+    } else {
+        printf("Total mesh frames: %d\n", total_mesh_count);
+    }
+
+    // todo: plane mesh in blender instead of header files; 10.24m limit avoid by using scale for object
+    // todo: gpu buffer mesh info add info for frames
+    // todo: gpu buffer with object/chunk info; which meshes it's made up of, radius, etc. to generify instances + culling
 
     enum object_type {
         OBJECT_TYPE_PLANE = 0,
@@ -539,16 +570,13 @@ int main(void) {
 
     u32 total_vertex_count = 0;
     u32 total_index_count = 0;
-    struct VkDrawIndexedIndirectCommand mesh_info[TOTAL_MESH_COUNT];
-    for (u32 m = 0; m < MESH_TYPE_COUNT; ++m) {
-        for (u32 lod = 0; lod < LOD_LEVELS; ++lod) {
-            u32 i = m * LOD_LEVELS + lod;
-            mesh_info[i].firstIndex   = total_index_count;
-            mesh_info[i].vertexOffset = total_vertex_count;
-            mesh_info[i].indexCount   = meshes[m][lod].index_count;
-            total_vertex_count += meshes[m][lod].vertex_count;
-            total_index_count  += meshes[m][lod].index_count;
-        }
+    struct VkDrawIndexedIndirectCommand mesh_info[MAX_TOTAL_MESH_COUNT];
+    for (u32 i = 0; i < total_mesh_count; ++i) {
+        mesh_info[i].firstIndex   = total_index_count;
+        mesh_info[i].vertexOffset = total_vertex_count;
+        mesh_info[i].indexCount   = meshes[m][lod].index_count;
+        total_vertex_count += meshes[m][lod].vertex_count;
+        total_index_count  += meshes[m][lod].index_count;
     }
 
     u32 total_chunk_count = 0;

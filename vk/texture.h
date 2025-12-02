@@ -149,25 +149,25 @@ struct KTX2LevelIndex{ u64 byteOffset, byteLength, uncompressedByteLength; };
 static int parse_ktx2_header_and_levels(
     const uint8_t* bytes, size_t len,
     struct KTX2Header* out_hdr,
-    struct KTX2LevelIndex* out_levels, // array sized for at least hdr.levelCount
+    struct KTX2LevelIndex* out_levels, // array sized for at least header.levelCount
     uint32_t* out_level_count) {
     if (len < sizeof(struct KTX2Header)) {
         printf("KTX2: too small for header\n");
         return 0;
     }
 
-    struct KTX2Header hdr;
-    memcpy(&hdr, bytes, sizeof(hdr));
+    struct KTX2Header header;
+    memcpy(&header, bytes, sizeof(header));
 
     static const uint8_t magic[12] = {
         0xAB, 'K','T','X',' ','2','0', 0xBB, 0x0D, 0x0A, 0x1A, 0x0A
     };
-    if (memcmp(hdr.identifier, magic, 12) != 0) {
+    if (memcmp(header.identifier, magic, 12) != 0) {
         printf("KTX2: invalid magic\n");
         return 0;
     }
 
-    uint32_t levelCount = hdr.levelCount;
+    uint32_t levelCount = header.levelCount;
     if (levelCount == 0) levelCount = 1; // per spec 0 means 1 level
 
     size_t levelsBytes = (size_t)levelCount * sizeof(struct KTX2LevelIndex);
@@ -179,7 +179,7 @@ static int parse_ktx2_header_and_levels(
 
     memcpy(out_levels, bytes + levelsOffset, levelsBytes);
 
-    *out_hdr = hdr;
+    *out_hdr = header;
     *out_level_count = levelCount;
     return 1;
 }
@@ -190,23 +190,23 @@ int create_texture_from_ktx2_astc(
     const uint8_t* bytes, size_t len,
     Texture* out_tex)
 {
-    struct KTX2Header hdr;
+    struct KTX2Header header;
     struct KTX2LevelIndex levels[32];   // enough for typical mips; grow if needed
     uint32_t levelCount = 0;
-    if (!parse_ktx2_header_and_levels(bytes, len, &hdr, levels, &levelCount)) {
+    if (!parse_ktx2_header_and_levels(bytes, len, &header, levels, &levelCount)) {
         printf("Failed to parse KTX2 header\n");
         return 0;
     }
 
     // Expect ASTC 12x12 sRGB; KTX2 stores actual VkFormat value
-    VkFormat format = (VkFormat)hdr.vkFormat;
+    VkFormat format = (VkFormat)header.vkFormat;
     if (format != VK_FORMAT_ASTC_12x12_SRGB_BLOCK) {
-        printf("Unexpected vkFormat in KTX2: %u\n", hdr.vkFormat);
+        printf("Unexpected vkFormat in KTX2: %u\n", header.vkFormat);
         // you can still continue if you want
     }
 
-    uint32_t w = hdr.pixelWidth;
-    uint32_t h = hdr.pixelHeight;
+    uint32_t w = header.pixelWidth;
+    uint32_t h = header.pixelHeight;
 
     // Determine contiguous pixel-data range [first, last)
     uint64_t first = UINT64_MAX;

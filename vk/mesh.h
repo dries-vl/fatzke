@@ -1,115 +1,167 @@
 #pragma once
-#include <stdint.h>
-#include <stddef.h>
-#include <string.h>
-#include <assert.h>
+#include "header.h"
 
-extern const unsigned char LOD_0[];
-extern const unsigned char LOD_0_end[];
-#define LOD_0_len ((size_t)(LOD_0_end - LOD_0))
+extern const unsigned char LOD[];
+extern const unsigned char LOD_end[];
+#define LOD_len ((size_t)(LOD_end - LOD))
 
-extern const unsigned char HEAD_0[];
-extern const unsigned char HEAD_0_end[];
-#define HEAD_0_len ((size_t)(HEAD_0_end - HEAD_0))
+extern const unsigned char HEAD[];
+extern const unsigned char HEAD_end[];
+#define HEAD_len ((size_t)(HEAD_end - HEAD))
 
-struct VakfHeader
-{
-    char magic[4];    // "VAKF"
-    uint32_t version; // 2
-    uint32_t num_frames;
-    uint32_t num_vertices;
-    uint32_t num_indices;
+#define LOD_LEVELS      5
+#define MAX_ANIMATIONS  16
+#define MAX_FRAMES      16
+
+// todo: every animation frame is conceptually a different mesh like how the lod is a different mesh
+// -> base mesh (#lod) -> lod level (#animation) -> animation (#frame) -> frame within animation
+struct MeshFrame {
+    const uint32_t *positions;  // [num_vertices]
+    const uint32_t *normals;    // [num_vertices]
 };
 
-struct VakfView
-{
-    const struct VakfHeader *hdr;
-
-    const uint16_t *indices;       // num_indices
-    const uint32_t *frame_numbers; // num_frames
-    const float *bbox_min;         // 3 floats
-    const float *bbox_max;         // 3 floats
-    const uint32_t *uvs;           // num_vertices (packed 16-16 UNORM)
-
-    // Frame data is laid out as:
-    //  [Frame0 positions][Frame0 normals][Frame1 positions][Frame1 normals]...
-    // each of those arrays is num_vertices uint32.
-    const uint32_t *frame_data; // start of frame 0 positions
+struct MeshAnimation {
+    uint32_t num_frames;                      // <= MAX_FRAMES
+    struct MeshFrame frames[MAX_FRAMES];
 };
 
-int vakf_view_init_from_memory(const void *data, size_t size, struct VakfView *out)
-{
+struct MeshLod{
+    uint32_t       num_vertices;
+    uint32_t       num_indices;
+    const uint16_t *indices;                        // [num_indices]
+    const uint32_t *uvs;                            // [num_vertices]
+    struct MeshAnimation animations[MAX_ANIMATIONS];
+};
+
+struct Mesh {
+    const float    *bbox_min;                       // [3] (X,Z,Y)
+    const float    *bbox_max;                       // [3] (X,Z,Y)
+    const float    *radius;                         // [1]
+    uint32_t       num_animations;                  // <= MAX_ANIMATIONS
+    struct MeshLod lods[LOD_LEVELS];
+};
+
+static int load_mesh_blob(const void *data, size_t size, struct Mesh *mesh) {
+    if (!data || !mesh) return 0;
+
     const uint8_t *ptr = (const uint8_t *)data;
     const uint8_t *end = ptr + size;
 
-    if (size < sizeof(struct VakfHeader))
-        return 0;
-
-    const struct VakfHeader *hdr = (const struct VakfHeader *)ptr;
-    if (memcmp(hdr->magic, "VAKF", 4) != 0)
-        return 0;
-    if (hdr->version != 2)
-        return 0;
-
-    ptr += sizeof(struct VakfHeader);
-
-    uint32_t num_frames = hdr->num_frames;
-    uint32_t num_vertices = hdr->num_vertices;
-    uint32_t num_indices = hdr->num_indices;
-
-// Bounds checking helper
 #define NEED(bytes)                                \
-    do                                             \
-    {                                              \
+    do {                                           \
         if ((size_t)(end - ptr) < (size_t)(bytes)) \
             return 0;                              \
     } while (0)
 
-    // indices (uint16)
-    NEED(num_indices * sizeof(uint16_t));
-    const uint16_t *indices = (const uint16_t *)ptr;
-    ptr += num_indices * sizeof(uint16_t);
+    // -----------------------------
+    // 1. Header: "VAML", version, num_lods
+    // -----------------------------
+    NEED(4 + 4 + 4);
+    const char *magic = (const char *)ptr;
+    if (magic[0] != 'V' || magic[1] != 'A' || magic[2] != 'M' || magic[3] != 'L')
+        return 0;
+    ptr += 4;
 
-    // frame numbers (uint32)
-    NEED(num_frames * sizeof(uint32_t));
-    const uint32_t *frame_numbers = (const uint32_t *)ptr;
-    ptr += num_frames * sizeof(uint32_t);
+    uint32_t version  = *(const uint32_t *)ptr; ptr += 4;
+    uint32_t num_lods = *(const uint32_t *)ptr; ptr += 4;
 
-    // bbox_min (3 floats)
-    NEED(3 * sizeof(float));
-    const float *bbox_min = (const float *)ptr;
-    ptr += 3 * sizeof(float);
+    if (version != 1)            return 0;
+    if (num_lods != LOD_LEVELS) return 0;
 
-    // bbox_max (3 floats)
-    NEED(3 * sizeof(float));
-    const float *bbox_max = (const float *)ptr;
-    ptr += 3 * sizeof(float);
+    // -----------------------------
+    // 2. Metadata: per LOD, per anim frame counts
+    // -----------------------------
+    uint32_t frame_counts[LOD_LEVELS][MAX_ANIMATIONS] = {0};
 
-    // uvs (uint32, one per vertex)
-    NEED(num_vertices * sizeof(uint32_t));
-    const uint32_t *uvs = (const uint32_t *)ptr;
-    ptr += num_vertices * sizeof(uint32_t);
+    for (uint32_t lo = 0; lo < LOD_LEVELS; ++lo)
+    {
+        NEED(3 * sizeof(uint32_t));
 
-    // frame data: for each frame: positions[num_vertices] + normals[num_vertices]
-    size_t per_frame_count = (size_t)num_vertices * 2u;    // pos + nrm
-    size_t total_frame_u32 = per_frame_count * num_frames; // in uint32 units
+        struct MeshLod *lod = &mesh->lods[lo];
 
-    NEED(total_frame_u32 * sizeof(uint32_t));
-    const uint32_t *frame_data = (const uint32_t *)ptr;
-    ptr += total_frame_u32 * sizeof(uint32_t);
+        lod->num_vertices   = *(const uint32_t *)ptr; ptr += 4;
+        lod->num_indices    = *(const uint32_t *)ptr; ptr += 4;
+        mesh->num_animations = *(const uint32_t *)ptr; ptr += 4;
 
-    // optional: check we exactly consumed the blob
-    // assert(ptr == end);
+        if (mesh->num_animations > MAX_ANIMATIONS)
+            return 0;
+
+        NEED(mesh->num_animations * sizeof(uint32_t));
+        for (uint32_t ai = 0; ai < mesh->num_animations; ++ai)
+        {
+            uint32_t nf = *(const uint32_t *)ptr;
+            ptr += 4;
+
+            if (nf > MAX_FRAMES)
+                return 0;
+
+            frame_counts[lo][ai] = nf;
+        }
+    }
+
+    // -----------------------------
+    // 3. Body: per LOD
+    // -----------------------------
+    for (uint32_t lo = 0; lo < LOD_LEVELS; ++lo)
+    {
+        struct MeshLod *lod = &mesh->lods[lo];
+
+        uint32_t nv = lod->num_vertices;
+        uint32_t ni = lod->num_indices;
+        uint32_t na = mesh->num_animations;
+
+        // Indices
+        NEED((size_t)ni * sizeof(uint16_t));
+        lod->indices = (const uint16_t *)ptr;
+        ptr += (size_t)ni * sizeof(uint16_t);
+
+        // UVs
+        NEED((size_t)nv * sizeof(uint32_t));
+        lod->uvs = (const uint32_t *)ptr;
+        ptr += (size_t)nv * sizeof(uint32_t);
+
+        // Per-LOD bbox + radius
+        NEED(3 * sizeof(float));
+        mesh->bbox_min = (const float *)ptr;
+        ptr += 3 * sizeof(float);
+
+        NEED(3 * sizeof(float));
+        mesh->bbox_max = (const float *)ptr;
+        ptr += 3 * sizeof(float);
+
+        NEED(sizeof(float));
+        mesh->radius = (const float *)ptr;
+        ptr += sizeof(float);
+
+        // Animations
+        for (uint32_t ai = 0; ai < na; ++ai)
+        {
+            struct MeshAnimation *anim = &lod->animations[ai];
+            uint32_t nf = frame_counts[lo][ai];
+            anim->num_frames = nf;
+
+            // Skip frame_numbers[num_frames] (we don't store them)
+            NEED((size_t)nf * sizeof(uint32_t));
+            ptr += (size_t)nf * sizeof(uint32_t);
+
+            // For each frame: positions[nv], normals[nv]
+            for (uint32_t fi = 0; fi < nf; ++fi)
+            {
+                struct MeshFrame *frame = &anim->frames[fi];
+
+                // positions
+                NEED((size_t)nv * sizeof(uint32_t));
+                frame->positions = (const uint32_t *)ptr;
+                ptr += (size_t)nv * sizeof(uint32_t);
+
+                // normals
+                NEED((size_t)nv * sizeof(uint32_t));
+                frame->normals = (const uint32_t *)ptr;
+                ptr += (size_t)nv * sizeof(uint32_t);
+            }
+        }
+    }
 
 #undef NEED
-
-    out->hdr = hdr;
-    out->indices = indices;
-    out->frame_numbers = frame_numbers;
-    out->bbox_min = bbox_min;
-    out->bbox_max = bbox_max;
-    out->uvs = uvs;
-    out->frame_data = frame_data;
-
     return 1;
 }
