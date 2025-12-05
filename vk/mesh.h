@@ -9,9 +9,10 @@ extern const unsigned char HEAD[];
 extern const unsigned char HEAD_end[];
 #define HEAD_len ((size_t)(HEAD_end - HEAD))
 
-#define LOD_LEVELS      5  // hardcoded five to have easy offsets in shader code
-#define MAX_ANIMATIONS  8  // 
-#define MAX_FRAMES      4  // hardcoded four to have easy offsets in shader code
+#define PLANE_MESHES     5
+#define LOD_LEVELS       5  // hardcoded to have easy offsets in shader code
+#define MAX_ANIMATIONS   8  // not hardcoded
+#define ANIMATION_FRAMES 4  // hardcoded to have easy offsets in shader code
 
 // todo: every animation frame is conceptually a different mesh like how the lod is a different mesh
 // -> base mesh (#lod) -> lod level (#animation) -> animation (#frame) -> frame within animation
@@ -21,7 +22,7 @@ struct MeshFrame {
 };
 
 struct MeshAnimation {
-    struct MeshFrame frames[MAX_FRAMES];
+    struct MeshFrame frames[ANIMATION_FRAMES];
 };
 
 struct MeshLod{
@@ -133,10 +134,10 @@ static int load_mesh_blob(const void *data, size_t size, struct Mesh *mesh) {
 
             // New format: every animation always has exactly 4 frames.
             // Skip frame_numbers[4] (we don't store them)
-            ptr += (size_t)MAX_FRAMES * sizeof(uint32_t);
+            ptr += (size_t)ANIMATION_FRAMES * sizeof(uint32_t);
 
             // For each frame: positions[nv], normals[nv]
-            for (uint32_t fi = 0; fi < MAX_FRAMES; ++fi)
+            for (uint32_t fi = 0; fi < ANIMATION_FRAMES; ++fi)
             {
                 struct MeshFrame *frame = &anim->frames[fi];
 

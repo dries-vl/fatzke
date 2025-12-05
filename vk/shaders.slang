@@ -11,20 +11,21 @@ static const float divide_by_32767    = float(1.0/32767.0);
 static const float tanHalfFovY = tan(0.5 * fov_y_radians); // for frustrum culling
 static const float tanHalfFovX = tanHalfFovY * aspect_ratio;
 
-struct object {uint meshes_offset, mesh_count;};
-struct mesh {uint base_mesh_id, animation_count;}; // each animation is 8 frames for easy offsetting
+// conceptually a small amount of meta-object types; inf unit, cav unit, plane, ... -> animations based on this type
+// -> 'animation set' of a mesh, a mesh can only be used for a given animation set
+// let's now just assume there's two animations for units, none for planes
+// todo: hardcode 0 animations for planes, hardcode 8 animations for everything else for easy offsetting no fetch needed
+struct object_metadata {uint meshes_offset, mesh_count;};
+struct chunk {uint object_type;};
 struct mdi {uint index_count, instance_count, first_index, base_vertex, first_instance;};
 struct di {uint group_count_x, group_count_y, group_count_z;};
 struct instance {uint a, b, c, pad;};
 
 // pre-filled data
-// todo: add these three buffers
-[[vk::binding(18,0)]] StructuredBuffer<uint>   OBJECT_MESH_LIST; // list of all the mesh ids that make up objects
-[[vk::binding(17,0)]] StructuredBuffer<mesh>   BASE_MESH_METADATA; // info of the base meshes
-[[vk::binding(16,0)]] StructuredBuffer<object> OBJECT_METADATA;
-
-[[vk::binding(9,0)]]  StructuredBuffer<mdi>    MESH_INFO; // instance_count is 'max visible of this mesh in this scene'
-[[vk::binding(0,0)]]  StructuredBuffer<uint2>  CHUNKS;    // size is # of chunks
+[[vk::binding(14,0)]] StructuredBuffer<uint>            OBJECT_MESH_LIST; // list of all the mesh ids that make up objects
+[[vk::binding(15,0)]] StructuredBuffer<object_metadata> OBJECT_METADATA;
+[[vk::binding(9,0)]]  StructuredBuffer<mdi>             MESH_INFO; // instance_count is 'max visible of this mesh in this scene'
+[[vk::binding(0,0)]]  StructuredBuffer<chunk>  CHUNKS;    // size is # of chunks
 [[vk::binding(4,0)]]  StructuredBuffer<uint2>  OBJECTS;   // size is total # of objects in scene
 [[vk::binding(11,0)]] StructuredBuffer<uint>   POSITIONS; // R10G10B10A2
 [[vk::binding(12,0)]] StructuredBuffer<uint>   NORMALS;   // R10G10B10A2_SNORM
@@ -41,13 +42,13 @@ struct instance {uint a, b, c, pad;};
 [[vk::binding(10,0)]] RWStructuredBuffer<mdi>      DRAW_CALLS;         // MDI, one struct per mesh type, index is mesh id
 [[vk::binding(8,0)]]  RWStructuredBuffer<instance> RENDERED_INSTANCES; // size is max # of visible mesh instances
 // uniforms
-[[vk::binding(14,0)]]
+[[vk::binding(16,0)]]
 cbuffer uniforms {
     float3 camera_position;
     float camera_pitch_sin, camera_pitch_cos;
     float camera_yaw_sin, camera_yaw_cos;
 };
-[[vk::binding(15, 0)]] Sampler2D TEXTURES[64];
+[[vk::binding(17, 0)]] Sampler2D TEXTURES[64];
 
 // push constants
 struct push_constants {
@@ -55,27 +56,13 @@ struct push_constants {
 };
 [[vk::push_constant]] push_constants PUSH_CONSTANTS;
 
-uint find_mesh_id(uint object_id, uint mesh_count) {
-    uint lo = 0, hi = mesh_count;
-    // log(N) search, finds among 1000 in appr. 10 iterations
-    while (lo < hi) {
-        uint mid = (lo + hi) >> 1;
-        uint start = MESH_INFO[mid].first_instance;
-        if (start <= object_id) lo = mid + 1;
-        else hi = mid;
-    }
-    return (lo - 1) - ((lo-1) % 5); // make sure we have the base one of the five lod levels
-}
-
-static const float d[6] = { 51200.0, 6400.0, 1600.0, 40.0, 0.0, 0.0 };
+static const float d[5] = { 51200.0, 6400.0, 1600.0, 40.0 };
 uint choose_lod_step(float distance) {
-    if (distance >= d[0]) return 0; // 2x2 verts
-    if (distance >= d[1]) return 1; // 4x4 verts
-    if (distance >= d[2]) return 2; // 8x8
-    if (distance >= d[3]) return 3; // 16x16
-    if (distance >= d[4]) return 4; // 32x32 (1024)
-    if (distance >= d[5]) return 5;
-    return 6;
+    if (distance >= d[0]) return 4;
+    if (distance >= d[1]) return 3;
+    if (distance >= d[2]) return 2;
+    if (distance >= d[3]) return 1;
+    return 0;
 }
 
 [shader("compute")] [numthreads(64,1,1)]
@@ -113,7 +100,9 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
             // if really far, just directly write one visible instance, instead of 64 tile objects
             uint stride; uint mesh_count;
             MESH_INFO.GetDimensions(mesh_count, stride);
-            uint base_mesh_id = find_mesh_id(chunk_id * 64, mesh_count);
+            uint object_type = CHUNKS[chunk_id].object_type;
+            uint mesh_offset = OBJECT_METADATA[object_type].meshes_offset;
+            uint base_mesh_id = OBJECT_MESH_LIST[mesh_offset];
             uint lod_level = choose_lod_step(distance);
             uint mesh_id = base_mesh_id + lod_level;
             uint slot;  InterlockedAdd(COUNT_PER_MESH[mesh_id], 1, slot);
@@ -169,7 +158,9 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         // then a buffer with mesh info to know the base mesh id for that mesh
         // that also has a count + array of animations + array of offsets per animation
         // -> can read base mesh id + read the offset in frames for that animation + pick frame
-        uint base_mesh_id = find_mesh_id(object_id, mesh_count);
+        uint object_type = CHUNKS[chunk_id].object_type;
+        uint mesh_offset = OBJECT_METADATA[object_type].meshes_offset;
+        uint base_mesh_id = OBJECT_MESH_LIST[mesh_offset];
         float distance = dot(position,position) / 500.0f;
         uint lod_level = choose_lod_step(distance);
         uint mesh_id = base_mesh_id + lod_level;
@@ -193,39 +184,30 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
             // todo: we will write multiple mesh instances here; ie. a torso + head + shield + weapon
             if (chunk_id >= 6400) {
                 // add a head
-                uint slot2;  InterlockedAdd(COUNT_PER_MESH[mesh_id + 5], 1, slot2);
+                uint slot2;  InterlockedAdd(COUNT_PER_MESH[mesh_id + 40], 1, slot2);
             }
         }
     }
     // prefix sum
     else if (PUSH_CONSTANTS.mode == 2) {
-        // run on a single thread; tiny work
-        if (tid.x != 0) return;
+        if (tid.x != 0) return; // run on a single thread; tiny work
         uint mesh_count, stride; 
         MESH_INFO.GetDimensions(mesh_count, stride);
-        static const uint LOD_COUNT = 5;
 
-        // task 1: calculate the offset for the first instance of each mesh type
-        for (uint base_mesh_id = 0; base_mesh_id < mesh_count; base_mesh_id += LOD_COUNT) {
-            const uint base_instance = MESH_INFO[base_mesh_id].first_instance;
-            uint total_count = 0;
-            [unroll] for (uint lod = 0; lod < LOD_COUNT; ++lod) {
-                uint mesh_id = base_mesh_id + lod;
-                uint first_instance = base_instance + total_count;
-                OFFSET_PER_MESH[mesh_id] = first_instance;
-                total_count += COUNT_PER_MESH[mesh_id];
-                mdi mi = MESH_INFO[mesh_id];
-                DRAW_CALLS[mesh_id].index_count   = mi.index_count;
-                DRAW_CALLS[mesh_id].first_index   = mi.first_index;
-                DRAW_CALLS[mesh_id].base_vertex   = mi.base_vertex;
-                DRAW_CALLS[mesh_id].first_instance = first_instance;
-                // zero here, set in next pass to be sure
-                DRAW_CALLS[mesh_id].instance_count = 0u;
-            }
+        // calculate the offset for the first instance of each mesh type
+        uint total_count = 0;
+        for (uint mesh_id = 0; mesh_id < mesh_count; ++mesh_id) {
+            OFFSET_PER_MESH[mesh_id] = total_count;
+            mdi mi = MESH_INFO[mesh_id];
+            DRAW_CALLS[mesh_id].index_count   = mi.index_count;
+            DRAW_CALLS[mesh_id].first_index   = mi.first_index;
+            DRAW_CALLS[mesh_id].base_vertex   = mi.base_vertex;
+            DRAW_CALLS[mesh_id].first_instance = total_count; // last count is the first here
+            DRAW_CALLS[mesh_id].instance_count = 0; // set in scatter pass to have an index returned
+            total_count += COUNT_PER_MESH[mesh_id];
         }
 
-        // task 2: fill the indirect dispatch buffer with the sum of visible objects
-        // calculate size of scatter pass
+        // fill the indirect dispatch buffer for the scatter pass with the sum of visible objects
         INDIRECT_WORKGROUPS[0].group_count_x = (VISIBLE_OBJECT_COUNT[0] + 63) / 64;
         INDIRECT_WORKGROUPS[0].group_count_y = 1;
         INDIRECT_WORKGROUPS[0].group_count_z = 1;
@@ -277,7 +259,9 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         );
 
         // pick lod level
-        uint base_mesh_id = find_mesh_id(object_id, mesh_count);
+        uint object_type = CHUNKS[chunk_id].object_type;
+        uint mesh_offset = OBJECT_METADATA[object_type].meshes_offset;
+        uint base_mesh_id = OBJECT_MESH_LIST[mesh_offset];
         float distance = dot(position,position) / 500.0f;
         uint lod_level = choose_lod_step(distance);
         uint mesh_id = base_mesh_id + lod_level;
@@ -306,8 +290,8 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         } else {
             RENDERED_INSTANCES[dst] = instance(packed0,packed1,packed2,object_id);
             // add the head
-            uint slot_head; InterlockedAdd(DRAW_CALLS[mesh_id + 5].instance_count, 1, slot_head);
-            const uint head_dst = OFFSET_PER_MESH[mesh_id + 5] + slot_head;
+            uint slot_head; InterlockedAdd(DRAW_CALLS[mesh_id + 40].instance_count, 1, slot_head);
+            const uint head_dst = OFFSET_PER_MESH[mesh_id + 40] + slot_head;
             RENDERED_INSTANCES[head_dst] = instance(packed0,packed1,packed2,object_id);
         }
     }
@@ -319,10 +303,10 @@ struct vs_out {
     float3 normal : TEXCOORD1;                                             // surface normal
 };
 
-static const uint MAX_VERTICES = 128u;
+static const uint MAX_VERTICES = 32u;
 static const float TILE_SIZE_CM = 128.0 * 100.0; // in cm
 float3 plane_position(uint VERTEX_ID, uint grid_scale) {
-    uint vertices_per_side = MAX_VERTICES >> grid_scale;     // 128, 64, 32, 16, 8, 4, 2 (ie. scale 6 becomes 2 -> quad)
+    uint vertices_per_side = MAX_VERTICES >> grid_scale;     // 32, 16, 8, 4, 2 (ie. scale 6 becomes 2 -> quad)
     uint row = VERTEX_ID % vertices_per_side;        // 0 .. vertices_per_side-1
     uint col = VERTEX_ID / vertices_per_side;        // 0 .. vertices_per_side-1
     // Normalize to [0,1] then scale to the fixed tile size
@@ -379,8 +363,7 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] uint4 INSTANCE,
         instance_x = 100.0 * view.x; // in cm
         instance_y = 100.0 * view.y;
         instance_z = 100.0 * view.z;
-        uint grid_scale = 6 - (DRAW_ID % 7);
-        vertex = plane_position(VERTEX_ID, grid_scale); // in cm
+        vertex = plane_position(VERTEX_ID, DRAW_ID); // in cm
         if (is_chunk_object) vertex *= 8;
         int2 vertex_world = int2(object_position.xz * 100 + vertex.xz);
         normal = float3(0.5, 1.0, 0.2);
