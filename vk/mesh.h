@@ -1,17 +1,17 @@
 #pragma once
 #include "header.h"
 
-extern const unsigned char LOD[];
-extern const unsigned char LOD_end[];
-#define LOD_len ((size_t)(LOD_end - LOD))
+extern const unsigned char BODY[];
+extern const unsigned char BODY_end[];
+#define BODY_len ((size_t)(BODY_end - BODY))
 
 extern const unsigned char HEAD[];
 extern const unsigned char HEAD_end[];
 #define HEAD_len ((size_t)(HEAD_end - HEAD))
 
-#define LOD_LEVELS      5
-#define MAX_ANIMATIONS  16
-#define MAX_FRAMES      16
+#define LOD_LEVELS      5  // hardcoded five to have easy offsets in shader code
+#define MAX_ANIMATIONS  8  // 
+#define MAX_FRAMES      4  // hardcoded four to have easy offsets in shader code
 
 // todo: every animation frame is conceptually a different mesh like how the lod is a different mesh
 // -> base mesh (#lod) -> lod level (#animation) -> animation (#frame) -> frame within animation
@@ -21,7 +21,6 @@ struct MeshFrame {
 };
 
 struct MeshAnimation {
-    uint32_t num_frames;                      // <= MAX_FRAMES
     struct MeshFrame frames[MAX_FRAMES];
 };
 
@@ -69,33 +68,27 @@ static int load_mesh_blob(const void *data, size_t size, struct Mesh *mesh) {
     if (num_lods != LOD_LEVELS) return 0;
 
     // -----------------------------
-    // 2. Metadata: per LOD, per anim frame counts
+    // 2. Metadata: per LOD (no per-animation frame counts anymore)
     // -----------------------------
-    uint32_t frame_counts[LOD_LEVELS][MAX_ANIMATIONS] = {0};
-
     for (uint32_t lo = 0; lo < LOD_LEVELS; ++lo)
     {
         NEED(3 * sizeof(uint32_t));
 
         struct MeshLod *lod = &mesh->lods[lo];
 
-        lod->num_vertices   = *(const uint32_t *)ptr; ptr += 4;
-        lod->num_indices    = *(const uint32_t *)ptr; ptr += 4;
-        mesh->num_animations = *(const uint32_t *)ptr; ptr += 4;
+        lod->num_vertices = *(const uint32_t *)ptr; ptr += 4;
+        lod->num_indices  = *(const uint32_t *)ptr; ptr += 4;
+        uint32_t na       = *(const uint32_t *)ptr; ptr += 4; // num_animations for this LOD
 
-        if (mesh->num_animations > MAX_ANIMATIONS)
+        if (na > MAX_ANIMATIONS)
             return 0;
 
-        NEED(mesh->num_animations * sizeof(uint32_t));
-        for (uint32_t ai = 0; ai < mesh->num_animations; ++ai)
-        {
-            uint32_t nf = *(const uint32_t *)ptr;
-            ptr += 4;
-
-            if (nf > MAX_FRAMES)
+        if (lo == 0) {
+            mesh->num_animations = na;
+        } else {
+            // All LODs must agree on number of animations
+            if (na != mesh->num_animations)
                 return 0;
-
-            frame_counts[lo][ai] = nf;
         }
     }
 
@@ -137,15 +130,13 @@ static int load_mesh_blob(const void *data, size_t size, struct Mesh *mesh) {
         for (uint32_t ai = 0; ai < na; ++ai)
         {
             struct MeshAnimation *anim = &lod->animations[ai];
-            uint32_t nf = frame_counts[lo][ai];
-            anim->num_frames = nf;
 
-            // Skip frame_numbers[num_frames] (we don't store them)
-            NEED((size_t)nf * sizeof(uint32_t));
-            ptr += (size_t)nf * sizeof(uint32_t);
+            // New format: every animation always has exactly 4 frames.
+            // Skip frame_numbers[4] (we don't store them)
+            ptr += (size_t)MAX_FRAMES * sizeof(uint32_t);
 
             // For each frame: positions[nv], normals[nv]
-            for (uint32_t fi = 0; fi < nf; ++fi)
+            for (uint32_t fi = 0; fi < MAX_FRAMES; ++fi)
             {
                 struct MeshFrame *frame = &anim->frames[fi];
 

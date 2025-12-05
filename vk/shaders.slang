@@ -11,12 +11,19 @@ static const float divide_by_32767    = float(1.0/32767.0);
 static const float tanHalfFovY = tan(0.5 * fov_y_radians); // for frustrum culling
 static const float tanHalfFovX = tanHalfFovY * aspect_ratio;
 
+struct object {uint meshes_offset, mesh_count;};
+struct mesh {uint base_mesh_id, animation_count;}; // each animation is 8 frames for easy offsetting
 struct mdi {uint index_count, instance_count, first_index, base_vertex, first_instance;};
 struct di {uint group_count_x, group_count_y, group_count_z;};
 struct instance {uint a, b, c, pad;};
 
 // pre-filled data
-[[vk::binding(9,0)]]  StructuredBuffer<mdi>    MESH_INFO; // MDI, instance_count is 'max visible of this mesh in this scene'
+// todo: add these three buffers
+[[vk::binding(18,0)]] StructuredBuffer<uint>   OBJECT_MESH_LIST; // list of all the mesh ids that make up objects
+[[vk::binding(17,0)]] StructuredBuffer<mesh>   BASE_MESH_METADATA; // info of the base meshes
+[[vk::binding(16,0)]] StructuredBuffer<object> OBJECT_METADATA;
+
+[[vk::binding(9,0)]]  StructuredBuffer<mdi>    MESH_INFO; // instance_count is 'max visible of this mesh in this scene'
 [[vk::binding(0,0)]]  StructuredBuffer<uint2>  CHUNKS;    // size is # of chunks
 [[vk::binding(4,0)]]  StructuredBuffer<uint2>  OBJECTS;   // size is total # of objects in scene
 [[vk::binding(11,0)]] StructuredBuffer<uint>   POSITIONS; // R10G10B10A2
@@ -57,7 +64,7 @@ uint find_mesh_id(uint object_id, uint mesh_count) {
         if (start <= object_id) lo = mid + 1;
         else hi = mid;
     }
-    return (lo - 1) - ((lo-1) % 5);
+    return (lo - 1) - ((lo-1) % 5); // make sure we have the base one of the five lod levels
 }
 
 static const float d[6] = { 51200.0, 6400.0, 1600.0, 40.0, 0.0, 0.0 };
@@ -158,6 +165,10 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         );
 
         // pick lod level
+        // instead of the loop, just have a buffer with object-type info, has a count + an array of meshes
+        // then a buffer with mesh info to know the base mesh id for that mesh
+        // that also has a count + array of animations + array of offsets per animation
+        // -> can read base mesh id + read the offset in frames for that animation + pick frame
         uint base_mesh_id = find_mesh_id(object_id, mesh_count);
         float distance = dot(position,position) / 500.0f;
         uint lod_level = choose_lod_step(distance);
