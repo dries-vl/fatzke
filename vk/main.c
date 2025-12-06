@@ -70,6 +70,7 @@ struct Uniforms {
     float camera_position[3]; // xyz
     float camera_pitch_sin, camera_pitch_cos;
     float camera_yaw_sin, camera_yaw_cos;
+    float time; // seconds
 };
 
 #if DEBUG_APP == 1
@@ -453,6 +454,7 @@ int main(void) {
     static struct Mesh meshes[MESH_TYPE_COUNT] = {
         [MESH_PLANE] = {
             .num_animations = 0, // special case with no frames, only indices
+            .radius = 150.0f,
             .lods = {
                 {.num_indices = 5766, /* 961 quads, 31x31 */ .indices = g_indices_plane_lod2 },
                 {.num_indices = 1350, /* 225 quads, 15x15 */ .indices = g_indices_plane_lod3 },
@@ -499,18 +501,20 @@ int main(void) {
     struct gpu_object_metadata {
         u32 meshes_offset;
         u32 mesh_count;
+        float radius;
     } object_metadata[OBJECT_TYPE_COUNT] = {
         [OBJECT_TYPE_PLANE] = {
-            .mesh_count = 1, .meshes_offset = 0 // fill in below
+            .mesh_count = 1
         },
         [OBJECT_TYPE_UNIT] = {
-            .mesh_count = 2, .meshes_offset = 0 // fill in below
+            .mesh_count = 2
         },
     };
     u32 meshes_offset = 0;
     for (u32 i = 0; i < OBJECT_TYPE_COUNT; ++i) {
         object_metadata[i].meshes_offset = meshes_offset;
         meshes_offset += object_metadata[i].mesh_count;
+        object_metadata[i].radius = meshes[object_mesh_ids[object_metadata[i].meshes_offset]].radius;
         printf("Object type %d has %d meshes, offset %d\n", i, object_metadata[i].mesh_count, object_metadata[i].meshes_offset);
     }
 
@@ -519,10 +523,10 @@ int main(void) {
     struct VkDrawIndexedIndirectCommand mesh_info[MAX_TOTAL_MESH_COUNT];
     u32 mesh_index = 0;
     for (u32 m = 0; m < MESH_TYPE_COUNT; ++m) {
-        for (u32 lod = 0; lod < LOD_LEVELS; ++lod) {
-            // loop over all frames of all animations, or once in special case for animations = 0
-            int amount = meshes[m].num_animations == 0 ? 1 : meshes[m].num_animations * ANIMATION_FRAMES;
-            for (u32 i = 0; i < amount; ++i) {
+        // loop over all frames of all animations, or once in special case for animations = 0
+        int amount = meshes[m].num_animations == 0 ? 1 : meshes[m].num_animations * ANIMATION_FRAMES;
+        for (u32 i = 0; i < amount; ++i) {
+            for (u32 lod = 0; lod < LOD_LEVELS; ++lod) {
                 mesh_info[mesh_index].firstIndex   = total_index_count;
                 mesh_info[mesh_index].vertexOffset = total_vertex_count;
                 mesh_info[mesh_index].indexCount   = meshes[m].lods[lod].num_indices;
@@ -715,13 +719,13 @@ int main(void) {
     // upload the data per mesh (later, when data is huge, batch into one big command to upload everything)
     mesh_index = 0;
     for (u32 m = 0; m < MESH_TYPE_COUNT; ++m) {
-        for (u32 lod = 0; lod < LOD_LEVELS; ++lod) {
-            u32 anim_count = meshes[m].num_animations == 0 ? 1 : meshes[m].num_animations; // special case for no animations
-            u32 frame_count = meshes[m].num_animations == 0 ? 1 : ANIMATION_FRAMES; // special case for no animations to one frame
-            for (u32 a = 0; a < anim_count; ++a) {
-                for (u32 f = 0; f < frame_count; ++f) {
+        u32 anim_count = meshes[m].num_animations == 0 ? 1 : meshes[m].num_animations; // special case for no animations
+        u32 frame_count = meshes[m].num_animations == 0 ? 1 : ANIMATION_FRAMES; // special case for no animations to one frame
+        for (u32 a = 0; a < anim_count; ++a) {
+            for (u32 f = 0; f < frame_count; ++f) {
+                for (u32 lod = 0; lod < LOD_LEVELS; ++lod) {
                     // vertices
-                    if (meshes[m].lods[lod].animations[a].frames[f].positions) {
+                    if (meshes[m].animations[a].frames[f].lods[lod].positions) {
                         VkDeviceSize bytes = meshes[m].lods[lod].num_vertices * sizeof(uint32_t);
                         VkDeviceSize dstOfs = (VkDeviceSize)mesh_info[mesh_index].vertexOffset * sizeof(uint32_t);
                         // Create a temp staging and copy into the already-created DEVICE_LOCAL buffer at dstOfs
@@ -732,7 +736,7 @@ int main(void) {
                                 VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                                 &staging, &staging_mem);
-                            upload_to_buffer(machine.device, staging_mem, 0, meshes[m].lods[lod].animations[a].frames[f].positions, (size_t)bytes);
+                            upload_to_buffer(machine.device, staging_mem, 0, meshes[m].animations[a].frames[f].lods[lod].positions, (size_t)bytes);
                             VkCommandBuffer cmd = begin_single_use_cmd(machine.device, upload_pool);
                             VkBufferCopy c = { .srcOffset = 0, .dstOffset = dstOfs, .size = bytes };
                             vkCmdCopyBuffer(cmd, staging, renderer.buffer_positions, 1, &c);
@@ -742,7 +746,7 @@ int main(void) {
                         }
                     }
                     // normals
-                    if (meshes[m].lods[lod].animations[a].frames[f].normals) {
+                    if (meshes[m].animations[a].frames[f].lods[lod].normals) {
                         VkDeviceSize bytes = meshes[m].lods[lod].num_vertices * sizeof(uint32_t);
                         VkDeviceSize dstOfs = (VkDeviceSize)mesh_info[mesh_index].vertexOffset * sizeof(uint32_t);
                         VkBuffer staging; VkDeviceMemory staging_mem;
@@ -750,7 +754,7 @@ int main(void) {
                             VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                             &staging, &staging_mem);
-                        upload_to_buffer(machine.device, staging_mem, 0, meshes[m].lods[lod].animations[a].frames[f].normals, (size_t)bytes);
+                        upload_to_buffer(machine.device, staging_mem, 0, meshes[m].animations[a].frames[f].lods[lod].normals, (size_t)bytes);
                         VkCommandBuffer cmd = begin_single_use_cmd(machine.device, upload_pool);
                         VkBufferCopy c = { .srcOffset = 0, .dstOffset = dstOfs, .size = bytes };
                         vkCmdCopyBuffer(cmd, staging, renderer.buffer_normals, 1, &c);
@@ -1061,6 +1065,7 @@ int main(void) {
         process_inputs();
         struct Uniforms u = {0};
         encode_uniforms(&u, cam_x, cam_y, cam_z, cam_yaw, cam_pitch);
+        u.time = (f32) (pf_ns_now() - pf_ns_start()) / 1e9; // send time in seconds to the gpu
         void*dst=NULL;
         VK_CHECK(vkMapMemory(machine.device, renderer.memory_uniforms, 0, sizeof u, 0, &dst));
         memcpy(dst, &u, sizeof u);

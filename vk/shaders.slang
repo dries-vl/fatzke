@@ -15,13 +15,19 @@ static const float tanHalfFovX = tanHalfFovY * aspect_ratio;
 // -> 'animation set' of a mesh, a mesh can only be used for a given animation set
 // let's now just assume there's two animations for units, none for planes
 // todo: hardcode 0 animations for planes, hardcode 8 animations for everything else for easy offsetting no fetch needed
-struct object_metadata {uint meshes_offset, mesh_count;};
+struct object_metadata {uint meshes_offset, mesh_count; float radius;};
 struct chunk {uint object_type;};
 struct mdi {uint index_count, instance_count, first_index, base_vertex, first_instance;};
 struct di {uint group_count_x, group_count_y, group_count_z;};
 struct instance {uint a, b, c, pad;};
 
 // pre-filled data
+// todo: need to refactor the lod-animation data anyway to be able index into it
+// todo: but then we might as well refactor to make the data line up for less bandwidth use
+// ie. next frames same vertex is next to in memory
+// todo: then might as well do texture compression as perfect lossless is not needed
+// current: 1010102; 32bit per position
+// astc8x8: 2bit per position
 [[vk::binding(14,0)]] StructuredBuffer<uint>            OBJECT_MESH_LIST; // list of all the mesh ids that make up objects
 [[vk::binding(15,0)]] StructuredBuffer<object_metadata> OBJECT_METADATA;
 [[vk::binding(9,0)]]  StructuredBuffer<mdi>             MESH_INFO; // instance_count is 'max visible of this mesh in this scene'
@@ -47,6 +53,7 @@ cbuffer uniforms {
     float3 camera_position;
     float camera_pitch_sin, camera_pitch_cos;
     float camera_yaw_sin, camera_yaw_cos;
+    float time; // seconds
 };
 [[vk::binding(17, 0)]] Sampler2D TEXTURES[64];
 
@@ -56,8 +63,10 @@ struct push_constants {
 };
 [[vk::push_constant]] push_constants PUSH_CONSTANTS;
 
-static const float d[5] = { 51200.0, 6400.0, 1600.0, 40.0 };
-uint choose_lod_step(float distance) {
+static const float d[4] = { 64.0, 16.0, 4.0, 1.0 };
+uint choose_lod_step(float distance, float radius) {
+    if (radius <= 0) radius = 10.0;
+    distance = distance / radius;
     if (distance >= d[0]) return 4;
     if (distance >= d[1]) return 3;
     if (distance >= d[2]) return 2;
@@ -103,7 +112,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
             uint object_type = CHUNKS[chunk_id].object_type;
             uint mesh_offset = OBJECT_METADATA[object_type].meshes_offset;
             uint base_mesh_id = OBJECT_MESH_LIST[mesh_offset];
-            uint lod_level = choose_lod_step(distance);
+            uint lod_level = choose_lod_step(distance, OBJECT_METADATA[object_type].radius);
             uint mesh_id = base_mesh_id + lod_level;
             uint slot;  InterlockedAdd(COUNT_PER_MESH[mesh_id], 1, slot);
             uint slot1; InterlockedAdd(VISIBLE_OBJECT_COUNT[0], 1, slot1); // keep a count for later
@@ -162,7 +171,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         uint mesh_offset = OBJECT_METADATA[object_type].meshes_offset;
         uint base_mesh_id = OBJECT_MESH_LIST[mesh_offset];
         float distance = dot(position,position) / 500.0f;
-        uint lod_level = choose_lod_step(distance);
+        uint lod_level = choose_lod_step(distance, OBJECT_METADATA[object_type].radius);
         uint mesh_id = base_mesh_id + lod_level;
         
         // calculate frustrum
@@ -263,7 +272,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         uint mesh_offset = OBJECT_METADATA[object_type].meshes_offset;
         uint base_mesh_id = OBJECT_MESH_LIST[mesh_offset];
         float distance = dot(position,position) / 500.0f;
-        uint lod_level = choose_lod_step(distance);
+        uint lod_level = choose_lod_step(distance, OBJECT_METADATA[object_type].radius);
         uint mesh_id = base_mesh_id + lod_level;
         
         // convert to int again
@@ -390,14 +399,30 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] uint4 INSTANCE,
         cos_d =  object_yaw_cos * camera_yaw_cos + object_yaw_sin * camera_yaw_sin; // cos(a-b)
         sin_d =  object_yaw_sin* camera_yaw_cos - object_yaw_cos * camera_yaw_sin; // sin(a-b)
         // we need to know the offset into the position (4 bytes)
-        uint base_vertex = MESH_INFO[DRAW_ID].base_vertex;
+        uint animation = 1;
+        float phase = frac(object_id * 0.756688471) * 2.0f; // randomized start time for animations, somewhere within the 2s
+        float t_clip = time + phase; // progress with time
+        float t_in_clip = frac(t_clip / 2.0f) * 2.0f; // current time within 2 second 2 second clip
+        float frame_f = t_in_clip / 0.5f; // 0..4 (divide by per-frame time of 0.5)
+        uint  frame0 = (uint)frame_f;             // 0..3
+        float alpha  = frac(frame_f);             // 0..1
+        uint frame1 = (frame0 + 1u) % 4; // wrap 3->0
+        uint base_vertex = MESH_INFO[DRAW_ID + (frame0 * 5) + (animation * 4 * 5)].base_vertex;
+        uint base_vertex_next = MESH_INFO[DRAW_ID + (frame1 * 5) + (animation * 4 * 5)].base_vertex;
         // fetch and unpack vertex position, represented as cm (4 bytes)
         uint packed_vertex = POSITIONS[VERTEX_ID + base_vertex];
+        uint packed_vertex_next = POSITIONS[VERTEX_ID + base_vertex_next];
         vertex = float3(
             float(((int)( packed_vertex        & 0x3FF) << 22) >> 22),
             float(((int)((packed_vertex >> 10) & 0x3FF) << 22) >> 22),
             float(((int)((packed_vertex >> 20) & 0x3FF) << 22) >> 22)
         );
+        float3 vertex_next = float3(
+            float(((int)( packed_vertex_next        & 0x3FF) << 22) >> 22),
+            float(((int)((packed_vertex_next >> 10) & 0x3FF) << 22) >> 22),
+            float(((int)((packed_vertex_next >> 20) & 0x3FF) << 22) >> 22)
+        );
+        vertex = lerp(vertex, vertex_next, alpha);
         // fetch and unpack vertex normal (4 bytes)
         uint packed_normal = NORMALS[VERTEX_ID + base_vertex];
         normal = float3(
