@@ -399,16 +399,24 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] uint4 INSTANCE,
         cos_d =  object_yaw_cos * camera_yaw_cos + object_yaw_sin * camera_yaw_sin; // cos(a-b)
         sin_d =  object_yaw_sin* camera_yaw_cos - object_yaw_cos * camera_yaw_sin; // sin(a-b)
         // we need to know the offset into the position (4 bytes)
-        uint animation = 1;
-        float phase = frac(object_id * 0.756688471) * 2.0f; // randomized start time for animations, somewhere within the 2s
+        static const float FRAME_DURATION = 0.5f; // 4 frames per second
+        static const float ANIMATION_DURATION = 2.0f;  // 4 frames, 0.5s each
+        static const float PAIR_DURATION = ANIMATION_DURATION * 2.0f;
+        uint animation = 0;
+        uint next_animation = 1;
+        float phase = frac(object_id * 0.756688471) * ANIMATION_DURATION; // randomized start time for animations, somewhere within the 2s
         float t_clip = time + phase; // progress with time
-        float t_in_clip = frac(t_clip / 2.0f) * 2.0f; // current time within 2 second 2 second clip
-        float frame_f = t_in_clip / 0.5f; // 0..4 (divide by per-frame time of 0.5)
-        uint  frame0 = (uint)frame_f;             // 0..3
-        float alpha  = frac(frame_f);             // 0..1
-        uint frame1 = (frame0 + 1u) % 4; // wrap 3->0
-        uint base_vertex = MESH_INFO[DRAW_ID + (frame0 * 5) + (animation * 4 * 5)].base_vertex;
-        uint base_vertex_next = MESH_INFO[DRAW_ID + (frame1 * 5) + (animation * 4 * 5)].base_vertex;
+        float t_in_clip = frac(t_clip / PAIR_DURATION) * PAIR_DURATION; // 0 to 4s
+        float frame_f = t_in_clip / FRAME_DURATION; // 0..8 (two clips is eight total frames)
+        uint frame0 = (uint)frame_f; // 0..7
+        uint clip0 = frame0 < 4 ? animation : next_animation;
+        float alpha  = frac(frame_f); // 0..1
+        uint frame1 = (frame0 + 1u) % 8u; // 0..7
+        uint clip1 = frame1 < 4 ? animation : next_animation;
+        if (frame0 >= 4) frame0 = frame0 - 4;
+        if (frame1 >= 4) frame1 = frame1 - 4;
+        uint base_vertex = MESH_INFO[DRAW_ID + (frame0 * 5) + (clip0 * 4 * 5)].base_vertex;
+        uint base_vertex_next = MESH_INFO[DRAW_ID + (frame1 * 5) + (clip1 * 4 * 5)].base_vertex;
         // fetch and unpack vertex position, represented as cm (4 bytes)
         uint packed_vertex = POSITIONS[VERTEX_ID + base_vertex];
         uint packed_vertex_next = POSITIONS[VERTEX_ID + base_vertex_next];
