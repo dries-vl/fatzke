@@ -19,7 +19,7 @@ struct object_metadata {uint meshes_offset, mesh_count; float radius;};
 struct chunk {uint object_type;};
 struct mdi {uint index_count, instance_count, first_index, base_vertex, first_instance;};
 struct di {uint group_count_x, group_count_y, group_count_z;};
-struct instance {uint a, b, c, pad;};
+struct instance {uint object_id, animation;};
 
 // pre-filled data
 // todo: need to refactor the lod-animation data anyway to be able index into it
@@ -284,24 +284,19 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         float cos_delta =  object_yaw_cos * camera_yaw_cos + object_yaw_sin * camera_yaw_sin; // cos(a-b)
         float sin_delta =  object_yaw_sin* camera_yaw_cos - object_yaw_cos * camera_yaw_sin; // sin(a-b)
 
-        // pack rotated by yaw
-        uint packed0 = (uint)((tx_dm & 0xFFFF) | ((ty_dm & 0xFFFF) << 16));
-        uint packed1 = (uint)((tz_dm & 0xFFFF) | ((int)round(cos_delta * 32767.0f) & 0xFFFF) << 16);
-        uint packed2 = (uint)(((int)round(sin_delta * 32767.0f) & 0xFFFF));
-
         // Grab slot via atomic write head on the draw call
         uint slot; InterlockedAdd(DRAW_CALLS[mesh_id].instance_count, 1, slot);
         const uint dst = OFFSET_PER_MESH[mesh_id] + slot;
         if (is_chunk_object) {
-            RENDERED_INSTANCES[dst] = instance(packed0,packed1,packed2,chunk_id + 1000000);
+            RENDERED_INSTANCES[dst] = instance(chunk_id + 1000000, 0);
         } else if (object_id < 6400 * 64) {
-            RENDERED_INSTANCES[dst] = instance(packed0,packed1,packed2,object_id);
+            RENDERED_INSTANCES[dst] = instance(object_id, 0);
         } else {
-            RENDERED_INSTANCES[dst] = instance(packed0,packed1,packed2,object_id);
+            RENDERED_INSTANCES[dst] = instance(object_id, 0);
             // add the head
             uint slot_head; InterlockedAdd(DRAW_CALLS[mesh_id + 40].instance_count, 1, slot_head);
             const uint head_dst = OFFSET_PER_MESH[mesh_id + 40] + slot_head;
-            RENDERED_INSTANCES[head_dst] = instance(packed0,packed1,packed2,object_id);
+            RENDERED_INSTANCES[head_dst] = instance(object_id, 0);
         }
     }
 }
@@ -325,7 +320,7 @@ float3 plane_position(uint VERTEX_ID, uint grid_scale) {
 }
 
 [shader("vertex")]
-vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] uint4 INSTANCE, uint DRAW_ID : SV_DrawIndex) {
+vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTANCE, uint DRAW_ID : SV_DrawIndex) {
     // SKY path: fullscreen triangle
     if (PUSH_CONSTANTS.mode == 1) {
         vs_out o;
@@ -340,19 +335,18 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] uint4 INSTANCE,
     }
  
     // fetch and unpack visible instance data, convert dm to cm (12 bytes)
-    uint3 packed_instance = INSTANCE.xyz;
-    float instance_x = 10.0 * (float)((int16_t)( packed_instance.x        & 0xFFFF));
-    float instance_y = 10.0 * (float)((int16_t)((packed_instance.x >> 16) & 0xFFFF));
-    float instance_z = 10.0 * (float)((int16_t)( packed_instance.y        & 0xFFFF));
-    float cos_d = float(((int16_t)((packed_instance.y >> 16) & 0xFFFF))) * divide_by_32767;
-    float sin_d = float(((int16_t)((packed_instance.z) & 0xFFFF))) * divide_by_32767;
+    float instance_x;
+    float instance_y;
+    float instance_z;
+    float cos_d = 1.0;
+    float sin_d = 0.0;
 
     // draw id is essentially just the mesh id in this case
     float3 vertex;
     float3 normal;
     float2 uv;
+    uint object_id = INSTANCE.object_id;
     if (DRAW_ID < 5) {
-        uint object_id = INSTANCE.w;
         bool is_chunk_object = object_id > 1000000;
         if (is_chunk_object) object_id -= 1000000;
         uint chunk_id = object_id / 64;
@@ -369,6 +363,8 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] uint4 INSTANCE,
              camera_pitch_cos * position.y + camera_pitch_sin * position_yaw_z, // apply pitch to Y (using new z)
             -camera_pitch_sin * position.y + camera_pitch_cos * position_yaw_z // apply pitch to Z (using new z)
         );
+        cos_d = 1.0 * camera_yaw_cos + 0.0 * camera_yaw_sin; // cos(a-b)
+        sin_d = 0.0 * camera_yaw_cos - 1.0 * camera_yaw_sin; // sin(a-b)
         instance_x = 100.0 * view.x; // in cm
         instance_y = 100.0 * view.y;
         instance_z = 100.0 * view.z;
@@ -380,7 +376,6 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] uint4 INSTANCE,
         uv = float2(1,1) + float2(uv.x, -uv.y);
     } else {
         // instance
-        uint object_id = INSTANCE.w;
         uint2 object = OBJECTS[object_id];    // 8 bytes
         float3 object_position = float3(((int16_t) (object.x & 0xFFFF)), ((int16_t)((object.x >> 16) & 0xFFFF)), ((int16_t) (object.y & 0xFFFF)));
         float3 position = object_position - camera_position;
@@ -398,7 +393,7 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] uint4 INSTANCE,
         instance_z = 10.0 * view.z;
         cos_d =  object_yaw_cos * camera_yaw_cos + object_yaw_sin * camera_yaw_sin; // cos(a-b)
         sin_d =  object_yaw_sin* camera_yaw_cos - object_yaw_cos * camera_yaw_sin; // sin(a-b)
-        // we need to know the offset into the position (4 bytes)
+        // ANIMATION
         static const float FRAME_DURATION = 0.5f; // 4 frames per second
         static const float ANIMATION_DURATION = 2.0f;  // 4 frames, 0.5s each
         static const float PAIR_DURATION = ANIMATION_DURATION * 2.0f;
@@ -410,13 +405,14 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] uint4 INSTANCE,
         float frame_f = t_in_clip / FRAME_DURATION; // 0..8 (two clips is eight total frames)
         uint frame0 = (uint)frame_f; // 0..7
         uint clip0 = frame0 < 4 ? animation : next_animation;
-        float alpha  = frac(frame_f); // 0..1
         uint frame1 = (frame0 + 1u) % 8u; // 0..7
         uint clip1 = frame1 < 4 ? animation : next_animation;
-        if (frame0 >= 4) frame0 = frame0 - 4;
-        if (frame1 >= 4) frame1 = frame1 - 4;
-        uint base_vertex = MESH_INFO[DRAW_ID + (frame0 * 5) + (clip0 * 4 * 5)].base_vertex;
-        uint base_vertex_next = MESH_INFO[DRAW_ID + (frame1 * 5) + (clip1 * 4 * 5)].base_vertex;
+        // todo: pass these 3 values from object shader, instead of passing two animations, pass as 1010102 format
+        if (frame0 >= 4) frame0 = frame0 - 4; frame0 = (frame0 * 5) + (clip0 * 4 * 5);
+        if (frame1 >= 4) frame1 = frame1 - 4; frame1 = (frame1 * 5) + (clip1 * 4 * 5);
+        float alpha  = frac(frame_f); // interpolation factor between the frames
+        uint base_vertex = MESH_INFO[DRAW_ID + frame0].base_vertex;
+        uint base_vertex_next = MESH_INFO[DRAW_ID + frame1].base_vertex;
         // fetch and unpack vertex position, represented as cm (4 bytes)
         uint packed_vertex = POSITIONS[VERTEX_ID + base_vertex];
         uint packed_vertex_next = POSITIONS[VERTEX_ID + base_vertex_next];

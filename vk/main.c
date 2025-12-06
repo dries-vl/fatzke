@@ -356,11 +356,12 @@ int main(void) {
         { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT,   .module = shader_module, .pName = "vs_main" },
         { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = shader_module, .pName = "fs_main" }
     };
+    struct gpu_rendered_instance {u32 object_id, animation;};
     VkVertexInputBindingDescription bindings_vi[1] = {
-        { .binding = 0, .stride = sizeof(uint32_t)*4,    .inputRate = VK_VERTEX_INPUT_RATE_INSTANCE }
+        { .binding = 0, .stride = sizeof(struct gpu_rendered_instance), .inputRate = VK_VERTEX_INPUT_RATE_INSTANCE }
     };
     VkVertexInputAttributeDescription attrs_vi[1] = {
-        { .location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32A32_UINT,   .offset = 0 }
+        { .location = 0, .binding = 0, .format = VK_FORMAT_UNDEFINED, .offset = 0 } // my instance data is a custom struct?
     };
     VkPipelineVertexInputStateCreateInfo vertex_input = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
@@ -596,7 +597,7 @@ int main(void) {
     VkDeviceSize size_count_per_mesh = total_mesh_count * sizeof(uint32_t);
     VkDeviceSize size_offset_per_mesh = total_mesh_count * sizeof(uint32_t);
     VkDeviceSize size_visible_ids = total_object_count * sizeof(uint32_t);
-    VkDeviceSize size_rendered_instances   = total_instance_count * sizeof(uint32_t) * 4;
+    VkDeviceSize size_rendered_instances   = total_instance_count * sizeof(struct gpu_rendered_instance);
     VkDeviceSize size_draw_calls  = total_mesh_count * sizeof(VkDrawIndexedIndirectCommand);
     
     VkDeviceSize size_object_mesh_list = sizeof(object_mesh_ids);
