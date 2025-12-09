@@ -23,6 +23,15 @@ struct Swapchain {
     VkImage                   depth_image;
     VkDeviceMemory            depth_memory;
     VkImageView               depth_view;
+    // pick object ids
+    VkImage         pick_image;
+    VkDeviceMemory  pick_image_memory;
+    VkImageView     pick_image_view;
+    VkBuffer        pick_readback_buffer;
+    VkDeviceMemory  pick_readback_memory;
+    VkBuffer        pick_region_buffer;
+    VkDeviceMemory  pick_region_memory;
+    // debug
     #if DEBUG_APP == 1
     VkQueryPool query_pool; // GPU timestamps
     #endif
@@ -204,6 +213,58 @@ struct Swapchain create_swapchain(const struct Machine *machine, WINDOW w) {
         }
     };
     VK_CHECK(vkCreateImageView(machine->device, &ivci, NULL, &swapchain.depth_view));
+    
+    // create object pick image
+    VkImageCreateInfo img = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .extent = {
+            .width  = swapchain.swapchain_extent.width,
+            .height = swapchain.swapchain_extent.height,
+            .depth  = 1
+        },
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .format = VK_FORMAT_R32_UINT,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                 VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+
+    VK_CHECK(vkCreateImage(machine->device, &img, NULL, &swapchain.pick_image));
+
+    VkMemoryRequirements memReq;
+    vkGetImageMemoryRequirements(machine->device, swapchain.pick_image, &memReq);
+
+    VkMemoryAllocateInfo alloc = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = memReq.size,
+        .memoryTypeIndex = find_memory_type_index(
+            machine->physical_device,
+            memReq.memoryTypeBits,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+        )
+    };
+    VK_CHECK(vkAllocateMemory(machine->device, &alloc, NULL, &swapchain.pick_image_memory));
+    VK_CHECK(vkBindImageMemory(machine->device, swapchain.pick_image, swapchain.pick_image_memory, 0));
+
+    VkImageViewCreateInfo view = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image = swapchain.pick_image,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = VK_FORMAT_R32_UINT,
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1
+        }
+    };
+    VK_CHECK(vkCreateImageView(machine->device, &view, NULL, &swapchain.pick_image_view));
 
     pf_timestamp("Swapchain created");
     return swapchain;

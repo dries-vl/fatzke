@@ -71,6 +71,7 @@ struct Uniforms {
     float camera_pitch_sin, camera_pitch_cos;
     float camera_yaw_sin, camera_yaw_cos;
     float time; // seconds
+    u32 selected_object_id;
 };
 
 #if DEBUG_APP == 1
@@ -187,6 +188,86 @@ static void create_and_upload_device_local_buffer(
 
 #include "texture.h"
 
+int g_want_pick = 0;
+int g_mouse_x = 0, g_mouse_y = 0;
+u32 selected_object_id = 0;
+void do_pick(struct Machine* machine, struct Swapchain* swapchain)
+{
+    if (!g_want_pick) return;
+    g_want_pick = 0;
+
+    // Clamp to viewport
+    uint32_t x = (uint32_t)g_mouse_x;
+    uint32_t y = (uint32_t)g_mouse_y;
+    if (x >= swapchain->swapchain_extent.width ||
+        y >= swapchain->swapchain_extent.height)
+        return;
+
+    // Vulkan origin is top-left, your window likely matches.
+    // If Y is flipped somewhere, adjust here.
+
+    VkCommandBuffer cmd = begin_single_use_cmd(machine->device, swapchain->command_pool_graphics);
+
+    // Transition pick image to TRANSFER_SRC_OPTIMAL
+    VkImageMemoryBarrier2 to_src = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask  = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        .dstStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT,
+        .oldLayout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .newLayout     = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        .image         = swapchain->pick_image,
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0, .levelCount = 1,
+            .baseArrayLayer = 0, .layerCount = 1
+        }
+    };
+    vkCmdPipelineBarrier2(cmd, &(VkDependencyInfo){
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers = &to_src
+    });
+
+    VkBufferImageCopy copy = {
+        .imageSubresource = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .mipLevel = 0,
+            .baseArrayLayer = 0,
+            .layerCount = 1
+        },
+        .imageOffset = { (int32_t)x, (int32_t)y, 0 },
+        .imageExtent = { 1, 1, 1 },
+    };
+
+    vkCmdCopyImageToBuffer(
+        cmd,
+        swapchain->pick_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        swapchain->pick_readback_buffer,
+        1, &copy
+    );
+
+    end_single_use_cmd(machine->device, machine->queue_graphics, swapchain->command_pool_graphics, cmd);
+
+    // read back uint
+    uint32_t* id = NULL;
+    VK_CHECK(vkMapMemory(machine->device, swapchain->pick_readback_memory, 0, sizeof(uint32_t), 0, (void**)&id));
+    uint32_t picked = *id;
+    vkUnmapMemory(machine->device, swapchain->pick_readback_memory);
+
+    selected_object_id = picked;
+    if (picked != 0) {
+        printf("Picked object id: %u\n", picked);
+        // interpret it as chunk/object index however you want
+    } else {
+        printf("No object under cursor\n");
+    }
+
+    // Next frame, your barrier before rendering sets layout back to COLOR_ATTACHMENT_OPTIMAL,
+    // starting from TRANSFER_SRC_OPTIMAL (you can update oldLayout accordingly).
+}
+
 #pragma region MAIN
 // todo: avoid globals
 WINDOW w;
@@ -239,6 +320,11 @@ void mouse_input_callback(void* ud, i32 x, i32 y, enum BUTTON button, int state)
     if (button == MOUSE_LEFT || button == MOUSE_RIGHT || button == MOUSE_MIDDLE) {
         if (state == PRESSED) buttons[button] = 1;
         else buttons[button] = 0;
+    }
+    if (button == MOUSE_LEFT && state == PRESSED) {
+        g_want_pick = 1;
+        g_mouse_x = x;
+        g_mouse_y = y;
     }
 }
 void process_inputs() {
@@ -360,13 +446,14 @@ int main(void) {
     VkVertexInputBindingDescription bindings_vi[1] = {
         { .binding = 0, .stride = sizeof(struct gpu_rendered_instance), .inputRate = VK_VERTEX_INPUT_RATE_INSTANCE }
     };
-    VkVertexInputAttributeDescription attrs_vi[1] = {
-        { .location = 0, .binding = 0, .format = VK_FORMAT_UNDEFINED, .offset = 0 } // my instance data is a custom struct?
+    VkVertexInputAttributeDescription attrs_vi[2] = {
+        { .location = 0, .binding = 0, .format = VK_FORMAT_R32_UINT, .offset = 0 }, 
+        { .location = 1, .binding = 0, .format = VK_FORMAT_R32_UINT, .offset = 4 }, 
     };
     VkPipelineVertexInputStateCreateInfo vertex_input = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
         .vertexBindingDescriptionCount   = 1, .pVertexBindingDescriptions   = bindings_vi,
-        .vertexAttributeDescriptionCount = 1, .pVertexAttributeDescriptions = attrs_vi
+        .vertexAttributeDescriptionCount = 2, .pVertexAttributeDescriptions = attrs_vi
     };
 
     VkPipelineInputAssemblyStateCreateInfo input_assembly = {
@@ -397,10 +484,13 @@ int main(void) {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
         .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT
     };
-    VkPipelineColorBlendAttachmentState color_blend_attachment = { .colorWriteMask = 0xF };
+    VkPipelineColorBlendAttachmentState color_blend_attachment[2] = {
+         { .colorWriteMask = 0xF },
+         { .colorWriteMask = 0xF }
+    };
     VkPipelineColorBlendStateCreateInfo color_blend = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-        .attachmentCount = 1,
+        .attachmentCount = 2,
         .pAttachments    = &color_blend_attachment
     };
     VkGraphicsPipelineCreateInfo graphics_info = {
@@ -417,8 +507,8 @@ int main(void) {
     };
     VkPipelineRenderingCreateInfo pr = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
-        .colorAttachmentCount = 1,
-        .pColorAttachmentFormats = (VkFormat[]){ swapchain.swapchain_format },
+        .colorAttachmentCount = 2,
+        .pColorAttachmentFormats = (VkFormat[]){ swapchain.swapchain_format, VK_FORMAT_R32_UINT },
         .depthAttachmentFormat = VK_FORMAT_D32_SFLOAT,
         // .stencilAttachmentFormat = VK_FORMAT_UNDEFINED,
     };
@@ -540,12 +630,11 @@ int main(void) {
 
     #define OBJECTS_PER_CHUNK 64
     #define PLANE_CHUNK_COUNT 6400
-    #define UNIT_CHUNK_COUNT  1
+    #define UNIT_CHUNK_COUNT  1024
     #define TOTAL_CHUNK_COUNT (PLANE_CHUNK_COUNT + UNIT_CHUNK_COUNT)
     struct gpu_chunk { uint32_t object_id; };
     static struct gpu_chunk gpu_chunks[TOTAL_CHUNK_COUNT] = {0};
     // first 6400 are plane objects, id is zero so default zeroed works out
-    gpu_chunks[6400] = (struct gpu_chunk){ .object_id = OBJECT_TYPE_UNIT };
     static struct object_chunks { u32 chunk_count, first_chunk; } scene[OBJECT_TYPE_COUNT] = {
         [OBJECT_TYPE_PLANE] = { .chunk_count = PLANE_CHUNK_COUNT, .first_chunk = 0 },
         [OBJECT_TYPE_UNIT]  = { .chunk_count = UNIT_CHUNK_COUNT,  .first_chunk = PLANE_CHUNK_COUNT }
@@ -556,11 +645,14 @@ int main(void) {
     static struct gpu_object gpu_objects[TOTAL_CHUNK_COUNT * OBJECTS_PER_CHUNK];
 
     // move the unit objects to a square grid for now
-    int first_unit_object = 6400 * OBJECTS_PER_CHUNK;
-    for (int i = 0; i < 64; ++i) {
-        gpu_objects[first_unit_object + i].x = (uint16_t)(i % 8) * 10;
+    int first_unit_object = PLANE_CHUNK_COUNT * OBJECTS_PER_CHUNK;
+    for (int i = 0; i < UNIT_CHUNK_COUNT; ++i) {
+        gpu_chunks[scene[OBJECT_TYPE_UNIT].first_chunk + i].object_id = OBJECT_TYPE_UNIT;
+    }
+    for (int i = 0; i < UNIT_CHUNK_COUNT * OBJECTS_PER_CHUNK; ++i) {
+        gpu_objects[first_unit_object + i].x = (uint16_t)(i % 256) * 10;
         gpu_objects[first_unit_object + i].y = (uint16_t)((0)) << 16;
-        gpu_objects[first_unit_object + i].z = (uint16_t)((i / 8) * 10);
+        gpu_objects[first_unit_object + i].z = (uint16_t)((i / 256) * 10);
         {
             float yaw = 0.0f;
             gpu_objects[first_unit_object + i].cos = (((uint8_t)lrintf(cosf(yaw) * 127.0f)));
@@ -597,7 +689,7 @@ int main(void) {
     VkDeviceSize size_count_per_mesh = total_mesh_count * sizeof(uint32_t);
     VkDeviceSize size_offset_per_mesh = total_mesh_count * sizeof(uint32_t);
     VkDeviceSize size_visible_ids = total_object_count * sizeof(uint32_t);
-    VkDeviceSize size_rendered_instances   = total_instance_count * sizeof(struct gpu_rendered_instance);
+    VkDeviceSize size_rendered_instances = total_instance_count * sizeof(struct gpu_rendered_instance);
     VkDeviceSize size_draw_calls  = total_mesh_count * sizeof(VkDrawIndexedIndirectCommand);
     
     VkDeviceSize size_object_mesh_list = sizeof(object_mesh_ids);
@@ -714,6 +806,25 @@ int main(void) {
         size_objects, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
         NULL, // uploaded later per mesh
         &renderer.buffer_objects, &renderer.memory_objects, 0);
+    
+    // readback object id
+    create_buffer_and_memory(
+        machine.device, machine.physical_device,
+        sizeof(uint32_t),
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        &swapchain.pick_readback_buffer, &swapchain.pick_readback_memory
+    );
+    // readback a region
+    uint32_t pick_width  = swapchain.swapchain_extent.width;
+    uint32_t pick_height = swapchain.swapchain_extent.height;
+    VkDeviceSize pick_max_bytes = (VkDeviceSize)pick_width * pick_height * sizeof(uint32_t);
+    create_buffer_and_memory(
+        machine.device, machine.physical_device,
+        pick_max_bytes,
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        &swapchain.pick_region_buffer, &swapchain.pick_region_memory);
 
     pf_timestamp("Buffers created");
 
@@ -839,7 +950,8 @@ int main(void) {
         vkFreeMemory(machine.device, staging_mem, NULL);
     }
 
-    vkDestroyCommandPool(machine.device, upload_pool, NULL);
+    // todo: we need this still for the pick readback region, why?
+    // vkDestroyCommandPool(machine.device, upload_pool, NULL);
     pf_timestamp("Uploads complete");
 
     // --- Descriptor pool & set (unchanged, but note buffers are now DEVICE_LOCAL) ---
@@ -1067,10 +1179,132 @@ int main(void) {
         struct Uniforms u = {0};
         encode_uniforms(&u, cam_x, cam_y, cam_z, cam_yaw, cam_pitch);
         u.time = (f32) (pf_ns_now() - pf_ns_start()) / 1e9; // send time in seconds to the gpu
+        u.selected_object_id = selected_object_id;
         void*dst=NULL;
         VK_CHECK(vkMapMemory(machine.device, renderer.memory_uniforms, 0, sizeof u, 0, &dst));
         memcpy(dst, &u, sizeof u);
         vkUnmapMemory(machine.device, renderer.memory_uniforms);
+        
+        // do pick
+        vkQueueWaitIdle(machine.queue_graphics);
+        do_pick(&machine, &swapchain);
+        
+        // region pick
+        if (buttons[MOUSE_LEFT]) {
+            // read back a rectangle of ids from the pick image
+            // temp to get the rect
+            // screen coords from your mouse callback (0..width-1, 0..height-1)
+            int drag_start_x = 0, drag_start_y = 0;
+            int drag_end_x   = 100, drag_end_y   = 100;
+            int sx0 = drag_start_x;
+            int sy0 = drag_start_y;
+            int sx1 = drag_end_x;
+            int sy1 = drag_end_y;
+
+            // normalize to a rectangle
+            int min_sx = sx0 < sx1 ? sx0 : sx1;
+            int max_sx = sx0 > sx1 ? sx0 : sx1;
+            int min_sy = sy0 < sy1 ? sy0 : sy1;
+            int max_sy = sy0 > sy1 ? sy0 : sy1;
+
+            // clamp to screen
+            uint32_t w = swapchain.swapchain_extent.width;
+            uint32_t h = swapchain.swapchain_extent.height;
+
+            if (min_sx < 0)        min_sx = 0;
+            if (min_sy < 0)        min_sy = 0;
+            if (max_sx >= (int)w)  max_sx = (int)w - 1;
+            if (max_sy >= (int)h)  max_sy = (int)h - 1;
+
+            // width/height of the rectangle
+            uint32_t rect_w = (uint32_t)(max_sx - min_sx + 1);
+            uint32_t rect_h = (uint32_t)(max_sy - min_sy + 1);
+
+            // early out if the rect is degenerate
+            if (rect_w == 0 || rect_h == 0) {
+                // nothing selected
+                printf("No selection (degenerate rectangle)\n");
+            }
+            VkCommandBuffer cmd1 = begin_single_use_cmd(machine.device, upload_pool);
+            // Transition pick_image from COLOR_ATTACHMENT_OPTIMAL to TRANSFER_SRC_OPTIMAL
+            VkImageMemoryBarrier2 to_src = {
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                .srcStageMask  = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                .srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                .dstStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT,
+                .oldLayout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                .newLayout     = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                .image         = swapchain.pick_image,
+                .subresourceRange = {
+                    .aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .baseMipLevel   = 0,
+                    .levelCount     = 1,
+                    .baseArrayLayer = 0,
+                    .layerCount     = 1
+                }
+            };
+            vkCmdPipelineBarrier2(cmd1, &(VkDependencyInfo){
+                .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                .imageMemoryBarrierCount = 1,
+                .pImageMemoryBarriers = &to_src
+            });
+            // Copy rectangle
+            VkBufferImageCopy region = {
+                .imageSubresource = {
+                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .mipLevel   = 0,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1
+                },
+                .imageOffset = { (int32_t)min_sx, (int32_t)min_sy, 0 },
+                .imageExtent = { rect_w, rect_h, 1 },
+                .bufferOffset = 0,
+                .bufferRowLength   = 0, // 0 = tightly packed
+                .bufferImageHeight = 0,
+            };
+            vkCmdCopyImageToBuffer(
+                cmd1,
+                swapchain.pick_image,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                swapchain.pick_region_buffer,
+                1, &region
+            );
+            // (optional) transition back to COLOR_ATTACHMENT_OPTIMAL for next frame,
+            // or you can let your render-time barrier handle oldLayout=TRANSFER_SRC_OPTIMAL
+            // next frame.
+            end_single_use_cmd(machine.device, machine.queue_graphics, upload_pool, cmd1);
+            // map and read the picked ids
+            uint32_t* pixels = NULL;
+            VkDeviceSize bytes = (VkDeviceSize)rect_w * rect_h * sizeof(uint32_t);
+            VK_CHECK(vkMapMemory(machine.device, swapchain.pick_region_memory, 0, bytes, 0, (void**)&pixels));
+            // Temporary CPU list of IDs (we’ll dedupe after)
+            static const uint32_t MAX_SELECTION = 65536;
+            uint32_t tmp_ids[MAX_SELECTION];
+            uint32_t tmp_count = 0;
+            for (uint32_t y = 0; y < rect_h; ++y) {
+                for (uint32_t x = 0; x < rect_w; ++x) {
+                    uint32_t id = pixels[y * rect_w + x];
+                    if (id == 0) continue; // 0 = background/no object (based on how we wrote the FS)
+                    if (tmp_count >= MAX_SELECTION) break; // avoid overflow
+                    tmp_ids[tmp_count++] = id;
+                }
+            }
+            vkUnmapMemory(machine.device, swapchain.pick_region_memory);
+            // dedupe
+            qsort(tmp_ids, tmp_count, sizeof(u32), compare_u32);
+            // Unique pass
+            uint32_t unique_count = 0;
+            for (uint32_t i = 0; i < tmp_count; ++i) {
+                if (i == 0 || tmp_ids[i] != tmp_ids[i - 1]) {
+                    tmp_ids[unique_count++] = tmp_ids[i];
+                }
+            }
+            // Use the result
+            for (uint32_t i = 0; i < unique_count; ++i) {
+                printf("Selected object: %u\n", tmp_ids[i]);
+            }
+        }
 
         // start recording for this frame's command buffer
         f32 frame_start_time = (f32) (pf_ns_now() - pf_ns_start()) / 1e6;
@@ -1115,9 +1349,6 @@ int main(void) {
             };
             VkDependencyInfo dep0 = { .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &xfer_to_compute };
             vkCmdPipelineBarrier2(cmd, &dep0);
-            #if DEBUG_APP == 1
-            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, swapchain.query_pool, q0 + Q_AFTER_ZERO);
-            #endif
 
             // VISIBLE CHUNKS PASS
             vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,renderer.common_pipeline_layout, 0, 1, &renderer.descriptor_set, 0, NULL);
@@ -1197,6 +1428,9 @@ int main(void) {
                 .bufferMemoryBarrierCount = 5,
                 .pBufferMemoryBarriers    = barriers,
             });
+            #if DEBUG_APP == 1
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, swapchain.query_pool, q0 + Q_AFTER_ZERO);
+            #endif
 
             // VISIBLE OBJECTS PASS
             vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,renderer.common_pipeline_layout, 0, 1, &renderer.descriptor_set, 0, NULL);
@@ -1247,6 +1481,9 @@ int main(void) {
               .bufferMemoryBarrierCount = 1,
               .pBufferMemoryBarriers = &prepare_to_scatter_indirect,
             });
+            #if DEBUG_APP == 1
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, swapchain.query_pool, q0 + Q_AFTER_COMP_INDIRECT);
+            #endif
 
             // SCATTER PASS
             uint32_t mode_scatter = 3;
@@ -1256,9 +1493,6 @@ int main(void) {
                 0, sizeof(uint32_t), &mode_scatter);
             vkCmdDispatchIndirect(cmd, renderer.buffer_indirect_workgroups, 0);
             
-            #if DEBUG_APP == 1
-            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, swapchain.query_pool, q0 + Q_AFTER_COMP_INDIRECT);
-            #endif
             VkBufferMemoryBarrier2 scatter_to_indirect = {
                 .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
                 .srcStageMask = CS,
@@ -1274,15 +1508,15 @@ int main(void) {
             // (B) make VISIBLE[] visible to the vertex/graphics stage (SSBO reads in VS or later)
             VkBufferMemoryBarrier2 scatter_to_vs = {
                 .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-                .srcStageMask = CS,
-                .srcAccessMask = SSW,                  // wrote instance data
-                .dstStageMask = VS,                    // or FRAGMENT if read there; include both if needed
-                .dstAccessMask = SSR,
+                .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,              // compute writes
+                .dstStageMask  = VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT,      // vertex input stage
+                .dstAccessMask = VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT,     // vertex buffer reads
                 .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
                 .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .buffer = renderer.buffer_visible,     // backing buffer for VISIBLE
+                .buffer = renderer.buffer_visible,
                 .offset = 0,
-                .size = VK_WHOLE_SIZE,
+                .size   = VK_WHOLE_SIZE,
             };
             VkDependencyInfo dep_to_graphics = {
                 .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
@@ -1329,13 +1563,43 @@ int main(void) {
             };
             vkCmdPipelineBarrier2(cmd, &(VkDependencyInfo){ .sType=VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
               .imageMemoryBarrierCount=1, .pImageMemoryBarriers=&to_color });
-            VkRenderingAttachmentInfo swap_att = {
-              .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-              .imageView = swapchain.swapchain_views[swap_image_index],
-              .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-              .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-              .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+            VkImageMemoryBarrier2 to_pick = {
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                .srcStageMask  = VK_PIPELINE_STAGE_2_NONE,
+                .srcAccessMask = 0,
+                .dstStageMask  = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                .dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                .oldLayout     = VK_IMAGE_LAYOUT_UNDEFINED,            // we discard previous contents
+                .newLayout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                .image         = swapchain.pick_image,
+                .subresourceRange = {
+                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .baseMipLevel = 0, .levelCount = 1,
+                    .baseArrayLayer = 0, .layerCount = 1
+                }
             };
+
+            vkCmdPipelineBarrier2(cmd, &(VkDependencyInfo){
+                .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                .imageMemoryBarrierCount = 1,
+                .pImageMemoryBarriers    = &to_pick
+            });
+            VkRenderingAttachmentInfo color_atts[2];
+            color_atts[0] = (VkRenderingAttachmentInfo){
+                .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                .imageView = swapchain.swapchain_views[swap_image_index],
+                .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+                .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+            };
+            color_atts[1] = (VkRenderingAttachmentInfo){
+                .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                .imageView = swapchain.pick_image_view,
+                .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,   // clear to 0 = "no object"
+                .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+                .clearValue = { .color = { .uint32 = {0,0,0,0} } },
+            };;
             VkRenderingAttachmentInfo depth_att = {
               .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
               .imageView = swapchain.depth_view,
@@ -1348,8 +1612,8 @@ int main(void) {
               .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
               .renderArea = { .offset = {0,0}, .extent = swapchain.swapchain_extent },
               .layerCount = 1,
-              .colorAttachmentCount = 1,
-              .pColorAttachments = &swap_att,
+              .colorAttachmentCount = 2,
+              .pColorAttachments = &color_atts,
               .pDepthAttachment = &depth_att
             };
             #if DEBUG_APP == 1

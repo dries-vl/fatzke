@@ -14,8 +14,8 @@ typedef __SIZE_TYPE__ usize;
 // SETTINGS
 #define APP_NAME "VK: work in progress"
 #define DEBUG_VULKAN 0
-#define DEBUG_APP 1
-#define DEBUG_CPU 1
+#define DEBUG_APP 0
+#define DEBUG_CPU 0
 
 // VULKAN
 #define USE_DISCRETE_GPU 0
@@ -67,3 +67,13 @@ void *pf_display_or_instance(WINDOW);
 int pf_window_visible(WINDOW);
 int pf_poll_events(WINDOW);
 WINDOW pf_create_window(void*,KEYBOARD_CB,MOUSE_CB);
+
+
+static int compare_u32(const void* a, const void* b)
+{
+    u32 aa = *(const u32*)a;
+    u32 bb = *(const u32*)b;
+    if (aa < bb) return -1;
+    if (aa > bb) return  1;
+    return 0;
+}

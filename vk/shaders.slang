@@ -7,7 +7,6 @@ static const float near_plane         = 5.0f;                                 //
 static const float divide_by_127      = float(1.0/127.0);
 static const float divide_by_511      = float(1.0/511.0);
 static const float divide_by_32767    = float(1.0/32767.0);
-
 static const float tanHalfFovY = tan(0.5 * fov_y_radians); // for frustrum culling
 static const float tanHalfFovX = tanHalfFovY * aspect_ratio;
 
@@ -54,6 +53,7 @@ cbuffer uniforms {
     float camera_pitch_sin, camera_pitch_cos;
     float camera_yaw_sin, camera_yaw_cos;
     float time; // seconds
+    uint selected_object_id;
 };
 [[vk::binding(17, 0)]] Sampler2D TEXTURES[64];
 
@@ -73,6 +73,8 @@ uint choose_lod_step(float distance, float radius) {
     if (distance >= d[3]) return 1;
     return 0;
 }
+
+groupshared uint counts[25];
 
 [shader("compute")] [numthreads(64,1,1)]
 void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_DispatchThreadID) {
@@ -127,6 +129,10 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
     }
     // OBJECT PASS
     else if (PUSH_CONSTANTS.mode == 1) {
+        // workgroup setup
+        if (gtid.x < 5) // init to zero
+            counts[gtid.x] = 0;
+        GroupMemoryBarrierWithGroupSync();
         // same fetches for whole workgroup
         uint stride, mesh_count, object_count, chunk_count;
         OBJECTS.GetDimensions(object_count, stride);
@@ -185,17 +191,37 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         // near cull
         // if (view.z < 0) valid = false;
 
+        VISIBLE_OBJECT_IDS[tid.x] = valid ? 1 : 0;
         if (valid) {
-            uint slot; InterlockedAdd(COUNT_PER_MESH[mesh_id], 1, slot);
-            // todo: we will use per-workgroup count here to have only one atomic add per 64 (this is possible)
-            uint slot1; InterlockedAdd(VISIBLE_OBJECT_COUNT[0], 1, slot1);
-            VISIBLE_OBJECT_IDS[slot1] = object_id;
-            // todo: we will write multiple mesh instances here; ie. a torso + head + shield + weapon
+            uint slot; InterlockedAdd(counts[lod_level], 1, slot);
+            // todo: we should use per-workgroup count here to have only one atomic add per 64 (this is possible)
             if (chunk_id >= 6400) {
                 // add a head
-                uint slot2;  InterlockedAdd(COUNT_PER_MESH[mesh_id + 40], 1, slot2);
+                uint slot2;  InterlockedAdd(counts[5 + lod_level], 1, slot2);
             }
         }
+        GroupMemoryBarrierWithGroupSync();
+        if (gtid.x == 0) {
+            // bodies: 5 LODs
+            [unroll]
+            for (uint lod = 0; lod < 5; ++lod) {
+                uint c = counts[lod];
+                if (c != 0) {
+                    InterlockedAdd(COUNT_PER_MESH[mesh_id + lod], c);
+                }
+            }
+
+            if (chunk_id >= 6400) {
+                [unroll]
+                for (uint lod = 0; lod < 5; ++lod) {
+                    uint c = counts[5 + lod];
+                    if (c != 0) {
+                        InterlockedAdd(COUNT_PER_MESH[mesh_id + 40], c);
+                    }
+                }
+            }
+        }
+
     }
     // prefix sum
     else if (PUSH_CONSTANTS.mode == 2) {
@@ -217,9 +243,9 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         }
 
         // fill the indirect dispatch buffer for the scatter pass with the sum of visible objects
-        INDIRECT_WORKGROUPS[0].group_count_x = (VISIBLE_OBJECT_COUNT[0] + 63) / 64;
-        INDIRECT_WORKGROUPS[0].group_count_y = 1;
-        INDIRECT_WORKGROUPS[0].group_count_z = 1;
+        // INDIRECT_WORKGROUPS[0].group_count_x = (VISIBLE_OBJECT_COUNT[0] + 63) / 64;
+        // INDIRECT_WORKGROUPS[0].group_count_y = 1;
+        // INDIRECT_WORKGROUPS[0].group_count_z = 1;
         
         return;
     }
@@ -228,15 +254,12 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         uint stride, mesh_count;
         MESH_INFO.GetDimensions(mesh_count, stride);
 
-        uint visible_id = tid.x;
-        if (visible_id >= VISIBLE_OBJECT_COUNT[0]) return;
-
-        uint object_id = VISIBLE_OBJECT_IDS[visible_id];
+        uint chunk_id = VISIBLE_CHUNK_IDS[gid.x]; // id in global chunk buffer
+        uint id_within_chunk = gtid.x;
+        uint object_id = (chunk_id * 64) + id_within_chunk; // id in global objects buffer
 
         // WRITE PACKED INSTANCE
         // unpack object position and move to camera space
-        uint chunk_id = object_id / 64;
-        uint id_within_chunk = object_id - (chunk_id * 64);
         float3 position;
         float object_yaw_cos = 1;
         float object_yaw_sin = 0;
@@ -292,11 +315,31 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         } else if (object_id < 6400 * 64) {
             RENDERED_INSTANCES[dst] = instance(object_id, 0);
         } else {
-            RENDERED_INSTANCES[dst] = instance(object_id, 0);
+            // ANIMATION
+            static const float FRAME_DURATION = 0.5f; // 4 frames per second
+            static const float ANIMATION_DURATION = 2.0f;  // 4 frames, 0.5s each
+            static const float PAIR_DURATION = ANIMATION_DURATION * 2.0f;
+            uint animation = 0;
+            uint next_animation = 1;
+            float phase = frac(object_id * 0.756688471) * ANIMATION_DURATION; // randomized start time for animations, somewhere within the 2s
+            float t_clip = time + phase; // progress with time
+            float t_in_clip = frac(t_clip / PAIR_DURATION) * PAIR_DURATION; // 0 to 4s
+            float frame_f = t_in_clip / FRAME_DURATION; // 0..8 (two clips is eight total frames)
+            uint frame0 = (uint)frame_f; // 0..7
+            uint clip0 = frame0 < 4 ? animation : next_animation;
+            uint frame1 = (frame0 + 1u) % 8u; // 0..7
+            uint clip1 = frame1 < 4 ? animation : next_animation;
+            if (frame0 >= 4) frame0 = frame0 - 4; frame0 = (frame0 * 5) + (clip0 * 4 * 5);
+            if (frame1 >= 4) frame1 = frame1 - 4; frame1 = (frame1 * 5) + (clip1 * 4 * 5);
+            float alpha  = frac(frame_f); // interpolation factor between the frame
+            uint packed_anim = ((frame0  & 0x3FF)) | ((frame1  & 0x3FF) << 10) | (((uint)round(alpha * 1023.0f) & 0x3FF) << 20);
+            // ADD MESHES
+            // add the body
+            RENDERED_INSTANCES[dst] = instance(object_id, packed_anim);
             // add the head
             uint slot_head; InterlockedAdd(DRAW_CALLS[mesh_id + 40].instance_count, 1, slot_head);
             const uint head_dst = OFFSET_PER_MESH[mesh_id + 40] + slot_head;
-            RENDERED_INSTANCES[head_dst] = instance(object_id, 0);
+            RENDERED_INSTANCES[head_dst] = instance(object_id, packed_anim);
         }
     }
 }
@@ -305,6 +348,7 @@ struct vs_out {
     float4 pos    : SV_Position;                                           // clip-space position
     float2 uv     : TEXCOORD0;                                             // texture coordinates
     float3 normal : TEXCOORD1;                                             // surface normal
+    uint object_id : TEXCOORD2;
 };
 
 static const uint MAX_VERTICES = 32u;
@@ -330,7 +374,7 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
         if (VERTEX_ID == 2) p = float2(-1.0, -1.0); // was (-1, 3)
         o.pos = float4(p, 0.0000001, 1.0); // 1.0 / 1.0 -> drawn behind everything else
         o.normal = float3(0.3, 0.5, 1.0);
-        // o.uv = 0;
+        o.object_id = 0;
         return o;
     }
  
@@ -393,24 +437,10 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
         instance_z = 10.0 * view.z;
         cos_d =  object_yaw_cos * camera_yaw_cos + object_yaw_sin * camera_yaw_sin; // cos(a-b)
         sin_d =  object_yaw_sin* camera_yaw_cos - object_yaw_cos * camera_yaw_sin; // sin(a-b)
-        // ANIMATION
-        static const float FRAME_DURATION = 0.5f; // 4 frames per second
-        static const float ANIMATION_DURATION = 2.0f;  // 4 frames, 0.5s each
-        static const float PAIR_DURATION = ANIMATION_DURATION * 2.0f;
-        uint animation = 0;
-        uint next_animation = 1;
-        float phase = frac(object_id * 0.756688471) * ANIMATION_DURATION; // randomized start time for animations, somewhere within the 2s
-        float t_clip = time + phase; // progress with time
-        float t_in_clip = frac(t_clip / PAIR_DURATION) * PAIR_DURATION; // 0 to 4s
-        float frame_f = t_in_clip / FRAME_DURATION; // 0..8 (two clips is eight total frames)
-        uint frame0 = (uint)frame_f; // 0..7
-        uint clip0 = frame0 < 4 ? animation : next_animation;
-        uint frame1 = (frame0 + 1u) % 8u; // 0..7
-        uint clip1 = frame1 < 4 ? animation : next_animation;
-        // todo: pass these 3 values from object shader, instead of passing two animations, pass as 1010102 format
-        if (frame0 >= 4) frame0 = frame0 - 4; frame0 = (frame0 * 5) + (clip0 * 4 * 5);
-        if (frame1 >= 4) frame1 = frame1 - 4; frame1 = (frame1 * 5) + (clip1 * 4 * 5);
-        float alpha  = frac(frame_f); // interpolation factor between the frames
+        uint packed_anim = INSTANCE.animation;
+        uint frame0  =  packed_anim        & 0x3FF;        // 10 bits
+        uint frame1  = (packed_anim >> 10) & 0x3FF;        // 10 bits
+        float alpha = (float)((packed_anim >> 20) & 0x3FF) / 1023.0f;   // 10 bits
         uint base_vertex = MESH_INFO[DRAW_ID + frame0].base_vertex;
         uint base_vertex_next = MESH_INFO[DRAW_ID + frame1].base_vertex;
         // fetch and unpack vertex position, represented as cm (4 bytes)
@@ -467,12 +497,20 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
     o.pos = float4(cx, cy, cz, w);
     o.normal = normal;
     o.uv = uv;
+    o.object_id = INSTANCE.object_id;
     return o;
 }
 
+struct ps_out {
+    float4 color : SV_Target0; // normal color
+    uint   id    : SV_Target1; // object ID
+};
+
 [shader("fragment")]
-float4 fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
-    if (PUSH_CONSTANTS.mode == 1) return float4(i.normal, 1.0);
+ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
+    ps_out o;
+    o.id = i.object_id;
+    if (PUSH_CONSTANTS.mode == 1) return ps_out(float4(i.normal, 1.0), i.object_id);
     // // debug draw triangles as distinct colors
     float3 color = frac(sin((primID+43) * 43.5453) * float3(23.1407, 85.928, 43.533));
     if(color.x+color.y+color.z < 0.1) color = float3(float(primID % 32) / 32, float((primID + 38) % 64) / 64, float((primID + 17) % 32) / 32);
@@ -480,5 +518,9 @@ float4 fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
     // float4 color = TEXTURES[0].Sample(i.uv);
     float4 output = TEXTURES[1].Sample(i.uv);
     output.xyz += color / 5;
-    return output;
+    o.color = output;
+    if (i.object_id == selected_object_id) {
+        o.color.xyz += float3(0.2);
+    }
+    return o;
 }
