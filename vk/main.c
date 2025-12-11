@@ -72,6 +72,7 @@ struct Uniforms {
     float camera_yaw_sin, camera_yaw_cos;
     float time; // seconds
     u32 selected_object_id;
+    float drag_rect_start_x, drag_rect_start_y, drag_rect_end_x, drag_rect_end_y; // in uv
 };
 
 #if DEBUG_APP == 1
@@ -272,6 +273,9 @@ void do_pick(struct Machine* machine, struct Swapchain* swapchain)
 // todo: avoid globals
 WINDOW w;
 i32 buttons[BUTTON_COUNT];
+int g_drag_active = 0;
+int g_drag_start_x = 0, g_drag_start_y = 0;
+int g_drag_end_x   = 0, g_drag_end_y   = 0;
 float cam_x = 0, cam_y = 2, cam_z = -5, cam_yaw = 0, cam_pitch = 0;
 void move_forward(int amount) {
     double rad = (double)(cam_yaw) * 3.14159265f / 32767.0f;
@@ -314,17 +318,33 @@ void mouse_input_callback(void* ud, i32 x, i32 y, enum BUTTON button, int state)
         else buttons[MOUSE_MARGIN_TOP] = 0;
         if (y > pf_window_height(w) - 50) buttons[MOUSE_MARGIN_BOTTOM] += 5;
         else buttons[MOUSE_MARGIN_BOTTOM] = 0;
+        if (g_drag_active) {
+            g_drag_end_x = x;
+            g_drag_end_y = y;
+        }
     }
     if (button == MOUSE_SCROLL) buttons[MOUSE_SCROLL] += scaled(state);
     if (button == MOUSE_SCROLL_SIDE) buttons[MOUSE_SCROLL_SIDE] -= scaled(state / 5);
     if (button == MOUSE_LEFT || button == MOUSE_RIGHT || button == MOUSE_MIDDLE) {
-        if (state == PRESSED) buttons[button] = 1;
-        else buttons[button] = 0;
+        if (state == PRESSED) {
+            // mouse click location
+            g_mouse_x = x;
+            g_mouse_y = y;
+            buttons[button] = 1;
+            // mouse drag location
+            g_drag_active  = 1;
+            g_drag_start_x = x;
+            g_drag_start_y = y;
+            g_drag_end_x   = x;
+            g_drag_end_y   = y;
+        }
+        else {
+            buttons[button] = 0;
+            g_drag_active = 0;
+        }
     }
     if (button == MOUSE_LEFT && state == PRESSED) {
         g_want_pick = 1;
-        g_mouse_x = x;
-        g_mouse_y = y;
     }
 }
 void process_inputs() {
@@ -825,6 +845,13 @@ int main(void) {
         VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         &swapchain.pick_region_buffer, &swapchain.pick_region_memory);
+    // readback depth
+    create_buffer_and_memory(
+        machine.device, machine.physical_device,
+        sizeof(float),
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        &swapchain.depth_readback_buffer, &swapchain.depth_readback_memory);
 
     pf_timestamp("Buffers created");
 
@@ -1174,12 +1201,44 @@ int main(void) {
         if (acquire_result == VK_ERROR_OUT_OF_DATE_KHR) { recreate_swapchain(&machine, &renderer, &swapchain, w); continue; }
         if (acquire_result != VK_SUCCESS && acquire_result != VK_SUBOPTIMAL_KHR) { printf("vkAcquireNextImageKHR failed: %s\n", vk_result_str(acquire_result)); break; }
         
-        #pragma region update uniforms
+        #pragma region HANDLE INPUT
         process_inputs();
+
+        // rect to ndc
+        float rect_x0 = 0.0f, rect_y0 = 0.0f;
+        float rect_x1 = 0.0f, rect_y1 = 0.0f;
+        int   rect_valid = 0;
+        if (g_drag_active) {
+            int sx0 = g_drag_start_x;
+            int sy0 = g_drag_start_y;
+            int sx1 = g_drag_end_x;
+            int sy1 = g_drag_end_y;
+            // normalize min/max
+            int min_sx = sx0 < sx1 ? sx0 : sx1;
+            int max_sx = sx0 > sx1 ? sx0 : sx1;
+            int min_sy = sy0 < sy1 ? sy0 : sy1;
+            int max_sy = sy0 > sy1 ? sy0 : sy1;
+            // avoid degenerate rect
+            if (max_sx > min_sx && max_sy > min_sy) {
+                rect_valid = 1;
+                rect_x0 = (float)min_sx / (float)swapchain.swapchain_extent.width;
+                rect_y0 = (float)min_sy / (float)swapchain.swapchain_extent.height;
+                rect_x1 = (float)max_sx / (float)swapchain.swapchain_extent.width;
+                rect_y1 = (float)max_sy / (float)swapchain.swapchain_extent.height;
+            }
+            printf("Drag rect screen: (%d,%d)-(%d,%d)  normalized: (%.3f,%.3f)-(%.3f,%.3f)\n",
+                min_sx, min_sy, max_sx, max_sy,
+                rect_x0, rect_y0, rect_x1, rect_y1
+            );
+        }
+
+        #pragma region update uniforms
         struct Uniforms u = {0};
         encode_uniforms(&u, cam_x, cam_y, cam_z, cam_yaw, cam_pitch);
         u.time = (f32) (pf_ns_now() - pf_ns_start()) / 1e9; // send time in seconds to the gpu
         u.selected_object_id = selected_object_id;
+        u.drag_rect_start_x = rect_x0; u.drag_rect_start_y = rect_y0;
+        u.drag_rect_end_x = rect_x1; u.drag_rect_end_y = rect_y1;
         void*dst=NULL;
         VK_CHECK(vkMapMemory(machine.device, renderer.memory_uniforms, 0, sizeof u, 0, &dst));
         memcpy(dst, &u, sizeof u);
@@ -1194,12 +1253,10 @@ int main(void) {
             // read back a rectangle of ids from the pick image
             // temp to get the rect
             // screen coords from your mouse callback (0..width-1, 0..height-1)
-            int drag_start_x = 0, drag_start_y = 0;
-            int drag_end_x   = 100, drag_end_y   = 100;
-            int sx0 = drag_start_x;
-            int sy0 = drag_start_y;
-            int sx1 = drag_end_x;
-            int sy1 = drag_end_y;
+            int sx0 = g_drag_start_x;
+            int sy0 = g_drag_start_y;
+            int sx1 = g_drag_end_x;
+            int sy1 = g_drag_end_y;
 
             // normalize to a rectangle
             int min_sx = sx0 < sx1 ? sx0 : sx1;
@@ -1303,6 +1360,151 @@ int main(void) {
             // Use the result
             for (uint32_t i = 0; i < unique_count; ++i) {
                 printf("Selected object: %u\n", tmp_ids[i]);
+            }
+        }
+        
+        // READBACK DEPTH
+        if (buttons[MOUSE_RIGHT]) {
+            uint32_t x = (uint32_t)g_mouse_x;
+            uint32_t y = (uint32_t)g_mouse_y;
+
+            // clamp
+            if (x >= swapchain.swapchain_extent.width ||
+                y >= swapchain.swapchain_extent.height)
+                return;
+
+            VkCommandBuffer cmd = begin_single_use_cmd(machine.device, upload_pool);
+
+            // transition depth image for read
+            VkImageMemoryBarrier2 to_src = {
+                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                .srcStageMask  = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                                 VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                .srcAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                .dstStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT,
+                .oldLayout     = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                .newLayout     = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                .image         = swapchain.depth_image,
+                .subresourceRange = {
+                    .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+                    .baseMipLevel = 0, .levelCount = 1,
+                    .baseArrayLayer = 0, .layerCount = 1
+                }
+            };
+            vkCmdPipelineBarrier2(cmd, &(VkDependencyInfo){
+                .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                .imageMemoryBarrierCount = 1,
+                .pImageMemoryBarriers    = &to_src
+            });
+
+            // copy 1×1 depth pixel
+            VkBufferImageCopy region = {
+                .imageSubresource = {
+                    .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+                    .mipLevel = 0,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1
+                },
+                .imageOffset = { (int32_t)x, (int32_t)y, 0 },
+                .imageExtent = { 1, 1, 1 },
+            };
+
+            vkCmdCopyImageToBuffer(
+                cmd,
+                swapchain.depth_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                swapchain.depth_readback_buffer,
+                1, &region
+            );
+
+            end_single_use_cmd(machine.device, machine.queue_graphics, upload_pool, cmd);
+
+            // read back the depth
+            float depth = 0.0f;
+            void* ptr = NULL;
+            VK_CHECK(vkMapMemory(machine.device, swapchain.depth_readback_memory, 0, sizeof(float), 0, &ptr));
+            memcpy(&depth, ptr, sizeof(float));
+            vkUnmapMemory(machine.device, swapchain.depth_readback_memory);
+            printf("Depth at (%u,%u): %f\n", g_mouse_x, g_mouse_y, depth);
+
+            // ---- interpret depth into world position ----
+            // interpret depth -> world position
+            float fov_y_radians = 60.0f * 3.14159265359f / 180.0f;   // MUST match shader
+            float proj_scale_y  = 1.0f / tanf(fov_y_radians * 0.5f);
+            float aspect_ratio  = 16.0f / 9.0f;                      // MUST match shader
+            float proj_scale_x  = proj_scale_y / aspect_ratio;
+            float near_plane    = 5.0f;                              // MUST match shader
+
+            if (depth > 0.0f) {
+                // ------------------------------------------------
+                // 1) Screen -> NDC
+                // ------------------------------------------------
+                float ndc_x =  2.0f * ((g_mouse_x + 0.5f) / (float)swapchain.swapchain_extent.width)  - 1.0f;
+                float ndc_y =  1.0f - 2.0f * ((g_mouse_y + 0.5f) / (float)swapchain.swapchain_extent.height);
+
+                // ------------------------------------------------
+                // 2) Depth -> camera-space (vx,vy,vz)
+                //
+                // From VS:
+                //   z_ndc = near_plane / vz
+                //   depth ≈ z_ndc
+                // => vz = near_plane / depth
+                // ------------------------------------------------
+                // vz is in the same units VS used (centimeters)
+                float vz_cm = near_plane / depth;
+                float vx_cm = ndc_x * vz_cm / proj_scale_x;
+                float vy_cm = ndc_y * vz_cm / proj_scale_y;
+
+                // Convert back to meters to match terrain/object_position math
+                float vx = vx_cm / 100.0f;
+                float vy = vy_cm / 100.0f;
+                float vz = vz_cm / 100.0f;
+
+                // Now (vx,vy,vz) is the same "view" space your shader gets *before* scaling by 100
+
+                // ------------------------------------------------
+                // 3) Undo pitch & yaw (exact inverse of shader code)
+                //
+                // Shader:
+                //   position_yaw_z = sy*pos.x + cy*pos.z;
+                //   view.x = cy*pos.x - sy*pos.z;
+                //   view.y = cp*pos.y + sp*position_yaw_z;
+                //   view.z = -sp*pos.y + cp*position_yaw_z;
+                //
+                // We want pos from view, so we apply R^T:
+                // ------------------------------------------------
+                float cp = u.camera_pitch_cos;
+                float sp = u.camera_pitch_sin;
+                float cy = u.camera_yaw_cos;
+                float sy = u.camera_yaw_sin;
+
+                // undo pitch
+                float ypp = vy;
+                float zpp = vz;
+                float pos_y =  cp * ypp - sp * zpp;   // position.y in meters
+                float z_yaw = sp * ypp + cp * zpp;    // yaw-space Z'
+
+                // undo yaw
+                float pos_x =  cy * vx + sy * z_yaw;  // position.x in meters
+                float pos_z = -sy * vx + cy * z_yaw;  // position.z in meters
+
+                // Now (pos_x,pos_y,pos_z) = object_position - (camera_position/10) in meters
+
+                // ------------------------------------------------
+                // 4) Add camera position (in meters) to get world position
+                //
+                // IMPORTANT: camera_position is in decimeters in the uniform.
+                // Shader uses camera_position/10 for all components, so do the same here.
+                // ------------------------------------------------
+                float cam_world_x = u.camera_position[0] / 10.0f;
+                float cam_world_y = u.camera_position[1] / 10.0f;  // *** THIS WAS THE BIG MISSING /10 ***
+                float cam_world_z = u.camera_position[2] / 10.0f;
+
+                float world_x = cam_world_x + pos_x;
+                float world_y = cam_world_y + pos_y;
+                float world_z = cam_world_z + pos_z;
+
+                printf("World position: %.3f, %.3f, %.3f\n", world_x, world_y, world_z);
             }
         }
 
@@ -1630,6 +1832,13 @@ int main(void) {
             vkCmdBindVertexBuffers(cmd, 0, 1, vbs, ofs);
             // index buffer: fixed 1152 indices (values 0..255 in your mesh order)
             vkCmdBindIndexBuffer(cmd, renderer.buffer_index_ib, 0, VK_INDEX_TYPE_UINT16);
+            // ui draw
+            uint32_t mode_ui = 5;
+            vkCmdPushConstants(cmd,
+                renderer.common_pipeline_layout,
+                VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                0, sizeof(uint32_t), &mode_ui);
+            vkCmdDraw(cmd, 3, 1, 0, 0); // ui fullscreen
             // one GPU-driven draw then a single fullscreen triangle for sky
             uint32_t mode_mesh = 0;
             vkCmdPushConstants(cmd,

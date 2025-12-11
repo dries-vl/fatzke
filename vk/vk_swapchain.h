@@ -27,10 +27,13 @@ struct Swapchain {
     VkImage         pick_image;
     VkDeviceMemory  pick_image_memory;
     VkImageView     pick_image_view;
+    // readback from gpu
     VkBuffer        pick_readback_buffer;
     VkDeviceMemory  pick_readback_memory;
     VkBuffer        pick_region_buffer;
     VkDeviceMemory  pick_region_memory;
+    VkBuffer        depth_readback_buffer;
+    VkDeviceMemory  depth_readback_memory;
     // debug
     #if DEBUG_APP == 1
     VkQueryPool query_pool; // GPU timestamps

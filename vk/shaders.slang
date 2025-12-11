@@ -54,6 +54,7 @@ cbuffer uniforms {
     float camera_yaw_sin, camera_yaw_cos;
     float time; // seconds
     uint selected_object_id;
+    float drag_rect_start_x, drag_rect_start_y, drag_rect_end_x, drag_rect_end_y;
 };
 [[vk::binding(17, 0)]] Sampler2D TEXTURES[64];
 
@@ -366,7 +367,7 @@ float3 plane_position(uint VERTEX_ID, uint grid_scale) {
 [shader("vertex")]
 vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTANCE, uint DRAW_ID : SV_DrawIndex) {
     // SKY path: fullscreen triangle
-    if (PUSH_CONSTANTS.mode == 1) {
+    if (PUSH_CONSTANTS.mode == 1 || PUSH_CONSTANTS.mode == 5) { // sky and ui both
         vs_out o;
         float2 p;
         if (VERTEX_ID == 1) p = float2(-1.0,  3.0); // was (-1,-1)
@@ -375,6 +376,9 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
         o.pos = float4(p, 0.0000001, 1.0); // 1.0 / 1.0 -> drawn behind everything else
         o.normal = float3(0.3, 0.5, 1.0);
         o.object_id = 0;
+        float2 ndc = p * 0.5f + 0.5f;
+        o.uv = float2(ndc.x, 1.0 - ndc.y);
+        if (PUSH_CONSTANTS.mode == 5) o.pos.z = 1.0; // ui on top of everything
         return o;
     }
  
@@ -511,6 +515,28 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
     ps_out o;
     o.id = i.object_id;
     if (PUSH_CONSTANTS.mode == 1) return ps_out(float4(i.normal, 1.0), i.object_id);
+    if (PUSH_CONSTANTS.mode == 5) {
+        bool inside =
+            i.uv.x >= drag_rect_start_x &&
+            i.uv.x <= drag_rect_end_x &&
+            i.uv.y >= drag_rect_start_y &&
+            i.uv.y <= drag_rect_end_y;
+        if (!inside) discard;
+        float px      = 1.0 / 1920.0; // or pass real width/height in
+        float py      = 1.0 / 1080.0;
+        float thick_x = 2.0 * px;
+        float thick_y = 2.0 * py;
+        bool on_border =
+            i.uv.x < drag_rect_start_x + thick_x ||
+            i.uv.x > drag_rect_end_x - thick_x ||
+            i.uv.y < drag_rect_start_y + thick_y ||
+            i.uv.y > drag_rect_end_y - thick_y;
+        if (!on_border) discard;
+
+        float4 border_color = float4(0.2, 0.8, 1.0, 0.8);  // strong
+
+        return ps_out(border_color, i.object_id);
+    }
     // // debug draw triangles as distinct colors
     float3 color = frac(sin((primID+43) * 43.5453) * float3(23.1407, 85.928, 43.533));
     if(color.x+color.y+color.z < 0.1) color = float3(float(primID % 32) / 32, float((primID + 38) % 64) / 64, float((primID + 17) % 32) / 32);
