@@ -65,9 +65,98 @@ static void DestroyDebugUtilsMessengerEXT(VkInstance inst, VkDebugUtilsMessenger
 }
 #endif
 
-#define SSW VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT
-#define SSR VK_ACCESS_2_SHADER_STORAGE_READ_BIT
-#define CS  VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
-#define TR  VK_PIPELINE_STAGE_2_TRANSFER_BIT
-#define DI  VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT
-#define VS  VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT
+
+// stages
+#define ST_HOST   VK_PIPELINE_STAGE_2_HOST_BIT
+#define ST_XFER   VK_PIPELINE_STAGE_2_TRANSFER_BIT
+#define ST_CS     VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
+#define ST_VS     VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT
+#define ST_FS     VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT
+#define ST_GFX    VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT
+#define ST_CA     VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT
+#define ST_EFT    (VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT)
+
+// accesses
+#define AC_HWR    VK_ACCESS_2_HOST_WRITE_BIT
+#define AC_SRD    VK_ACCESS_2_SHADER_READ_BIT
+#define AC_SWR    VK_ACCESS_2_SHADER_WRITE_BIT
+#define AC_TWR    VK_ACCESS_2_TRANSFER_WRITE_BIT
+#define AC_IND    VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT
+#define AC_VA     VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT
+#define AC_DSRD   VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT
+#define AC_DSWR   VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT
+#define AC_CWR    VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT
+
+static inline VkMemoryBarrier2 mem_barrier2(
+    VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess,
+    VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess)
+{
+    VkMemoryBarrier2 b = {0};
+    b.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+    b.srcStageMask  = srcStage;
+    b.srcAccessMask = srcAccess;
+    b.dstStageMask  = dstStage;
+    b.dstAccessMask = dstAccess;
+    return b;
+}
+
+static inline VkBufferMemoryBarrier2 buf_barrier2(
+    VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess,
+    VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess,
+    VkBuffer buffer, VkDeviceSize offset, VkDeviceSize size)
+{
+    VkBufferMemoryBarrier2 b = {0};
+    b.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
+    b.srcStageMask  = srcStage;
+    b.srcAccessMask = srcAccess;
+    b.dstStageMask  = dstStage;
+    b.dstAccessMask = dstAccess;
+    b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.buffer = buffer;
+    b.offset = offset;
+    b.size   = size;
+    return b;
+}
+
+static inline VkImageMemoryBarrier2 img_barrier2(
+    VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess,
+    VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess,
+    VkImageLayout oldLayout, VkImageLayout newLayout,
+    VkImage image, VkImageAspectFlags aspect,
+    uint32_t baseMip, uint32_t levelCount,
+    uint32_t baseLayer, uint32_t layerCount)
+{
+    VkImageMemoryBarrier2 b = {0};
+    b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    b.srcStageMask  = srcStage;
+    b.srcAccessMask = srcAccess;
+    b.dstStageMask  = dstStage;
+    b.dstAccessMask = dstAccess;
+    b.oldLayout = oldLayout;
+    b.newLayout = newLayout;
+    b.image = image;
+    b.subresourceRange.aspectMask     = aspect;
+    b.subresourceRange.baseMipLevel   = baseMip;
+    b.subresourceRange.levelCount     = levelCount;
+    b.subresourceRange.baseArrayLayer = baseLayer;
+    b.subresourceRange.layerCount     = layerCount;
+    return b;
+}
+
+static inline void cmd_barrier2(
+    VkCommandBuffer cmd,
+    const VkMemoryBarrier2* mem, uint32_t memCount,
+    const VkBufferMemoryBarrier2* buf, uint32_t bufCount,
+    const VkImageMemoryBarrier2* img, uint32_t imgCount)
+{
+    VkDependencyInfo dep = {0};
+    dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dep.memoryBarrierCount       = memCount;
+    dep.pMemoryBarriers          = mem;
+    dep.bufferMemoryBarrierCount = bufCount;
+    dep.pBufferMemoryBarriers    = buf;
+    dep.imageMemoryBarrierCount  = imgCount;
+    dep.pImageMemoryBarriers     = img;
+    vkCmdPipelineBarrier2(cmd, &dep);
+}

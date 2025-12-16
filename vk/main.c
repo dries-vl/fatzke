@@ -51,6 +51,13 @@ struct Renderer {
     VkBuffer                  buffer_normals;    VkDeviceMemory memory_normals;
     VkBuffer                  buffer_uvs;        VkDeviceMemory memory_uvs;
     VkBuffer                  buffer_index_ib;   VkDeviceMemory memory_indices;
+    VkBuffer                  buffer_bucket_counts;  VkDeviceMemory memory_bucket_counts;
+    VkBuffer                  buffer_bucket_offsets; VkDeviceMemory memory_bucket_offsets;
+    VkBuffer                  buffer_bucket_objects; VkDeviceMemory memory_bucket_objects;
+    VkBuffer                  buffer_block_sums;    VkDeviceMemory memory_block_sums;
+    VkBuffer                  buffer_block_offsets; VkDeviceMemory memory_block_offsets;
+    VkBuffer                  buffer_super_sums;    VkDeviceMemory memory_super_sums;
+    VkBuffer                  buffer_super_offsets; VkDeviceMemory memory_super_offsets;
     VkBuffer                  buffer_uniforms;   VkDeviceMemory memory_uniforms;
     // main rendering
     VkPipeline                main_pipeline;
@@ -403,7 +410,7 @@ int main(void) {
     VkShaderModule shader_module; VK_CHECK(vkCreateShaderModule(machine.device,&smci,NULL,&shader_module));
 
     #pragma region COMPUTE PIPELINE
-    #define BINDINGS 18
+    #define BINDINGS 25
     #define UNIFORM_BINDING (BINDINGS-2)
     #define TEXTURES_BINDING (BINDINGS-1)
     VkDescriptorSetLayoutBinding bindings[BINDINGS];
@@ -712,6 +719,17 @@ int main(void) {
     VkDeviceSize size_rendered_instances = total_instance_count * sizeof(struct gpu_rendered_instance);
     VkDeviceSize size_draw_calls  = total_mesh_count * sizeof(VkDrawIndexedIndirectCommand);
     
+    #define MAP_METERS 4096
+    #define BUCKET_METERS 4
+    #define WORKGROUP_BUCKETS 128 
+    VkDeviceSize size_bucket_counts  = (MAP_METERS / BUCKET_METERS) * (MAP_METERS / BUCKET_METERS) * sizeof(uint32_t);
+    VkDeviceSize size_bucket_offsets = size_bucket_counts;
+    VkDeviceSize size_bucket_objects = size_bucket_counts;
+    VkDeviceSize size_block_sums = size_bucket_counts / WORKGROUP_BUCKETS;
+    VkDeviceSize size_block_offsets = size_block_sums;
+    VkDeviceSize size_super_sums = size_block_sums / WORKGROUP_BUCKETS;
+    VkDeviceSize size_super_offsets = size_super_sums;
+
     VkDeviceSize size_object_mesh_list = sizeof(object_mesh_ids);
     VkDeviceSize size_object_metadata = sizeof(object_metadata);
     
@@ -769,6 +787,35 @@ int main(void) {
     create_buffer_and_memory(machine.device, machine.physical_device, size_draw_calls,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &renderer.buffer_draw_calls, &renderer.memory_draw_calls);
+    
+    // BUCKET + BLOCK + SUPER BUFFERS
+    create_buffer_and_memory(machine.device, machine.physical_device, size_bucket_counts,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &renderer.buffer_bucket_counts, &renderer.memory_bucket_counts);
+
+    create_buffer_and_memory(machine.device, machine.physical_device, size_bucket_offsets,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &renderer.buffer_bucket_offsets, &renderer.memory_bucket_offsets);
+
+    create_buffer_and_memory(machine.device, machine.physical_device, size_bucket_objects,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &renderer.buffer_bucket_objects, &renderer.memory_bucket_objects);
+
+    create_buffer_and_memory(machine.device, machine.physical_device, size_block_sums,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &renderer.buffer_block_sums, &renderer.memory_block_sums);
+
+    create_buffer_and_memory(machine.device, machine.physical_device, size_block_offsets,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &renderer.buffer_block_offsets, &renderer.memory_block_offsets);
+
+    create_buffer_and_memory(machine.device, machine.physical_device, size_super_sums,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &renderer.buffer_super_sums, &renderer.memory_super_sums);
+
+    create_buffer_and_memory(machine.device, machine.physical_device, size_super_offsets,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &renderer.buffer_super_offsets, &renderer.memory_super_offsets);
 
     // UNIFORMS (host visible)
     create_buffer_and_memory(machine.device, machine.physical_device, sizeof(struct Uniforms),
@@ -1003,6 +1050,14 @@ int main(void) {
     };
     VK_CHECK(vkAllocateDescriptorSets(machine.device, &set_alloc_info, &renderer.descriptor_set));
 
+    /*[[vk::binding(16,0)]] RWStructuredBuffer<uint> BUCKET_COUNTS;  // 1M for 4096 squared, 4mx4m blocks
+[[vk::binding(17,0)]] RWStructuredBuffer<uint> BUCKET_OFFSETS; // 1M for 4096 squared, 4mx4m blocks
+[[vk::binding(18,0)]] RWStructuredBuffer<uint> BUCKET_OBJECTS; // # of objects in scene
+[[vk::binding(19,0)]] RWStructuredBuffer<uint> BLOCK_SUMS; // 8192
+[[vk::binding(20,0)]] RWStructuredBuffer<uint> BLOCK_OFFSETS; // 8192
+[[vk::binding(21,0)]] RWStructuredBuffer<uint> SUPER_SUMS; // 64
+[[vk::binding(22,0)]] RWStructuredBuffer<uint> SUPER_OFFSETS; // 64
+*/
     VkDescriptorBufferInfo buffer_infos[BINDINGS] = {
         {renderer.buffer_chunks, 0, size_chunks},
         {renderer.buffer_visible_chunk_ids, 0, size_visible_chunk_ids},
@@ -1020,6 +1075,13 @@ int main(void) {
         {renderer.buffer_uvs, 0, size_uvs},
         {renderer.buffer_object_mesh_list, 0, size_object_mesh_list},
         {renderer.buffer_object_metadata, 0, size_object_metadata},
+        {renderer.buffer_bucket_counts, 0, size_bucket_counts},
+        {renderer.buffer_bucket_offsets, 0, size_bucket_offsets},
+        {renderer.buffer_bucket_objects, 0, size_bucket_objects},
+        {renderer.buffer_block_sums, 0, size_block_sums},
+        {renderer.buffer_block_offsets, 0, size_block_offsets},
+        {renderer.buffer_super_sums, 0, size_super_sums},
+        {renderer.buffer_super_offsets, 0, size_super_offsets},
         {renderer.buffer_uniforms, 0, sizeof(struct Uniforms)}
     };
     #pragma region TEXTURES
@@ -1523,34 +1585,16 @@ int main(void) {
             #endif
             
             // BLOCK UNTIL UNIFORM WRITES ARE VISIBLE
-            VkMemoryBarrier2 cam_host_to_shader = {
-                .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
-                .srcStageMask  = VK_PIPELINE_STAGE_2_HOST_BIT,
-                .srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT,
-                .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
-                                 VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
-                .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT
-            };
-            vkCmdPipelineBarrier2(cmd, &(VkDependencyInfo){
-                .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-                .memoryBarrierCount = 1,
-                .pMemoryBarriers    = &cam_host_to_shader
-            });
+            VkMemoryBarrier2 cam = mem_barrier2(ST_HOST, AC_HWR, ST_CS | ST_VS, AC_SRD);
+            cmd_barrier2(cmd, &cam, 1, NULL, 0, NULL, 0);
             
             // ZERO THE DRAW CALL BUFFER (todo: will not be needed anymore after adding counts pass setup)
             vkCmdFillBuffer(cmd, renderer.buffer_draw_calls, 0, size_draw_calls, 0);
             vkCmdFillBuffer(cmd, renderer.buffer_count_per_mesh, 0, size_count_per_mesh, 0);
             vkCmdFillBuffer(cmd, renderer.buffer_indirect_workgroups, 0, size_indirect_workgroups, 0);
             vkCmdFillBuffer(cmd, renderer.buffer_visible_object_count, 0, size_visible_object_count, 0);
-            VkMemoryBarrier2 xfer_to_compute = {
-                .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
-                .srcStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-                .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT
-            };
-            VkDependencyInfo dep0 = { .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &xfer_to_compute };
-            vkCmdPipelineBarrier2(cmd, &dep0);
+            VkMemoryBarrier2 xfer_to_cs = mem_barrier2(ST_XFER, AC_TWR, ST_CS, AC_SRD | AC_SWR);
+            cmd_barrier2(cmd, &xfer_to_cs, 1, NULL, 0, NULL, 0);
 
             // VISIBLE CHUNKS PASS
             vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,renderer.common_pipeline_layout, 0, 1, &renderer.descriptor_set, 0, NULL);
@@ -1561,75 +1605,14 @@ int main(void) {
                 VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                 0, sizeof(uint32_t), &mode_chunks);
             vkCmdDispatch(cmd, (total_chunk_count+63)/64, 1, 1);
-            VkBufferMemoryBarrier2 chunks_to_cs = {
-                .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-                .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,      // mode 0 wrote the array
-                .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,       // mode 1 will read it
-                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .buffer = renderer.buffer_visible_chunk_ids,        // backing buffer for VISIBLE_CHUNK_IDS
-                .offset = 0,
-                .size = VK_WHOLE_SIZE,
-            };
-            VkBufferMemoryBarrier2 to_indirect = {
-                .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-                .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
-                .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                .dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
-                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .buffer = renderer.buffer_indirect_workgroups,
-                .offset = 0,
-                .size = VK_WHOLE_SIZE,
-            };
-            VkBufferMemoryBarrier2 ids_to_cs = {
-              .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-              .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-              .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,          // mode 0 appended proxy IDs
-              .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-              .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT, // mode 1 appends too
-              .buffer = renderer.buffer_visible_ids,
-              .offset = 0, .size = VK_WHOLE_SIZE
-            };
-            VkBufferMemoryBarrier2 cnt_visible_to_cs = {
-                .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-                .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,           // mode 0 atomically wrote it
-                .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, // mode 1 will atomic RMW
-                .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .buffer = renderer.buffer_visible_object_count,
-                .offset = 0,
-                .size   = VK_WHOLE_SIZE,
-            };
-            VkBufferMemoryBarrier2 cnt_per_mesh_to_cs = {
-                .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-                .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,           // mode 0 atomically wrote it
-                .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .buffer = renderer.buffer_count_per_mesh,
-                .offset = 0,
-                .size   = VK_WHOLE_SIZE,
-            };
-            VkBufferMemoryBarrier2 barriers[5] = {
-                to_indirect,     
-                chunks_to_cs,
-                ids_to_cs,
-                cnt_visible_to_cs,  
-                cnt_per_mesh_to_cs  
-            };
-            vkCmdPipelineBarrier2(cmd, &(VkDependencyInfo){
-                .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-                .bufferMemoryBarrierCount = 5,
-                .pBufferMemoryBarriers    = barriers,
-            });
+            VkBufferMemoryBarrier2 b[5];
+            b[0] = buf_barrier2(ST_CS, AC_SWR, ST_CS, AC_IND, renderer.buffer_indirect_workgroups, 0, VK_WHOLE_SIZE);
+            b[1] = buf_barrier2(ST_CS, AC_SWR, ST_CS, AC_SRD, renderer.buffer_visible_chunk_ids, 0, VK_WHOLE_SIZE);
+            b[2] = buf_barrier2(ST_CS, AC_SWR, ST_CS, AC_SRD | AC_SWR, renderer.buffer_visible_ids, 0, VK_WHOLE_SIZE);
+            b[3] = buf_barrier2(ST_CS, AC_SWR, ST_CS, AC_SRD | AC_SWR, renderer.buffer_visible_object_count, 0, VK_WHOLE_SIZE);
+            b[4] = buf_barrier2(ST_CS, AC_SWR, ST_CS, AC_SRD | AC_SWR, renderer.buffer_count_per_mesh, 0, VK_WHOLE_SIZE);
+            cmd_barrier2(cmd, NULL, 0, b, 5, NULL, 0);
+
             #if DEBUG_APP == 1
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, swapchain.query_pool, q0 + Q_AFTER_ZERO);
             #endif
@@ -1643,19 +1626,8 @@ int main(void) {
                 VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                 0, sizeof(uint32_t), &mode_counts);
             vkCmdDispatchIndirect(cmd, renderer.buffer_indirect_workgroups, 0);
-            VkMemoryBarrier2 after_count_2 = {
-                .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
-                .srcStageMask = CS,
-                .srcAccessMask = SSW,                  // pass 0 wrote SSBOs
-                .dstStageMask = CS,
-                .dstAccessMask = SSR | SSW,            // pass 1 will read & write SSBOs
-            };
-            VkDependencyInfo dep_after_count_2 = {
-                .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-                .memoryBarrierCount = 1,
-                .pMemoryBarriers = &after_count_2,
-            };
-            vkCmdPipelineBarrier2(cmd, &dep_after_count_2);
+            VkMemoryBarrier2 after_count_2 = mem_barrier2(ST_CS, AC_SWR, ST_CS, AC_SRD | AC_SWR);
+            cmd_barrier2(cmd, &after_count_2, 1, NULL, 0, NULL, 0);
 
             #if DEBUG_APP == 1
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, swapchain.query_pool, q0 + Q_AFTER_COMP_BUILD);
@@ -1668,21 +1640,11 @@ int main(void) {
                 VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                 0, sizeof(uint32_t), &mode_prepare);
             vkCmdDispatch(cmd, 1, 1, 1);
-            VkBufferMemoryBarrier2 prepare_to_scatter_indirect = {
-              .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-              .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-              .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,                 // mode 2 wrote it
-              .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,       // vkCmdDispatchIndirect
-              .dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,        // indirect read
-              .buffer = renderer.buffer_indirect_workgroups,
-              .offset = 0,
-              .size   = VK_WHOLE_SIZE,
-            };
-            vkCmdPipelineBarrier2(cmd, &(VkDependencyInfo){
-              .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-              .bufferMemoryBarrierCount = 1,
-              .pBufferMemoryBarriers = &prepare_to_scatter_indirect,
-            });
+            VkBufferMemoryBarrier2 prepare_to_scatter_indirect =
+                buf_barrier2(ST_CS, AC_SWR, ST_CS, AC_IND, // indirect args read by compute dispatchIndirect
+                    renderer.buffer_indirect_workgroups, 0, VK_WHOLE_SIZE);
+            cmd_barrier2(cmd, NULL, 0, &prepare_to_scatter_indirect, 1, NULL, 0);
+
             #if DEBUG_APP == 1
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, swapchain.query_pool, q0 + Q_AFTER_COMP_INDIRECT);
             #endif
@@ -1694,98 +1656,28 @@ int main(void) {
                 VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                 0, sizeof(uint32_t), &mode_scatter);
             vkCmdDispatchIndirect(cmd, renderer.buffer_indirect_workgroups, 0);
-            
-            VkBufferMemoryBarrier2 scatter_to_indirect = {
-                .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-                .srcStageMask = CS,
-                .srcAccessMask = SSW,                  // wrote indirect args
-                .dstStageMask = DI,
-                .dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
-                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .buffer = renderer.buffer_draw_calls,  // backing buffer for DRAW_CALLS
-                .offset = 0,
-                .size = VK_WHOLE_SIZE,
-            };
-            // (B) make VISIBLE[] visible to the vertex/graphics stage (SSBO reads in VS or later)
-            VkBufferMemoryBarrier2 scatter_to_vs = {
-                .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-                .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,              // compute writes
-                .dstStageMask  = VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT,      // vertex input stage
-                .dstAccessMask = VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT,     // vertex buffer reads
-                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-                .buffer = renderer.buffer_visible,
-                .offset = 0,
-                .size   = VK_WHOLE_SIZE,
-            };
-            VkDependencyInfo dep_to_graphics = {
-                .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-                .bufferMemoryBarrierCount = 2,
-                .pBufferMemoryBarriers = (VkBufferMemoryBarrier2[2]){ scatter_to_indirect, scatter_to_vs },
-            };
-            vkCmdPipelineBarrier2(cmd, &dep_to_graphics);
+            VkBufferMemoryBarrier2 post[2];
+            post[0] = buf_barrier2(ST_CS, AC_SWR, VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, AC_IND, renderer.buffer_draw_calls, 0, VK_WHOLE_SIZE);
+            post[1] = buf_barrier2(ST_CS, AC_SWR, VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT, AC_VA, renderer.buffer_visible, 0, VK_WHOLE_SIZE);
+            cmd_barrier2(cmd, NULL, 0, post, 2, NULL, 0);
+
             #if DEBUG_APP == 1
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, swapchain.query_pool, q0 + Q_AFTER_COMP_TO_GFX);
             #endif
 
             // --- render pass (use persistent framebuffer) ---
-            VkImageMemoryBarrier2 to_depth = {
-                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-                .srcStageMask  = VK_PIPELINE_STAGE_2_NONE,
-                .srcAccessMask = 0,
-                .dstStageMask  = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
-                                 VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-                .dstAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
-                                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
-                .oldLayout     = VK_IMAGE_LAYOUT_UNDEFINED,            // or previous
-                .newLayout     = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                .image         = swapchain.depth_image,                // your depth image
-                .subresourceRange = {
-                    .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
-                    .baseMipLevel = 0, .levelCount = 1,
-                    .baseArrayLayer = 0, .layerCount = 1
-                }
-            };
-            vkCmdPipelineBarrier2(cmd, &(VkDependencyInfo){
-                .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-                .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &to_depth
-            });
-            VkImageMemoryBarrier2 to_color = {
-              .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-              .srcStageMask  = VK_PIPELINE_STAGE_2_NONE,
-              .srcAccessMask = 0,
-              .dstStageMask  = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-              .dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-              .oldLayout     = VK_IMAGE_LAYOUT_UNDEFINED,          // swapchain image is undefined after acquire
-              .newLayout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-              .image         = swapchain.swapchain_images[swap_image_index],
-              .subresourceRange = { .aspectMask=VK_IMAGE_ASPECT_COLOR_BIT, .levelCount=1, .layerCount=1 }
-            };
-            vkCmdPipelineBarrier2(cmd, &(VkDependencyInfo){ .sType=VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-              .imageMemoryBarrierCount=1, .pImageMemoryBarriers=&to_color });
-            VkImageMemoryBarrier2 to_pick = {
-                .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-                .srcStageMask  = VK_PIPELINE_STAGE_2_NONE,
-                .srcAccessMask = 0,
-                .dstStageMask  = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                .dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-                .oldLayout     = VK_IMAGE_LAYOUT_UNDEFINED,            // we discard previous contents
-                .newLayout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                .image         = swapchain.pick_image,
-                .subresourceRange = {
-                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                    .baseMipLevel = 0, .levelCount = 1,
-                    .baseArrayLayer = 0, .layerCount = 1
-                }
-            };
-
-            vkCmdPipelineBarrier2(cmd, &(VkDependencyInfo){
-                .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-                .imageMemoryBarrierCount = 1,
-                .pImageMemoryBarriers    = &to_pick
-            });
+            VkImageMemoryBarrier2 to_depth = img_barrier2(
+                VK_PIPELINE_STAGE_2_NONE, 0, ST_EFT, AC_DSWR | AC_DSRD,VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                swapchain.depth_image, VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1);
+            cmd_barrier2(cmd, NULL, 0, NULL, 0, &to_depth, 1);
+            VkImageMemoryBarrier2 to_color =
+                img_barrier2(VK_PIPELINE_STAGE_2_NONE, 0,VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, AC_CWR, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    swapchain.swapchain_images[swap_image_index], VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1);
+            cmd_barrier2(cmd, NULL, 0, NULL, 0, &to_color, 1);
+            VkImageMemoryBarrier2 to_pick =
+                img_barrier2(VK_PIPELINE_STAGE_2_NONE, 0, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, AC_CWR, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    swapchain.pick_image, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1);
+            cmd_barrier2(cmd, NULL, 0, NULL, 0, &to_pick, 1);
             VkRenderingAttachmentInfo color_atts[2];
             color_atts[0] = (VkRenderingAttachmentInfo){
                 .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
@@ -1859,19 +1751,10 @@ int main(void) {
             #if DEBUG_APP == 1
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, swapchain.query_pool, q0 + Q_AFTER_BLIT);
             #endif
-            VkImageMemoryBarrier2 to_present = {
-              .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-              .srcStageMask  = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-              .srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-              .dstStageMask  = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
-              .dstAccessMask = 0,
-              .oldLayout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-              .newLayout     = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-              .image         = swapchain.swapchain_images[swap_image_index],
-              .subresourceRange = { .aspectMask=VK_IMAGE_ASPECT_COLOR_BIT, .levelCount=1, .layerCount=1 }
-            };
-            vkCmdPipelineBarrier2(cmd, &(VkDependencyInfo){ .sType=VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-              .imageMemoryBarrierCount=1, .pImageMemoryBarriers=&to_present });
+            VkImageMemoryBarrier2 to_present =
+                img_barrier2(VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, AC_CWR, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                    swapchain.swapchain_images[swap_image_index], VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1);
+            cmd_barrier2(cmd, NULL, 0, NULL, 0, &to_present, 1);
             #if DEBUG_APP == 1
             #endif
            

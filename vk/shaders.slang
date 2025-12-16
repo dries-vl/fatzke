@@ -20,13 +20,29 @@ struct mdi {uint index_count, instance_count, first_index, base_vertex, first_in
 struct di {uint group_count_x, group_count_y, group_count_z;};
 struct instance {uint object_id, animation;};
 
-// pre-filled data
-// todo: need to refactor the lod-animation data anyway to be able index into it
-// todo: but then we might as well refactor to make the data line up for less bandwidth use
-// ie. next frames same vertex is next to in memory
-// todo: then might as well do texture compression as perfect lossless is not needed
-// current: 1010102; 32bit per position
-// astc8x8: 2bit per position
+// todo: chunks for collision detection
+// 4096 64m tiles, 1M 4m tiles, 16M 1m tiles, 67M 0.5m tiles
+[[vk::binding(16,0)]] RWStructuredBuffer<uint> BUCKET_COUNTS;  // 1M for 4096 squared, 4mx4m blocks
+[[vk::binding(17,0)]] RWStructuredBuffer<uint> BUCKET_OFFSETS; // 1M for 4096 squared, 4mx4m blocks
+[[vk::binding(18,0)]] RWStructuredBuffer<uint> BUCKET_OBJECTS; // # of objects in scene
+[[vk::binding(19,0)]] RWStructuredBuffer<uint> BLOCK_SUMS; // 8192
+[[vk::binding(20,0)]] RWStructuredBuffer<uint> BLOCK_OFFSETS; // 8192
+[[vk::binding(21,0)]] RWStructuredBuffer<uint> SUPER_SUMS; // 64
+[[vk::binding(22,0)]] RWStructuredBuffer<uint> SUPER_OFFSETS; // 64
+
+// plan
+// first pass: each 64 threads each do 2 elements -> 128 per workgroup -> 8192 workgroups
+// -> write total sum of 128 into BLOCK_SUMS[8192]
+// -> write within-block offsets into BUCKET_OFFSETS
+// next pass: 64 workgroups -> 128 each over the 8192 block sums -> 64 workgroups
+// -> write total sum of each 512 blocks into SUPER_SUMS[64]
+// -> write within-superblock offsets into BLOCK_OFFSETS
+// next pass: 1 workgroup, 64 threads
+// -> write to SUPER_OFFSETS
+// next pass: 8192 workgroups each 64 threads each do 2 elements
+// -> write final offsets into BUCKET_OFFSETS by adding SUPER_OFFSETS + BLOCK_OFFSETS + BUCKET_OFFSETS
+// final step: scatter objects into BUCKET_OBJECTS based on their offset and atomic count
+
 [[vk::binding(14,0)]] StructuredBuffer<uint>            OBJECT_MESH_LIST; // list of all the mesh ids that make up objects
 [[vk::binding(15,0)]] StructuredBuffer<object_metadata> OBJECT_METADATA;
 [[vk::binding(9,0)]]  StructuredBuffer<mdi>             MESH_INFO; // instance_count is 'max visible of this mesh in this scene'
@@ -47,7 +63,7 @@ struct instance {uint object_id, animation;};
 [[vk::binding(10,0)]] RWStructuredBuffer<mdi>      DRAW_CALLS;         // MDI, one struct per mesh type, index is mesh id
 [[vk::binding(8,0)]]  RWStructuredBuffer<instance> RENDERED_INSTANCES; // size is max # of visible mesh instances
 // uniforms
-[[vk::binding(16,0)]]
+[[vk::binding(23,0)]]
 cbuffer uniforms {
     float3 camera_position;
     float camera_pitch_sin, camera_pitch_cos;
@@ -56,7 +72,7 @@ cbuffer uniforms {
     uint selected_object_id;
     float drag_rect_start_x, drag_rect_start_y, drag_rect_end_x, drag_rect_end_y;
 };
-[[vk::binding(17, 0)]] Sampler2D TEXTURES[64];
+[[vk::binding(24, 0)]] Sampler2D TEXTURES[64];
 
 // push constants
 struct push_constants {
@@ -75,10 +91,102 @@ uint choose_lod_step(float distance, float radius) {
     return 0;
 }
 
+void ExclusiveScan128(uint t, inout uint total, inout groupshared uint s[128]) {
+    // --- upsweep (reduce) ---
+    // stride = 1,2,4,8,16,32,64
+    [unroll]
+    for (uint stride = 1; stride < 128; stride <<= 1) {
+        uint idx = ((t + 1) * stride * 2) - 1; // last index of each 2*stride segment
+        if (idx < 128)
+        {
+            s[idx] += s[idx - stride];
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+    // total sum is now in s[127]
+    if (t == 0) {
+        total = s[127];
+        s[127] = 0; // convert inclusive tree to exclusive by clearing root
+    }
+    GroupMemoryBarrierWithGroupSync();
+    // --- downsweep ---
+    // stride = 64,32,16,8,4,2,1
+    // Use a loop that won't underflow uint.
+    [unroll]
+    for (uint stride = 64; stride >= 1; stride >>= 1) {
+        uint idx = ((t + 1) * stride * 2) - 1;
+        if (idx < 128) {
+            uint a = s[idx - stride];
+            uint b = s[idx];
+            s[idx - stride] = b;
+            s[idx] = b + a;
+        }
+        GroupMemoryBarrierWithGroupSync();
+        if (stride == 1) break; // prevent uint underflow
+    }
+}
+
+groupshared uint sA[128];
+groupshared uint sB[128];
+groupshared uint sC[128];
 groupshared uint counts[25];
 
 [shader("compute")] [numthreads(64,1,1)]
 void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_DispatchThreadID) {
+    // SCAN TO BLOCKS
+    if (PUSH_CONSTANTS.mode == 4) {
+        uint t = gtid.x;           // 0..63
+        uint blockID = gid.x;      // 0..8191
+        uint base = blockID * 128;
+        sA[2*t+0] = BUCKET_COUNTS[base + 2*t+0];
+        sA[2*t+1] = BUCKET_COUNTS[base + 2*t+1];
+        GroupMemoryBarrierWithGroupSync();
+        uint total;
+        ExclusiveScan128(t, total, sA);
+        if (t == 0)
+            BLOCK_SUMS[blockID] = total;
+        BUCKET_OFFSETS[base + 2*t+0] = sA[2*t+0];
+        BUCKET_OFFSETS[base + 2*t+1] = sA[2*t+1];
+    }
+    // SCAN TO SUPER BLOCKS
+    if (PUSH_CONSTANTS.mode == 5) {
+        uint t = gtid.x;        // 0..63
+        uint superID = gid.x;   // 0..63
+        uint base = superID * 128;
+        sB[2*t+0] = BLOCK_SUMS[base + 2*t+0];
+        sB[2*t+1] = BLOCK_SUMS[base + 2*t+1];
+        GroupMemoryBarrierWithGroupSync();
+        uint total;
+        ExclusiveScan128(t, total, sB);
+        if (t == 0)
+            SUPER_SUMS[superID] = total;
+
+        BLOCK_OFFSETS[base + 2*t+0] = sB[2*t+0];
+        BLOCK_OFFSETS[base + 2*t+1] = sB[2*t+1];
+    }
+    if (PUSH_CONSTANTS.mode == 6) {
+        uint t = gtid.x; // 0..63
+        uint i0 = 2*t+0;
+        uint i1 = 2*t+1;
+        // pad to 128
+        sC[i0] = (i0 < 64) ? SUPER_SUMS[i0] : 0;
+        sC[i1] = (i1 < 64) ? SUPER_SUMS[i1] : 0;
+        GroupMemoryBarrierWithGroupSync();
+        uint total;
+        ExclusiveScan128(t, total, sC);
+        if (i0 < 64) SUPER_OFFSETS[i0] = sC[i0];
+        if (i1 < 64) SUPER_OFFSETS[i1] = sC[i1];
+    }
+    if (PUSH_CONSTANTS.mode == 7) {
+        uint t = gtid.x;       // 0..63
+        uint blockID = gid.x;  // 0..8191
+        uint baseBucket = blockID * 128;
+        // blockID / 128 == superID
+        uint superID = blockID >> 7;
+        uint add = BLOCK_OFFSETS[blockID] + SUPER_OFFSETS[superID];
+        BUCKET_OFFSETS[baseBucket + 2*t+0] += add;
+        BUCKET_OFFSETS[baseBucket + 2*t+1] += add;
+    }
     // CHUNK PASS
     if (PUSH_CONSTANTS.mode == 0) {
         uint stride, chunk_count;
