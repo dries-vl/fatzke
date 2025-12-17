@@ -22,26 +22,13 @@ struct instance {uint object_id, animation;};
 
 // todo: chunks for collision detection
 // 4096 64m tiles, 1M 4m tiles, 16M 1m tiles, 67M 0.5m tiles
-[[vk::binding(16,0)]] RWStructuredBuffer<uint> BUCKET_COUNTS;  // 1M for 4096 squared, 4mx4m blocks
-[[vk::binding(17,0)]] RWStructuredBuffer<uint> BUCKET_OFFSETS; // 1M for 4096 squared, 4mx4m blocks
-[[vk::binding(18,0)]] RWStructuredBuffer<uint> BUCKET_OBJECTS; // # of objects in scene
-[[vk::binding(19,0)]] RWStructuredBuffer<uint> BLOCK_SUMS; // 8192
-[[vk::binding(20,0)]] RWStructuredBuffer<uint> BLOCK_OFFSETS; // 8192
-[[vk::binding(21,0)]] RWStructuredBuffer<uint> SUPER_SUMS; // 64
-[[vk::binding(22,0)]] RWStructuredBuffer<uint> SUPER_OFFSETS; // 64
-
-// plan
-// first pass: each 64 threads each do 2 elements -> 128 per workgroup -> 8192 workgroups
-// -> write total sum of 128 into BLOCK_SUMS[8192]
-// -> write within-block offsets into BUCKET_OFFSETS
-// next pass: 64 workgroups -> 128 each over the 8192 block sums -> 64 workgroups
-// -> write total sum of each 512 blocks into SUPER_SUMS[64]
-// -> write within-superblock offsets into BLOCK_OFFSETS
-// next pass: 1 workgroup, 64 threads
-// -> write to SUPER_OFFSETS
-// next pass: 8192 workgroups each 64 threads each do 2 elements
-// -> write final offsets into BUCKET_OFFSETS by adding SUPER_OFFSETS + BLOCK_OFFSETS + BUCKET_OFFSETS
-// final step: scatter objects into BUCKET_OBJECTS based on their offset and atomic count
+[[vk::binding(16,0)]] RWStructuredBuffer<uint> BUCKET_COUNTS;  // 4mb 1M for 4096 squared, 4mx4m blocks
+[[vk::binding(17,0)]] RWStructuredBuffer<uint> BUCKET_OFFSETS; // 4mb 1M for 4096 squared, 4mx4m blocks
+[[vk::binding(18,0)]] RWStructuredBuffer<uint> BUCKET_OBJECTS; // 1mb # of objects in scene
+[[vk::binding(19,0)]] RWStructuredBuffer<uint> BLOCK_SUMS;     // 8192
+[[vk::binding(20,0)]] RWStructuredBuffer<uint> BLOCK_OFFSETS;  // 8192
+[[vk::binding(21,0)]] RWStructuredBuffer<uint> SUPER_SUMS;     // 64
+[[vk::binding(22,0)]] RWStructuredBuffer<uint> SUPER_OFFSETS;  // 64
 
 [[vk::binding(14,0)]] StructuredBuffer<uint>            OBJECT_MESH_LIST; // list of all the mesh ids that make up objects
 [[vk::binding(15,0)]] StructuredBuffer<object_metadata> OBJECT_METADATA;
@@ -91,6 +78,18 @@ uint choose_lod_step(float distance, float radius) {
     return 0;
 }
 
+// plan
+// first pass: each 64 threads each do 2 elements -> 128 per workgroup -> 8192 workgroups
+// -> write total sum of 128 into BLOCK_SUMS[8192]
+// -> write within-block offsets into BUCKET_OFFSETS
+// next pass: 64 workgroups -> 128 each over the 8192 block sums -> 64 workgroups
+// -> write total sum of each 512 blocks into SUPER_SUMS[64]
+// -> write within-superblock offsets into BLOCK_OFFSETS
+// next pass: 1 workgroup, 64 threads
+// -> write to SUPER_OFFSETS
+// next pass: 8192 workgroups each 64 threads each do 2 elements
+// -> write final offsets into BUCKET_OFFSETS by adding SUPER_OFFSETS + BLOCK_OFFSETS + BUCKET_OFFSETS
+// final step: scatter objects into BUCKET_OBJECTS based on their offset and atomic count
 void ExclusiveScan128(uint t, inout uint total, inout groupshared uint s[128]) {
     // --- upsweep (reduce) ---
     // stride = 1,2,4,8,16,32,64
@@ -133,7 +132,7 @@ groupshared uint counts[25];
 
 [shader("compute")] [numthreads(64,1,1)]
 void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_DispatchThreadID) {
-    // SCAN TO BLOCKS
+    // block sums + within-block offsets; 8192 workgroups
     if (PUSH_CONSTANTS.mode == 4) {
         uint t = gtid.x;           // 0..63
         uint blockID = gid.x;      // 0..8191
@@ -148,7 +147,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         BUCKET_OFFSETS[base + 2*t+0] = sA[2*t+0];
         BUCKET_OFFSETS[base + 2*t+1] = sA[2*t+1];
     }
-    // SCAN TO SUPER BLOCKS
+    // super sums + within-superblock offsets; 64 workgroups
     if (PUSH_CONSTANTS.mode == 5) {
         uint t = gtid.x;        // 0..63
         uint superID = gid.x;   // 0..63
@@ -164,6 +163,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         BLOCK_OFFSETS[base + 2*t+0] = sB[2*t+0];
         BLOCK_OFFSETS[base + 2*t+1] = sB[2*t+1];
     }
+    // super offsets; 1 workgroup
     if (PUSH_CONSTANTS.mode == 6) {
         uint t = gtid.x; // 0..63
         uint i0 = 2*t+0;
@@ -177,6 +177,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         if (i0 < 64) SUPER_OFFSETS[i0] = sC[i0];
         if (i1 < 64) SUPER_OFFSETS[i1] = sC[i1];
     }
+    // final offsets; 8192 workgroups
     if (PUSH_CONSTANTS.mode == 7) {
         uint t = gtid.x;       // 0..63
         uint blockID = gid.x;  // 0..8191

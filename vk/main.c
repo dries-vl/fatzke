@@ -85,13 +85,13 @@ struct Uniforms {
 #if DEBUG_APP == 1
 enum {
     Q_BEGIN = 0,             // start of frame (already have)
-    Q_AFTER_ZERO,            // after vkCmdFillBuffer
-    Q_AFTER_COMP_BUILD,      // after compute build visible
-    Q_AFTER_COMP_INDIRECT,   // after prepare indirect
-    Q_AFTER_COMP_TO_GFX,     // after compute->graphics barrier
-    Q_BEFORE_RENDERPASS,     // just before vkCmdBeginRenderPass
-    Q_AFTER_RENDERPASS,      // just after vkCmdEndRenderPass
-    Q_AFTER_BLIT,            // after vkCmdBlitImage2 + transition to PRESENT
+    Q_CHUNKS,            // after vkCmdFillBuffer
+    Q_OBJECTS,      // after compute build visible
+    Q_PREPARE,   // after prepare indirect
+    Q_SCATTER,     // after compute->graphics barrier
+    Q_BUCKETS,     // just before vkCmdBeginRenderPass
+    Q_RENDER,      // just after vkCmdEndRenderPass
+    Q_BLIT,            // after vkCmdBlitImage2 + transition to PRESENT
     Q_END,                   // end of cmdbuf (already have)
     QUERIES_PER_IMAGE       // nr of queries
 };
@@ -1236,20 +1236,21 @@ int main(void) {
                 double ns[QUERIES_PER_IMAGE];
                 for (int i=0;i<QUERIES_PER_IMAGE;i++) ns[i] = (double)t[i] * renderer.gpu_ticks_to_ns;
                 // Stage durations (ms)
-                double ms_zero          = (ns[Q_AFTER_ZERO]          - ns[Q_BEGIN])             * 1e-6;
-                double ms_comp_build    = (ns[Q_AFTER_COMP_BUILD]    - ns[Q_AFTER_ZERO])        * 1e-6;
-                double ms_comp_indirect = (ns[Q_AFTER_COMP_INDIRECT] - ns[Q_AFTER_COMP_BUILD])  * 1e-6;
-                double ms_barrier_gfx   = (ns[Q_AFTER_COMP_TO_GFX]   - ns[Q_AFTER_COMP_INDIRECT])*1e-6;
-                double ms_renderpass    = (ns[Q_AFTER_RENDERPASS]    - ns[Q_BEFORE_RENDERPASS]) * 1e-6;
-                double ms_blit          = (ns[Q_AFTER_BLIT]          - ns[Q_AFTER_RENDERPASS])  * 1e-6;
-                double ms_tail          = (ns[Q_END]                 - ns[Q_AFTER_BLIT])        * 1e-6; // usually tiny
+                double ms_chunks          = (ns[Q_CHUNKS]          - ns[Q_BEGIN])             * 1e-6;
+                double ms_objects    = (ns[Q_OBJECTS]    - ns[Q_CHUNKS])        * 1e-6;
+                double ms_prepare = (ns[Q_PREPARE] - ns[Q_OBJECTS])  * 1e-6;
+                double ms_scatter   = (ns[Q_SCATTER]   - ns[Q_PREPARE])*1e-6;
+                double ms_buckets  = (ns[Q_BUCKETS]  - ns[Q_SCATTER])  * 1e-6;
+                double ms_render    = (ns[Q_RENDER]    - ns[Q_BUCKETS]) * 1e-6;
+                double ms_blit          = (ns[Q_BLIT]          - ns[Q_RENDER])  * 1e-6;
+                double ms_end          = (ns[Q_END]                 - ns[Q_BLIT])        * 1e-6; // usually tiny
+                double ms_total       = (ns[Q_END]                 - ns[Q_BEGIN])      * 1e-6;
                 // (Optional) map to CPU timeline using your calibrated offset
                 double cpu_ms[QUERIES_PER_IMAGE];
                 for (int i=0;i<QUERIES_PER_IMAGE;i++) cpu_ms[i] = (offset_ns + ns[i] - pf_ns_start()) * 1e-6;
-                printf("[%llu] gpu time %.3fms - %.3fms : zero=%.3f, comp_build=%.3f, comp_indirect=%.3f, barrier=%.3f, render=%.3f, blit=%.3f, tail=%.3f, [%.3f]\n",
+                printf("[%llu] gpu time %.3fms - %.3fms : chunks=%.3f, objects=%.3f, prepare=%.3f, scatter=%.3f, buckets=%.3f, render=%.3f, blit=%.3f, end=%.3f, [%.3f]\n",
                        (unsigned long long)last_frame_id, cpu_ms[Q_BEGIN], cpu_ms[Q_END],
-                       ms_zero, ms_comp_build, ms_comp_indirect, ms_barrier_gfx, ms_renderpass, ms_blit, ms_tail,
-                       (ns[Q_END]-ns[Q_BEGIN]) * 1e-6);
+                       ms_chunks, ms_objects, ms_prepare, ms_scatter, ms_buckets, ms_render, ms_blit, ms_end, ms_total);
             } else {printf("ERROR: %s\n", vk_result_str(qr));}
             // Clear slot so we don’t read twice
             swapchain.previous_frame_image_index[renderer.frame_slot] = UINT32_MAX;
@@ -1606,7 +1607,7 @@ int main(void) {
                 0, sizeof(uint32_t), &mode_chunks);
             vkCmdDispatch(cmd, (total_chunk_count+63)/64, 1, 1);
             VkBufferMemoryBarrier2 b[5];
-            b[0] = buf_barrier2(ST_CS, AC_SWR, ST_CS, AC_IND, renderer.buffer_indirect_workgroups, 0, VK_WHOLE_SIZE);
+            b[0] = buf_barrier2(ST_CS, AC_SWR, VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, AC_IND, renderer.buffer_indirect_workgroups, 0, VK_WHOLE_SIZE);
             b[1] = buf_barrier2(ST_CS, AC_SWR, ST_CS, AC_SRD, renderer.buffer_visible_chunk_ids, 0, VK_WHOLE_SIZE);
             b[2] = buf_barrier2(ST_CS, AC_SWR, ST_CS, AC_SRD | AC_SWR, renderer.buffer_visible_ids, 0, VK_WHOLE_SIZE);
             b[3] = buf_barrier2(ST_CS, AC_SWR, ST_CS, AC_SRD | AC_SWR, renderer.buffer_visible_object_count, 0, VK_WHOLE_SIZE);
@@ -1614,9 +1615,14 @@ int main(void) {
             cmd_barrier2(cmd, NULL, 0, b, 5, NULL, 0);
 
             #if DEBUG_APP == 1
-            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, swapchain.query_pool, q0 + Q_AFTER_ZERO);
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, swapchain.query_pool, q0 + Q_CHUNKS);
             #endif
 
+            // zero the bucket counts because we use it as cursor
+            vkCmdFillBuffer(cmd, renderer.buffer_bucket_counts, 0, size_bucket_counts, 0);
+            VkBufferMemoryBarrier2 bc_clear_to_cs =
+                buf_barrier2(ST_XFER, VK_ACCESS_2_TRANSFER_WRITE_BIT, ST_CS, AC_SRD | AC_SWR, renderer.buffer_bucket_counts, 0, VK_WHOLE_SIZE);
+            cmd_barrier2(cmd, NULL, 0, &bc_clear_to_cs, 1, NULL, 0);
             // VISIBLE OBJECTS PASS
             vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,renderer.common_pipeline_layout, 0, 1, &renderer.descriptor_set, 0, NULL);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, renderer.compute_pipeline);
@@ -1630,9 +1636,9 @@ int main(void) {
             cmd_barrier2(cmd, &after_count_2, 1, NULL, 0, NULL, 0);
 
             #if DEBUG_APP == 1
-            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, swapchain.query_pool, q0 + Q_AFTER_COMP_BUILD);
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, swapchain.query_pool, q0 + Q_OBJECTS);
             #endif
-
+            
             // PREPARE INDIRECT PASS
             uint32_t mode_prepare = 2;
             vkCmdPushConstants(cmd,
@@ -1641,14 +1647,17 @@ int main(void) {
                 0, sizeof(uint32_t), &mode_prepare);
             vkCmdDispatch(cmd, 1, 1, 1);
             VkBufferMemoryBarrier2 prepare_to_scatter_indirect =
-                buf_barrier2(ST_CS, AC_SWR, ST_CS, AC_IND, // indirect args read by compute dispatchIndirect
+                buf_barrier2(ST_CS, AC_SWR, VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, AC_IND, // indirect args read by compute dispatchIndirect
                     renderer.buffer_indirect_workgroups, 0, VK_WHOLE_SIZE);
             cmd_barrier2(cmd, NULL, 0, &prepare_to_scatter_indirect, 1, NULL, 0);
 
             #if DEBUG_APP == 1
-            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, swapchain.query_pool, q0 + Q_AFTER_COMP_INDIRECT);
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, swapchain.query_pool, q0 + Q_PREPARE);
             #endif
 
+            // zero the bucket counts because we fill it in scatter
+            vkCmdFillBuffer(cmd, renderer.buffer_bucket_counts, 0, size_bucket_counts, 0);
+            cmd_barrier2(cmd, NULL, 0, &bc_clear_to_cs, 1, NULL, 0);
             // SCATTER PASS
             uint32_t mode_scatter = 3;
             vkCmdPushConstants(cmd,
@@ -1660,10 +1669,64 @@ int main(void) {
             post[0] = buf_barrier2(ST_CS, AC_SWR, VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, AC_IND, renderer.buffer_draw_calls, 0, VK_WHOLE_SIZE);
             post[1] = buf_barrier2(ST_CS, AC_SWR, VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT, AC_VA, renderer.buffer_visible, 0, VK_WHOLE_SIZE);
             cmd_barrier2(cmd, NULL, 0, post, 2, NULL, 0);
+            // barrier to read back bucket counts for bucket passes
+            VkBufferMemoryBarrier2 bucket_counts_to_scan =
+                buf_barrier2(ST_CS, AC_SWR,ST_CS, AC_SRD,renderer.buffer_bucket_counts, 0, VK_WHOLE_SIZE);
+            cmd_barrier2(cmd, NULL, 0, &bucket_counts_to_scan, 1, NULL, 0);
 
             #if DEBUG_APP == 1
-            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, swapchain.query_pool, q0 + Q_AFTER_COMP_TO_GFX);
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, swapchain.query_pool, q0 + Q_SCATTER);
             #endif
+
+            // BUCKET OFFSETS BUILD (scan)
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                renderer.common_pipeline_layout, 0, 1, &renderer.descriptor_set, 0, NULL);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, renderer.compute_pipeline);
+            // Pass A: scan buckets -> BUCKET_OFFSETS + BLOCK_SUMS
+            {
+                uint32_t mode_scanA = 4;
+                vkCmdPushConstants(cmd, renderer.common_pipeline_layout,
+                    VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t), &mode_scanA);
+                vkCmdDispatch(cmd, 8192, 1, 1); // 1,048,576 / 128 = 8192 groups
+
+                VkBufferMemoryBarrier2 a_out[2];
+                a_out[0] = buf_barrier2(ST_CS, AC_SWR, ST_CS, AC_SRD, renderer.buffer_block_sums, 0, VK_WHOLE_SIZE);
+                a_out[1] = buf_barrier2(ST_CS, AC_SWR, ST_CS, AC_SRD, renderer.buffer_bucket_offsets, 0, VK_WHOLE_SIZE);
+                cmd_barrier2(cmd, NULL, 0, a_out, 2, NULL, 0);
+            }
+            // Pass B: scan block sums -> BLOCK_OFFSETS + SUPER_SUMS
+            {
+                uint32_t mode_scanB = 5;
+                vkCmdPushConstants(cmd, renderer.common_pipeline_layout,
+                    VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t), &mode_scanB);
+                vkCmdDispatch(cmd, 64, 1, 1); // 8192 / 128 = 64 groups
+
+                VkBufferMemoryBarrier2 b_out[2];
+                b_out[0] = buf_barrier2(ST_CS, AC_SWR, ST_CS, AC_SRD, renderer.buffer_super_sums, 0, VK_WHOLE_SIZE);
+                b_out[1] = buf_barrier2(ST_CS, AC_SWR, ST_CS, AC_SRD, renderer.buffer_block_offsets, 0, VK_WHOLE_SIZE);
+                cmd_barrier2(cmd, NULL, 0, b_out, 2, NULL, 0);
+            }
+            // Pass C: scan super sums (64) -> SUPER_OFFSETS
+            {
+                uint32_t mode_scanC = 6;
+                vkCmdPushConstants(cmd, renderer.common_pipeline_layout,
+                    VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t), &mode_scanC);
+                vkCmdDispatch(cmd, 1, 1, 1);
+
+                VkBufferMemoryBarrier2 c_out =
+                    buf_barrier2(ST_CS, AC_SWR, ST_CS, AC_SRD,renderer.buffer_super_offsets, 0, VK_WHOLE_SIZE);
+                cmd_barrier2(cmd, NULL, 0, &c_out, 1, NULL, 0);
+            }
+            // Pass D: add BLOCK_OFFSETS + SUPER_OFFSETS into BUCKET_OFFSETS
+            {
+                uint32_t mode_scanD = 7;
+                vkCmdPushConstants(cmd, renderer.common_pipeline_layout,VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t), &mode_scanD);
+                vkCmdDispatch(cmd, 8192, 1, 1);
+
+                VkBufferMemoryBarrier2 d_out =
+                    buf_barrier2(ST_CS, AC_SWR, ST_CS, AC_SRD, renderer.buffer_bucket_offsets, 0, VK_WHOLE_SIZE);
+                cmd_barrier2(cmd, NULL, 0, &d_out, 1, NULL, 0);
+            }
 
             // --- render pass (use persistent framebuffer) ---
             VkImageMemoryBarrier2 to_depth = img_barrier2(
@@ -1678,6 +1741,11 @@ int main(void) {
                 img_barrier2(VK_PIPELINE_STAGE_2_NONE, 0, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, AC_CWR, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                     swapchain.pick_image, VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1);
             cmd_barrier2(cmd, NULL, 0, NULL, 0, &to_pick, 1);
+
+            #if DEBUG_APP == 1
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, swapchain.query_pool, q0 + Q_BUCKETS);
+            #endif
+
             VkRenderingAttachmentInfo color_atts[2];
             color_atts[0] = (VkRenderingAttachmentInfo){
                 .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
@@ -1710,9 +1778,6 @@ int main(void) {
               .pColorAttachments = &color_atts,
               .pDepthAttachment = &depth_att
             };
-            #if DEBUG_APP == 1
-            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, swapchain.query_pool, q0 + Q_BEFORE_RENDERPASS);
-            #endif
             vkCmdBeginRendering(cmd, &ri_swap);
             // set the resolution of the intermediary pass
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, renderer.main_pipeline);
@@ -1739,7 +1804,7 @@ int main(void) {
                 0, sizeof(uint32_t), &mode_mesh);
             vkCmdDrawIndexedIndirect(cmd, renderer.buffer_draw_calls, 0, total_mesh_count, sizeof(VkDrawIndexedIndirectCommand));
             #if DEBUG_APP == 1
-            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, swapchain.query_pool, q0 + Q_AFTER_RENDERPASS);
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, swapchain.query_pool, q0 + Q_RENDER);
             #endif
             uint32_t mode_sky = 1;
             vkCmdPushConstants(cmd,
@@ -1749,7 +1814,7 @@ int main(void) {
             vkCmdDraw(cmd, 3, 1, 0, 0); // sky fullscreen triangle
             vkCmdEndRendering(cmd);
             #if DEBUG_APP == 1
-            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, swapchain.query_pool, q0 + Q_AFTER_BLIT);
+            vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, swapchain.query_pool, q0 + Q_BLIT);
             #endif
             VkImageMemoryBarrier2 to_present =
                 img_barrier2(VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, AC_CWR, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
@@ -1758,6 +1823,7 @@ int main(void) {
             #if DEBUG_APP == 1
             #endif
            
+
             #if DEBUG_APP == 1
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, swapchain.query_pool, q0 + Q_END);
             #endif
