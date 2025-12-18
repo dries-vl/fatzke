@@ -20,16 +20,6 @@ struct mdi {uint index_count, instance_count, first_index, base_vertex, first_in
 struct di {uint group_count_x, group_count_y, group_count_z;};
 struct instance {uint object_id, animation;};
 
-// todo: chunks for collision detection
-// 4096 64m tiles, 1M 4m tiles, 16M 1m tiles, 67M 0.5m tiles
-[[vk::binding(16,0)]] RWStructuredBuffer<uint> BUCKET_COUNTS;  // 4mb 1M for 4096 squared, 4mx4m blocks
-[[vk::binding(17,0)]] RWStructuredBuffer<uint> BUCKET_OFFSETS; // 4mb 1M for 4096 squared, 4mx4m blocks
-[[vk::binding(18,0)]] RWStructuredBuffer<uint> BUCKET_OBJECTS; // 1mb # of objects in scene
-[[vk::binding(19,0)]] RWStructuredBuffer<uint> BLOCK_SUMS;     // 8192
-[[vk::binding(20,0)]] RWStructuredBuffer<uint> BLOCK_OFFSETS;  // 8192
-[[vk::binding(21,0)]] RWStructuredBuffer<uint> SUPER_SUMS;     // 64
-[[vk::binding(22,0)]] RWStructuredBuffer<uint> SUPER_OFFSETS;  // 64
-
 [[vk::binding(14,0)]] StructuredBuffer<uint>            OBJECT_MESH_LIST; // list of all the mesh ids that make up objects
 [[vk::binding(15,0)]] StructuredBuffer<object_metadata> OBJECT_METADATA;
 [[vk::binding(9,0)]]  StructuredBuffer<mdi>             MESH_INFO; // instance_count is 'max visible of this mesh in this scene'
@@ -39,27 +29,28 @@ struct instance {uint object_id, animation;};
 [[vk::binding(12,0)]] StructuredBuffer<uint>   NORMALS;   // R10G10B10A2_SNORM
 [[vk::binding(13,0)]] StructuredBuffer<uint>   UVS;       // R16G16_UNORM
 // chunk buffers
-[[vk::binding(1,0)]] RWStructuredBuffer<uint>  VISIBLE_CHUNK_IDS;     // size is # of chunks
-[[vk::binding(2,0)]] RWStructuredBuffer<di>    INDIRECT_WORKGROUPS;   // append per 64 directly in chunk pass
+[[vk::binding(1,0)]]  RWStructuredBuffer<uint>  VISIBLE_CHUNK_IDS;     // size is # of chunks
+[[vk::binding(2,0)]]  RWStructuredBuffer<di>    INDIRECT_WORKGROUPS;   // append per 64 directly in chunk pass
 // object buffers
-[[vk::binding(3,0)]] RWStructuredBuffer<uint>  VISIBLE_OBJECT_COUNT; // compute this in prefix pass
-[[vk::binding(7,0)]] RWStructuredBuffer<uint>  VISIBLE_OBJECT_IDS;    // size is # of objects in visible chunks
-[[vk::binding(5,0)]] RWStructuredBuffer<uint>  COUNT_PER_MESH;        // size is # of mesh types
-[[vk::binding(6,0)]] RWStructuredBuffer<uint>  OFFSET_PER_MESH;       // size is # of mesh types
+[[vk::binding(3,0)]]  RWStructuredBuffer<uint>  VISIBLE_OBJECT_COUNT; // compute this in prefix pass
+[[vk::binding(7,0)]]  RWStructuredBuffer<uint>  VISIBLE_OBJECT_IDS;   // size is # of objects in visible chunks
+[[vk::binding(5,0)]]  RWStructuredBuffer<uint>  COUNT_PER_MESH;       // size is # of mesh types
+[[vk::binding(6,0)]]  RWStructuredBuffer<uint>  OFFSET_PER_MESH;      // size is # of mesh types
+[[vk::binding(16,0)]] RWStructuredBuffer<uint>  BUCKETS; // 8mb for 131k buckets, need about 4x the amount of used 2mx2m tiles, appr. 2x the amount of units, this should work up to 60k units
 // final resulting rendering data
 [[vk::binding(10,0)]] RWStructuredBuffer<mdi>      DRAW_CALLS;         // MDI, one struct per mesh type, index is mesh id
 [[vk::binding(8,0)]]  RWStructuredBuffer<instance> RENDERED_INSTANCES; // size is max # of visible mesh instances
 // uniforms
-[[vk::binding(23,0)]]
+[[vk::binding(17,0)]]
 cbuffer uniforms {
     float3 camera_position;
-    float camera_pitch_sin, camera_pitch_cos;
-    float camera_yaw_sin, camera_yaw_cos;
-    float time; // seconds
-    uint selected_object_id;
-    float drag_rect_start_x, drag_rect_start_y, drag_rect_end_x, drag_rect_end_y;
+    float  camera_pitch_sin, camera_pitch_cos;
+    float  camera_yaw_sin, camera_yaw_cos;
+    float  time; // seconds
+    uint   selected_object_id;
+    float  drag_rect_start_x, drag_rect_start_y, drag_rect_end_x, drag_rect_end_y;
 };
-[[vk::binding(24, 0)]] Sampler2D TEXTURES[64];
+[[vk::binding(18, 0)]] Sampler2D TEXTURES[64];
 
 // push constants
 struct push_constants {
@@ -78,116 +69,18 @@ uint choose_lod_step(float distance, float radius) {
     return 0;
 }
 
-// plan
-// first pass: each 64 threads each do 2 elements -> 128 per workgroup -> 8192 workgroups
-// -> write total sum of 128 into BLOCK_SUMS[8192]
-// -> write within-block offsets into BUCKET_OFFSETS
-// next pass: 64 workgroups -> 128 each over the 8192 block sums -> 64 workgroups
-// -> write total sum of each 512 blocks into SUPER_SUMS[64]
-// -> write within-superblock offsets into BLOCK_OFFSETS
-// next pass: 1 workgroup, 64 threads
-// -> write to SUPER_OFFSETS
-// next pass: 8192 workgroups each 64 threads each do 2 elements
-// -> write final offsets into BUCKET_OFFSETS by adding SUPER_OFFSETS + BLOCK_OFFSETS + BUCKET_OFFSETS
-// final step: scatter objects into BUCKET_OBJECTS based on their offset and atomic count
-void ExclusiveScan128(uint t, inout uint total, inout groupshared uint s[128]) {
-    // --- upsweep (reduce) ---
-    // stride = 1,2,4,8,16,32,64
-    [unroll]
-    for (uint stride = 1; stride < 128; stride <<= 1) {
-        uint idx = ((t + 1) * stride * 2) - 1; // last index of each 2*stride segment
-        if (idx < 128)
-        {
-            s[idx] += s[idx - stride];
-        }
-        GroupMemoryBarrierWithGroupSync();
-    }
-    // total sum is now in s[127]
-    if (t == 0) {
-        total = s[127];
-        s[127] = 0; // convert inclusive tree to exclusive by clearing root
-    }
-    GroupMemoryBarrierWithGroupSync();
-    // --- downsweep ---
-    // stride = 64,32,16,8,4,2,1
-    // Use a loop that won't underflow uint.
-    [unroll]
-    for (uint stride = 64; stride >= 1; stride >>= 1) {
-        uint idx = ((t + 1) * stride * 2) - 1;
-        if (idx < 128) {
-            uint a = s[idx - stride];
-            uint b = s[idx];
-            s[idx - stride] = b;
-            s[idx] = b + a;
-        }
-        GroupMemoryBarrierWithGroupSync();
-        if (stride == 1) break; // prevent uint underflow
-    }
+static const uint bucket_size = 2; // size in meters of each bucket ~2mx2m
+static const uint map_size = 4096; // 4096m
+static const uint buckets_width = map_size / bucket_size;
+uint get_bucket_id(float x, float y) {
+    uint key = uint(floor(y / bucket_size) )* buckets_width + uint(floor(x / bucket_size));
+    return (key ^ (key >> 15)) & 0x1FFFFu; // take 17 bits for result between 0 and 131k
 }
 
-groupshared uint sA[128];
-groupshared uint sB[128];
-groupshared uint sC[128];
 groupshared uint counts[25];
 
 [shader("compute")] [numthreads(64,1,1)]
 void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_DispatchThreadID) {
-    // block sums + within-block offsets; 8192 workgroups
-    if (PUSH_CONSTANTS.mode == 4) {
-        uint t = gtid.x;           // 0..63
-        uint blockID = gid.x;      // 0..8191
-        uint base = blockID * 128;
-        sA[2*t+0] = BUCKET_COUNTS[base + 2*t+0];
-        sA[2*t+1] = BUCKET_COUNTS[base + 2*t+1];
-        GroupMemoryBarrierWithGroupSync();
-        uint total;
-        ExclusiveScan128(t, total, sA);
-        if (t == 0)
-            BLOCK_SUMS[blockID] = total;
-        BUCKET_OFFSETS[base + 2*t+0] = sA[2*t+0];
-        BUCKET_OFFSETS[base + 2*t+1] = sA[2*t+1];
-    }
-    // super sums + within-superblock offsets; 64 workgroups
-    if (PUSH_CONSTANTS.mode == 5) {
-        uint t = gtid.x;        // 0..63
-        uint superID = gid.x;   // 0..63
-        uint base = superID * 128;
-        sB[2*t+0] = BLOCK_SUMS[base + 2*t+0];
-        sB[2*t+1] = BLOCK_SUMS[base + 2*t+1];
-        GroupMemoryBarrierWithGroupSync();
-        uint total;
-        ExclusiveScan128(t, total, sB);
-        if (t == 0)
-            SUPER_SUMS[superID] = total;
-
-        BLOCK_OFFSETS[base + 2*t+0] = sB[2*t+0];
-        BLOCK_OFFSETS[base + 2*t+1] = sB[2*t+1];
-    }
-    // super offsets; 1 workgroup
-    if (PUSH_CONSTANTS.mode == 6) {
-        uint t = gtid.x; // 0..63
-        uint i0 = 2*t+0;
-        uint i1 = 2*t+1;
-        // pad to 128
-        sC[i0] = (i0 < 64) ? SUPER_SUMS[i0] : 0;
-        sC[i1] = (i1 < 64) ? SUPER_SUMS[i1] : 0;
-        GroupMemoryBarrierWithGroupSync();
-        uint total;
-        ExclusiveScan128(t, total, sC);
-        if (i0 < 64) SUPER_OFFSETS[i0] = sC[i0];
-        if (i1 < 64) SUPER_OFFSETS[i1] = sC[i1];
-    }
-    // final offsets; 8192 workgroups
-    if (PUSH_CONSTANTS.mode == 7) {
-        uint t = gtid.x;       // 0..63
-        uint blockID = gid.x;  // 0..8191
-        uint baseBucket = blockID * 128;
-        // blockID / 128 == superID
-        uint superID = blockID >> 7;
-        uint add = BLOCK_OFFSETS[blockID] + SUPER_OFFSETS[superID];
-        BUCKET_OFFSETS[baseBucket + 2*t+0] += add;
-        BUCKET_OFFSETS[baseBucket + 2*t+1] += add;
-    }
     // CHUNK PASS
     if (PUSH_CONSTANTS.mode == 0) {
         uint stride, chunk_count;
@@ -219,6 +112,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         float distance = dot(delta_position, delta_position) / 500.0f;
         if (chunk_id < 6400 && distance > d[0] + 50000) {
             // if really far, just directly write one visible instance, instead of 64 tile objects
+            /*
             uint stride; uint mesh_count;
             MESH_INFO.GetDimensions(mesh_count, stride);
             uint object_type = CHUNKS[chunk_id].object_type;
@@ -227,8 +121,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
             uint lod_level = choose_lod_step(distance, OBJECT_METADATA[object_type].radius);
             uint mesh_id = base_mesh_id + lod_level;
             uint slot;  InterlockedAdd(COUNT_PER_MESH[mesh_id], 1, slot);
-            uint slot1; InterlockedAdd(VISIBLE_OBJECT_COUNT[0], 1, slot1); // keep a count for later
-            VISIBLE_OBJECT_IDS[slot1] = 1000000 + chunk_id; // add a visible object
+            */
         } else {
             // else spawn a workgroup of 64 objects
             uint slot; InterlockedAdd(INDIRECT_WORKGROUPS[0].group_count_x, 1, slot);
@@ -240,7 +133,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
     // OBJECT PASS
     else if (PUSH_CONSTANTS.mode == 1) {
         // workgroup setup
-        if (gtid.x < 5) // init to zero
+        if (gtid.x < 25) // init to zero
             counts[gtid.x] = 0;
         GroupMemoryBarrierWithGroupSync();
         // same fetches for whole workgroup
@@ -257,19 +150,16 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
 
         // unpack object position and move to camera space
         float3 position;
-        uint radius;
         if (chunk_id < 6400) {
             // terrain: assuming each object is 128m wide
             float3 chunk_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * 1024 - 40960 + 512);
             float3 object_position = float3(int(id_within_chunk / 8) * 128 - 512 + 64, 0, int(id_within_chunk % 8) * 128 - 512 + 64);
             object_position += chunk_position;
             position = object_position - (camera_position / 10); // in meters
-            radius = 150;
         } else {
             uint2 object = OBJECTS[object_id]; // 8 bytes
             float3 object_position = float3(((int16_t) (object.x & 0xFFFF)), ((int16_t)((object.x >> 16) & 0xFFFF)), ((int16_t) (object.y & 0xFFFF)));
             position = object_position - camera_position;
-            radius = 32;
         }
         float position_yaw_z =  camera_yaw_sin * position.x + camera_yaw_cos * position.z; // apply yaw to Z
         float3 view = float3(
@@ -287,8 +177,8 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         uint mesh_offset = OBJECT_METADATA[object_type].meshes_offset;
         uint base_mesh_id = OBJECT_MESH_LIST[mesh_offset];
         float distance = dot(position,position) / 500.0f;
-        uint lod_level = choose_lod_step(distance, OBJECT_METADATA[object_type].radius);
-        uint mesh_id = base_mesh_id + lod_level;
+        float radius = OBJECT_METADATA[object_type].radius;
+        uint lod_level = choose_lod_step(distance, radius);
         
         // calculate frustrum
         bool outside_frustrum = (abs(view.x) - radius) > (view.z * tanHalfFovX) || (abs(view.y) - radius) > (view.z * tanHalfFovY);
@@ -301,7 +191,6 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         // near cull
         // if (view.z < 0) valid = false;
 
-        VISIBLE_OBJECT_IDS[tid.x] = valid ? 1 : 0;
         if (valid) {
             uint slot; InterlockedAdd(counts[lod_level], 1, slot);
             // todo: we should use per-workgroup count here to have only one atomic add per 64 (this is possible)
@@ -317,21 +206,21 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
             for (uint lod = 0; lod < 5; ++lod) {
                 uint c = counts[lod];
                 if (c != 0) {
-                    InterlockedAdd(COUNT_PER_MESH[mesh_id + lod], c);
+                    InterlockedAdd(COUNT_PER_MESH[base_mesh_id + lod], c);
                 }
             }
 
             if (chunk_id >= 6400) {
+                // heads: 5 LODs (offset +40)
                 [unroll]
                 for (uint lod = 0; lod < 5; ++lod) {
                     uint c = counts[5 + lod];
                     if (c != 0) {
-                        InterlockedAdd(COUNT_PER_MESH[mesh_id + 40], c);
+                        InterlockedAdd(COUNT_PER_MESH[base_mesh_id + 40 + lod], c);
                     }
                 }
             }
         }
-
     }
     // prefix sum
     else if (PUSH_CONSTANTS.mode == 2) {
@@ -405,7 +294,8 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         uint mesh_offset = OBJECT_METADATA[object_type].meshes_offset;
         uint base_mesh_id = OBJECT_MESH_LIST[mesh_offset];
         float distance = dot(position,position) / 500.0f;
-        uint lod_level = choose_lod_step(distance, OBJECT_METADATA[object_type].radius);
+        float radius = OBJECT_METADATA[object_type].radius;
+        uint lod_level = choose_lod_step(distance, radius);
         uint mesh_id = base_mesh_id + lod_level;
         
         // convert to int again
@@ -417,39 +307,45 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         float cos_delta =  object_yaw_cos * camera_yaw_cos + object_yaw_sin * camera_yaw_sin; // cos(a-b)
         float sin_delta =  object_yaw_sin* camera_yaw_cos - object_yaw_cos * camera_yaw_sin; // sin(a-b)
 
-        // Grab slot via atomic write head on the draw call
-        uint slot; InterlockedAdd(DRAW_CALLS[mesh_id].instance_count, 1, slot);
-        const uint dst = OFFSET_PER_MESH[mesh_id] + slot;
-        if (is_chunk_object) {
-            RENDERED_INSTANCES[dst] = instance(chunk_id + 1000000, 0);
-        } else if (object_id < 6400 * 64) {
-            RENDERED_INSTANCES[dst] = instance(object_id, 0);
-        } else {
-            // ANIMATION
-            static const float FRAME_DURATION = 0.5f; // 4 frames per second
-            static const float ANIMATION_DURATION = 2.0f;  // 4 frames, 0.5s each
-            static const float PAIR_DURATION = ANIMATION_DURATION * 2.0f;
-            uint animation = 0;
-            uint next_animation = 1;
-            float phase = frac(object_id * 0.756688471) * ANIMATION_DURATION; // randomized start time for animations, somewhere within the 2s
-            float t_clip = time + phase; // progress with time
-            float t_in_clip = frac(t_clip / PAIR_DURATION) * PAIR_DURATION; // 0 to 4s
-            float frame_f = t_in_clip / FRAME_DURATION; // 0..8 (two clips is eight total frames)
-            uint frame0 = (uint)frame_f; // 0..7
-            uint clip0 = frame0 < 4 ? animation : next_animation;
-            uint frame1 = (frame0 + 1u) % 8u; // 0..7
-            uint clip1 = frame1 < 4 ? animation : next_animation;
-            if (frame0 >= 4) frame0 = frame0 - 4; frame0 = (frame0 * 5) + (clip0 * 4 * 5);
-            if (frame1 >= 4) frame1 = frame1 - 4; frame1 = (frame1 * 5) + (clip1 * 4 * 5);
-            float alpha  = frac(frame_f); // interpolation factor between the frame
-            uint packed_anim = ((frame0  & 0x3FF)) | ((frame1  & 0x3FF) << 10) | (((uint)round(alpha * 1023.0f) & 0x3FF) << 20);
-            // ADD MESHES
-            // add the body
-            RENDERED_INSTANCES[dst] = instance(object_id, packed_anim);
-            // add the head
-            uint slot_head; InterlockedAdd(DRAW_CALLS[mesh_id + 40].instance_count, 1, slot_head);
-            const uint head_dst = OFFSET_PER_MESH[mesh_id + 40] + slot_head;
-            RENDERED_INSTANCES[head_dst] = instance(object_id, packed_anim);
+        bool outside_frustrum = (abs(view.x) - radius) > (view.z * tanHalfFovX) || (abs(view.y) - radius) > (view.z * tanHalfFovY);
+        bool valid = true;
+        if (outside_frustrum) valid = false;
+
+        if (valid) {
+            // Grab slot via atomic write head on the draw call
+            uint slot; InterlockedAdd(DRAW_CALLS[mesh_id].instance_count, 1, slot);
+            const uint dst = OFFSET_PER_MESH[mesh_id] + slot;
+            if (is_chunk_object) {
+                RENDERED_INSTANCES[dst] = instance(chunk_id + 1000000, 0);
+            } else if (object_id < 6400 * 64) {
+                RENDERED_INSTANCES[dst] = instance(object_id, 0);
+            } else {
+                // ANIMATION
+                static const float FRAME_DURATION = 0.5f; // 4 frames per second
+                static const float ANIMATION_DURATION = 2.0f;  // 4 frames, 0.5s each
+                static const float PAIR_DURATION = ANIMATION_DURATION * 2.0f;
+                uint animation = 0;
+                uint next_animation = 1;
+                float phase = frac(object_id * 0.756688471) * ANIMATION_DURATION; // randomized start time for animations, somewhere within the 2s
+                float t_clip = time + phase; // progress with time
+                float t_in_clip = frac(t_clip / PAIR_DURATION) * PAIR_DURATION; // 0 to 4s
+                float frame_f = t_in_clip / FRAME_DURATION; // 0..8 (two clips is eight total frames)
+                uint frame0 = (uint)frame_f; // 0..7
+                uint clip0 = frame0 < 4 ? animation : next_animation;
+                uint frame1 = (frame0 + 1u) % 8u; // 0..7
+                uint clip1 = frame1 < 4 ? animation : next_animation;
+                if (frame0 >= 4) frame0 = frame0 - 4; frame0 = (frame0 * 5) + (clip0 * 4 * 5);
+                if (frame1 >= 4) frame1 = frame1 - 4; frame1 = (frame1 * 5) + (clip1 * 4 * 5);
+                float alpha  = frac(frame_f); // interpolation factor between the frame
+                uint packed_anim = ((frame0  & 0x3FF)) | ((frame1  & 0x3FF) << 10) | (((uint)round(alpha * 1023.0f) & 0x3FF) << 20);
+                // ADD MESHES
+                // add the body
+                RENDERED_INSTANCES[dst] = instance(object_id, packed_anim);
+                // add the head
+                uint slot_head; InterlockedAdd(DRAW_CALLS[mesh_id + 40].instance_count, 1, slot_head);
+                const uint head_dst = OFFSET_PER_MESH[mesh_id + 40] + slot_head;
+                RENDERED_INSTANCES[head_dst] = instance(object_id, packed_anim);
+            }
         }
     }
 }
