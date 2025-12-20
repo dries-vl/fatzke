@@ -11,6 +11,9 @@ extern const unsigned char map_end[];
 extern const unsigned char height[];
 extern const unsigned char height_end[];
 #define height_len ((size_t)(height_end - height))
+extern const unsigned char normals[];
+extern const unsigned char normals_end[];
+#define normals_len ((size_t)(normals_end - normals))
 
 typedef struct Texture {
     VkImage        image;
@@ -363,6 +366,9 @@ void create_textures(struct Machine *machine, struct Swapchain *swapchain) {
     texture_count++;
     if (!create_texture_from_ktx2_astc(machine, swapchain, height, height_len, &textures[2]))
         printf("Failed to create height texture from KTX2\n");
+    texture_count++;
+    if (!create_texture_from_ktx2_astc(machine, swapchain, normals, normals_len, &textures[3]))
+        printf("Failed to create normals texture from KTX2\n");
     texture_count++;
 
     // later: map/map, world map, per-mesh textures, etc.

@@ -58,7 +58,7 @@ struct push_constants {
 };
 [[vk::push_constant]] push_constants PUSH_CONSTANTS;
 
-static const float d[4] = { 64.0, 16.0, 4.0, 1.0 };
+static const float d[4] = { 512.0, 128.0, 32.0, 8.0 };
 uint choose_lod_step(float distance, float radius) {
     if (radius <= 0) radius = 10.0;
     distance = distance / radius;
@@ -82,6 +82,9 @@ groupshared uint counts[25];
 [shader("compute")] [numthreads(64,1,1)]
 void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_DispatchThreadID) {
     // CHUNK PASS
+    if (gtid.x < 25) // init to zero
+        counts[gtid.x] = 0;
+    GroupMemoryBarrierWithGroupSync();
     if (PUSH_CONSTANTS.mode == 0) {
         uint stride, chunk_count;
         CHUNKS.GetDimensions(chunk_count, stride);
@@ -107,7 +110,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         uint radius = 1524;
         bool valid = true;
         bool frustum = (abs(view.x) - radius) > (view.z * tanHalfFovX) || (abs(view.y) - radius) > (view.z * tanHalfFovY);
-        if (frustum) valid = false;
+        if (frustum && view.z > 0) valid = false;
         if (valid) {
             // distance
             float distance = dot(delta_position, delta_position) / 500.0f;
@@ -368,7 +371,8 @@ struct vs_out {
     float4 pos    : SV_Position;                                           // clip-space position
     float2 uv     : TEXCOORD0;                                             // texture coordinates
     float3 normal : TEXCOORD1;                                             // surface normal
-    uint object_id : TEXCOORD2;
+    float3 p_view : TEXCOORD2;
+    uint object_id : TEXCOORD3;
 };
 
 static const uint MAX_VERTICES = 32u;
@@ -438,12 +442,15 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
         instance_z = 100.0 * view.z;
         vertex = plane_position(VERTEX_ID, DRAW_ID); // in cm
         if (is_chunk_object) vertex *= 8;
-        int2 vertex_world = int2(object_position.xz * 100 + vertex.xz);
-        normal = float3(0.5, 1.0, 0.2);
-        uv = (object_position.xz + (vertex.xz / 100.0) + (128.0 * 8.0 * 80.0 / 2.0)) / (128.0 * 8.0 * 80.0);
-        uv = float2(1,1) + float2(uv.x, -uv.y);
-        float height = TEXTURES[2].Sample(uv).x;
-        vertex.y += height * 100000.0f; // in cm
+        uint vps = MAX_VERTICES >> DRAW_ID;                 // vertices per side
+        float step_cm = TILE_SIZE_CM / float(vps - 1);      // neighbor vertex spacing (cm)
+        float2 uv0 = (object_position.xz + (vertex.xz / 100.0f) + (128.0f * 8.0f * 80.0f * 0.5f)) / (128.0f * 8.0f * 80.0f);
+        uv0 = float2(1,1) + float2(uv0.x, -uv0.y);
+        float hC = TEXTURES[2].SampleLevel(uv0, 0).x * 100000.0f;
+        vertex.y += hC;
+        normal.x = hC;
+        normal.y = step_cm;
+        uv = uv0;
     } else {
         // instance
         uint2 object = OBJECTS[object_id];    // 8 bytes
@@ -485,11 +492,18 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
         vertex = lerp(vertex, vertex_next, alpha);
         // fetch and unpack vertex normal (4 bytes)
         uint packed_normal = NORMALS[VERTEX_ID + base_vertex];
+        uint packed_normal_next = NORMALS[VERTEX_ID + base_vertex_next];
         normal = float3(
             float(((int)( packed_normal        & 0x3FF) << 22) >> 22) * divide_by_511,
             float(((int)((packed_normal >> 10) & 0x3FF) << 22) >> 22) * divide_by_511,
             float(((int)((packed_normal >> 20) & 0x3FF) << 22) >> 22) * divide_by_511
         );
+        float3 normal_next = float3(
+            float(((int)( packed_normal_next        & 0x3FF) << 22) >> 22) * divide_by_511,
+            float(((int)((packed_normal_next >> 10) & 0x3FF) << 22) >> 22) * divide_by_511,
+            float(((int)((packed_normal_next >> 20) & 0x3FF) << 22) >> 22) * divide_by_511
+        );
+        normal = normalize(lerp(normal, normal_next, alpha));
         // fetch and unpack uv (4 bytes)
         uint packed_uv = UVS[VERTEX_ID + base_vertex];
         uv = float2(
@@ -497,7 +511,7 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
             (packed_uv >> 16)    * (1.0/65535.0)
         );
         // height
-        float2 terrain_uv = (object_position.xz / 100.0) / (128.0 * 8.0 * 80.0);
+        float2 terrain_uv = ((object_position.xz / 10.0) + (128.0 * 8.0 * 80.0 / 2.0)) / (128.0 * 8.0 * 80.0);
         terrain_uv = float2(1,1) + float2(terrain_uv.x, -terrain_uv.y);
         float height = TEXTURES[2].Sample(terrain_uv).x;
         vertex.y += height * 100000.0f; // in cm
@@ -528,6 +542,7 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
     o.pos = float4(cx, cy, cz, w);
     o.normal = normal;
     o.uv = uv;
+    o.p_view = float3(vx, vy, vz); // pass position to frag
     o.object_id = INSTANCE.object_id;
     return o;
 }
@@ -536,7 +551,8 @@ struct ps_out {
     float4 color : SV_Target0; // normal color
     uint   id    : SV_Target1; // object ID
 };
-
+static const float3 LIGHT_DIR = normalize(float3(0.4, 0.2, 0.2)); // points *from surface to light*
+static const float  AMBIENT   = 0.01;
 [shader("fragment")]
 ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
     ps_out o;
@@ -564,14 +580,35 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
 
         return ps_out(border_color, i.object_id);
     }
+    // terrain
+    if (i.object_id > 1000000 || i.object_id < 6400 * 64) {
+        float hC = i.normal.x;
+        float step_cm = i.normal.y;
+        float2 duv = float2(step_cm / 100.0f, 0);
+        float2 dv  = float2(0, step_cm / 100.0f);
+        duv /= (128.0f * 8.0f * 80.0f);
+        dv  /= (128.0f * 8.0f * 80.0f);
+        float hL = TEXTURES[2].SampleLevel(i.uv - duv, 0).x * 100000.0f;
+        float hR = TEXTURES[2].SampleLevel(i.uv + duv, 0).x * 100000.0f;
+        float hD = TEXTURES[2].SampleLevel(i.uv - dv,  0).x * 100000.0f;
+        float hU = TEXTURES[2].SampleLevel(i.uv + dv,  0).x * 100000.0f;
+        // --- build normal from grid-space slopes ---
+        float3 dPdx = float3(2.0f * step_cm, (hR - hL), 0.0f);
+        float3 dPdz = float3(0.0f, (hU - hD), 2.0f * step_cm);
+        i.normal = normalize(cross(dPdz, dPdx));
+    }
+    float3 N = normalize(i.normal);
+    float ndl = saturate(dot(N, LIGHT_DIR));
+    float shade = AMBIENT + (1.0 - AMBIENT) * ndl;
     // // debug draw triangles as distinct colors
-    float3 color = frac(sin((primID+43) * 43.5453) * float3(23.1407, 85.928, 43.533));
-    if(color.x+color.y+color.z < 0.1) color = float3(float(primID % 32) / 32, float((primID + 38) % 64) / 64, float((primID + 17) % 32) / 32);
+    // float3 color = frac(sin((primID+43) * 43.5453) * float3(23.1407, 85.928, 43.533));
+    // if(color.x+color.y+color.z < 0.1) color = float3(float(primID % 32) / 32, float((primID + 38) % 64) / 64, float((primID + 17) % 32) / 32);
     // return float4(color, 1.0);
     // float4 color = TEXTURES[0].Sample(i.uv);
     float4 output = TEXTURES[1].Sample(i.uv);
-    output.xyz += color / 5;
+    // output.xyz += color / 5;
     o.color = output;
+    o.color *= shade;
     if (i.object_id == selected_object_id) {
         o.color.xyz += float3(0.2);
     }

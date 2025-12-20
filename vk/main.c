@@ -360,7 +360,7 @@ void process_inputs() {
     if (buttons[MOUSE_MARGIN_TOP]) { cam_pitch -= buttons[MOUSE_MARGIN_TOP]; }
     if (buttons[MOUSE_MARGIN_BOTTOM]) { cam_pitch += buttons[MOUSE_MARGIN_BOTTOM]; }
     if (buttons[MOUSE_SCROLL]) { 
-        if (cam_y + buttons[MOUSE_SCROLL] < 327670 && cam_y + buttons[MOUSE_SCROLL] > 10)
+        if (cam_y + buttons[MOUSE_SCROLL] < 32767 && cam_y + buttons[MOUSE_SCROLL] > 10)
             cam_y += buttons[MOUSE_SCROLL];
         buttons[MOUSE_SCROLL] = 0;
     }
@@ -592,7 +592,7 @@ int main(void) {
     static struct Mesh meshes[MESH_TYPE_COUNT] = {
         [MESH_PLANE] = {
             .num_animations = 0, // special case with no frames, only indices
-            .radius = 150.0f,
+            .radius = 20.0f, // todo: we 5x it later, kinda hacky
             .lods = {
                 {.num_indices = 5766, /* 961 quads, 31x31 */ .indices = g_indices_plane_lod2 },
                 {.num_indices = 1350, /* 225 quads, 15x15 */ .indices = g_indices_plane_lod3 },
@@ -656,7 +656,8 @@ int main(void) {
         for (u32 m = 0; m < object_metadata[i].mesh_count; ++m) {
             object_mesh_offsets[object_metadata[i].meshes_offset + m] = mesh_offsets[object_mesh_types[object_metadata[i].meshes_offset + m]];
         }
-        object_metadata[i].radius = meshes[object_mesh_types[object_metadata[i].meshes_offset]].radius;
+        object_metadata[i].radius = meshes[object_mesh_types[object_metadata[i].meshes_offset]].radius * 5.0f; // double
+        printf("Object type %d has radius %f\n", i, object_metadata[i].radius);
         printf("Object type %d has %d meshes, offset %d\n", i, object_metadata[i].mesh_count, object_metadata[i].meshes_offset);
     }
 
@@ -701,9 +702,9 @@ int main(void) {
         gpu_chunks[scene[OBJECT_TYPE_UNIT].first_chunk + i].object_id = OBJECT_TYPE_UNIT;
     }
     for (int i = 0; i < UNIT_CHUNK_COUNT * OBJECTS_PER_CHUNK; ++i) {
-        gpu_objects[first_unit_object + i].x = (uint16_t)(i % 256) * 10;
+        gpu_objects[first_unit_object + i].x = (uint16_t)(i % 256) * 20;
         gpu_objects[first_unit_object + i].y = (uint16_t)((0)) << 16;
-        gpu_objects[first_unit_object + i].z = (uint16_t)((i / 256) * 10);
+        gpu_objects[first_unit_object + i].z = (uint16_t)((i / 256) * 20);
         {
             float yaw = 0.0f;
             gpu_objects[first_unit_object + i].cos = (((uint8_t)lrintf(cosf(yaw) * 127.0f)));
