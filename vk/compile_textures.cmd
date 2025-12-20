@@ -4,7 +4,7 @@
 for %%f in (data\*.png) do (
     set "name=%%~nf"
 
-    toktx --t2 --encode astc --astc_blk_d 12x12 --srgb --genmipmap ^
+    toktx --t2 --encode astc --astc_blk_d 8x8 --srgb --genmipmap ^
         static/win32/%%~nf.ktx2 data/%%f
 
     objcopy -I binary -O elf64-x86-64 ^
@@ -22,7 +22,7 @@ goto :eof
 for img in data/*.png; do
     base="$(basename "$img" .png)"
 
-    toktx --t2 --encode astc --astc_blk_d 12x12 --srgb --genmipmap \
+    toktx --t2 --encode astc --astc_blk_d 8x8 --srgb --genmipmap \
         "static/linux/${base}.ktx2" "$img"
 
     objcopy \

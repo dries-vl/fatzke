@@ -8,6 +8,9 @@ extern const unsigned char font_atlas_end[];
 extern const unsigned char map[];
 extern const unsigned char map_end[];
 #define map_len ((size_t)(map_end - map))
+extern const unsigned char height[];
+extern const unsigned char height_end[];
+#define height_len ((size_t)(height_end - height))
 
 typedef struct Texture {
     VkImage        image;
@@ -198,9 +201,9 @@ int create_texture_from_ktx2_astc(
         return 0;
     }
 
-    // Expect ASTC 12x12 sRGB; KTX2 stores actual VkFormat value
+    // Expect ASTC 8x8 sRGB; KTX2 stores actual VkFormat value
     VkFormat format = (VkFormat)header.vkFormat;
-    if (format != VK_FORMAT_ASTC_12x12_SRGB_BLOCK) {
+    if (format != VK_FORMAT_ASTC_8x8_SRGB_BLOCK) {
         printf("Unexpected vkFormat in KTX2: %u\n", header.vkFormat);
         // you can still continue if you want
     }
@@ -357,6 +360,9 @@ void create_textures(struct Machine *machine, struct Swapchain *swapchain) {
     texture_count++;
     if (!create_texture_from_ktx2_astc(machine, swapchain, map, map_len, &textures[1]))
         printf("Failed to create map texture from KTX2\n");
+    texture_count++;
+    if (!create_texture_from_ktx2_astc(machine, swapchain, height, height_len, &textures[2]))
+        printf("Failed to create height texture from KTX2\n");
     texture_count++;
 
     // later: map/map, world map, per-mesh textures, etc.

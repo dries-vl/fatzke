@@ -105,29 +105,40 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
             -camera_pitch_sin * delta_position.y + camera_pitch_cos * position_yaw_z // apply pitch to Z (using new z)
         );
         uint radius = 1524;
+        bool valid = true;
         bool frustum = (abs(view.x) - radius) > (view.z * tanHalfFovX) || (abs(view.y) - radius) > (view.z * tanHalfFovY);
-        if (frustum) return;
-
-        // distance
-        float distance = dot(delta_position, delta_position) / 500.0f;
-        if (chunk_id < 6400 && distance > d[0] + 50000) {
-            // if really far, just directly write one visible instance, instead of 64 tile objects
-            /*
-            uint stride; uint mesh_count;
-            MESH_INFO.GetDimensions(mesh_count, stride);
+        if (frustum) valid = false;
+        if (valid) {
+            // distance
+            float distance = dot(delta_position, delta_position) / 500.0f;
+            if (chunk_id < 6400 && distance > d[0] + 50000) {
+                // if really far, just directly write one visible instance, instead of 64 tile objects
+                uint stride; uint mesh_count;
+                MESH_INFO.GetDimensions(mesh_count, stride);
+                uint object_type = CHUNKS[chunk_id].object_type;
+                uint lod_level = choose_lod_step(distance, OBJECT_METADATA[object_type].radius);
+                uint slot; InterlockedAdd(counts[lod_level], 1, slot);
+            } else {
+                // else spawn a workgroup of 64 objects
+                uint slot; InterlockedAdd(INDIRECT_WORKGROUPS[0].group_count_x, 1, slot);
+                INDIRECT_WORKGROUPS[0].group_count_y = 1;
+                INDIRECT_WORKGROUPS[0].group_count_z = 1;
+                VISIBLE_CHUNK_IDS[slot] = chunk_id;
+            }
+        }
+        GroupMemoryBarrierWithGroupSync();
+        if (gtid.x == 0) {
+            // bodies: 5 LODs
             uint object_type = CHUNKS[chunk_id].object_type;
             uint mesh_offset = OBJECT_METADATA[object_type].meshes_offset;
             uint base_mesh_id = OBJECT_MESH_LIST[mesh_offset];
-            uint lod_level = choose_lod_step(distance, OBJECT_METADATA[object_type].radius);
-            uint mesh_id = base_mesh_id + lod_level;
-            uint slot;  InterlockedAdd(COUNT_PER_MESH[mesh_id], 1, slot);
-            */
-        } else {
-            // else spawn a workgroup of 64 objects
-            uint slot; InterlockedAdd(INDIRECT_WORKGROUPS[0].group_count_x, 1, slot);
-            INDIRECT_WORKGROUPS[0].group_count_y = 1;
-            INDIRECT_WORKGROUPS[0].group_count_z = 1;
-            VISIBLE_CHUNK_IDS[slot] = chunk_id;
+            [unroll]
+            for (uint lod = 0; lod < 5; ++lod) {
+                uint c = counts[lod];
+                if (c != 0) {
+                    InterlockedAdd(COUNT_PER_MESH[base_mesh_id + lod], c);
+                }
+            }
         }
     }
     // OBJECT PASS
@@ -141,6 +152,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         OBJECTS.GetDimensions(object_count, stride);
         MESH_INFO.GetDimensions(mesh_count, stride);
         CHUNKS.GetDimensions(chunk_count, stride);
+        static const uint max_chunk_tiles = 6400;
         uint chunk_id = VISIBLE_CHUNK_IDS[gid.x]; // id in global chunk buffer
 
         // fetches per object
@@ -193,7 +205,6 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
 
         if (valid) {
             uint slot; InterlockedAdd(counts[lod_level], 1, slot);
-            // todo: we should use per-workgroup count here to have only one atomic add per 64 (this is possible)
             if (chunk_id >= 6400) {
                 // add a head
                 uint slot2;  InterlockedAdd(counts[5 + lod_level], 1, slot2);
@@ -242,6 +253,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         }
 
         // fill the indirect dispatch buffer for the scatter pass with the sum of visible objects
+        INDIRECT_WORKGROUPS[0].group_count_x += 100; // add 6400 threads for possible chunk-to-object tiles on the map
         // INDIRECT_WORKGROUPS[0].group_count_x = (VISIBLE_OBJECT_COUNT[0] + 63) / 64;
         // INDIRECT_WORKGROUPS[0].group_count_y = 1;
         // INDIRECT_WORKGROUPS[0].group_count_z = 1;
@@ -253,7 +265,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         uint stride, mesh_count;
         MESH_INFO.GetDimensions(mesh_count, stride);
 
-        uint chunk_id = VISIBLE_CHUNK_IDS[gid.x]; // id in global chunk buffer
+        uint chunk_id = VISIBLE_CHUNK_IDS[gid.x - 100]; // id in global chunk buffer, minus the 100 we added for the 6400 possible chunks tiles
         uint id_within_chunk = gtid.x;
         uint object_id = (chunk_id * 64) + id_within_chunk; // id in global objects buffer
 
@@ -262,9 +274,9 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         float3 position;
         float object_yaw_cos = 1;
         float object_yaw_sin = 0;
-        bool is_chunk_object = object_id > 1000000;
+        bool is_chunk_object = gid.x < 100;
         if (is_chunk_object) {
-            chunk_id = object_id - 1000000;
+            chunk_id = tid.x;
             object_id = chunk_id * 64;
             float3 object_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * 1024 - 40960 + 512);
             position = object_position - (camera_position / 10); // in meters
@@ -310,6 +322,8 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         bool outside_frustrum = (abs(view.x) - radius) > (view.z * tanHalfFovX) || (abs(view.y) - radius) > (view.z * tanHalfFovY);
         bool valid = true;
         if (outside_frustrum) valid = false;
+
+        if (is_chunk_object && distance <= d[0] + 50000) valid = false;
 
         if (valid) {
             // Grab slot via atomic write head on the draw call
@@ -400,6 +414,7 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
     float2 uv;
     uint object_id = INSTANCE.object_id;
     if (DRAW_ID < 5) {
+        // terrain
         bool is_chunk_object = object_id > 1000000;
         if (is_chunk_object) object_id -= 1000000;
         uint chunk_id = object_id / 64;
@@ -427,6 +442,8 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
         normal = float3(0.5, 1.0, 0.2);
         uv = (object_position.xz + (vertex.xz / 100.0) + (128.0 * 8.0 * 80.0 / 2.0)) / (128.0 * 8.0 * 80.0);
         uv = float2(1,1) + float2(uv.x, -uv.y);
+        float height = TEXTURES[2].Sample(uv).x;
+        vertex.y += height * 100000.0f; // in cm
     } else {
         // instance
         uint2 object = OBJECTS[object_id];    // 8 bytes
@@ -479,6 +496,11 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
             (packed_uv & 0xFFFF) * (1.0/65535.0),
             (packed_uv >> 16)    * (1.0/65535.0)
         );
+        // height
+        float2 terrain_uv = (object_position.xz / 100.0) / (128.0 * 8.0 * 80.0);
+        terrain_uv = float2(1,1) + float2(terrain_uv.x, -terrain_uv.y);
+        float height = TEXTURES[2].Sample(terrain_uv).x;
+        vertex.y += height * 100000.0f; // in cm
     }
 
     // rotate position around y for the combined camera-instance yaw we saved
