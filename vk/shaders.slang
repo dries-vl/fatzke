@@ -64,9 +64,10 @@ uint choose_lod_step(float distance, float radius) {
     distance = distance / radius;
     if (distance >= d[0]) return 4;
     if (distance >= d[1]) return 3;
-    if (distance >= d[2]) return 2;
-    if (distance >= d[3]) return 1;
-    return 0;
+    return 2;
+    //if (distance >= d[2]) return 2;
+    //if (distance >= d[3]) return 1;
+    //return 0;
 }
 
 static const uint bucket_size = 2; // size in meters of each bucket ~2mx2m
@@ -91,13 +92,14 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         uint chunk_id = tid.x;
         if (chunk_id >= chunk_count) return;
         float3 delta_position;
+        float3 chunk_position;
         if (chunk_id < 6400) {
             // assuming each tile is 1024m wide, and we use meters instead of dm now
-            float3 chunk_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * 1024 - 40960 + 512);
+            chunk_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * 1024 - 40960 + 512);
             delta_position = chunk_position - (camera_position / 10); // in meters
         } else {
             uint2 object = OBJECTS[chunk_id * 64];    // 8 bytes
-            float3 chunk_position = float3(((int16_t) (object.x & 0xFFFF)), ((int16_t)((object.x >> 16) & 0xFFFF)), ((int16_t) (object.y & 0xFFFF)));
+            chunk_position = float3(((int16_t) (object.x & 0xFFFF)), ((int16_t)((object.x >> 16) & 0xFFFF)), ((int16_t) (object.y & 0xFFFF)));
             delta_position = chunk_position - camera_position;
         }
         // frustum
@@ -110,16 +112,18 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         uint radius = 1524;
         bool valid = true;
         bool frustum = (abs(view.x) - radius) > (view.z * tanHalfFovX) || (abs(view.y) - radius) > (view.z * tanHalfFovY);
-        if (frustum && view.z > 0) valid = false;
+        // if (frustum && view.z > 0) valid = false;
         if (valid) {
             // distance
             float distance = dot(delta_position, delta_position) / 500.0f;
-            if (chunk_id < 6400 && distance > d[0] + 50000) {
+            if (chunk_id < 6400 && (chunk_position.x < -2048 || chunk_position.x >= 2048 || chunk_position.z < -2048 || chunk_position.z >= 2048)) {
+            //if (chunk_id < 6400 && distance > d[0] + 50000) {
                 // if really far, just directly write one visible instance, instead of 64 tile objects
                 uint stride; uint mesh_count;
                 MESH_INFO.GetDimensions(mesh_count, stride);
                 uint object_type = CHUNKS[chunk_id].object_type;
-                uint lod_level = choose_lod_step(distance, OBJECT_METADATA[object_type].radius);
+                // uint lod_level = choose_lod_step(distance, OBJECT_METADATA[object_type].radius * 20);
+                uint lod_level = 3;
                 uint slot; InterlockedAdd(counts[lod_level], 1, slot);
             } else {
                 // else spawn a workgroup of 64 objects
@@ -164,16 +168,25 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         if (object_id >= object_count) return; // early out
 
         // unpack object position and move to camera space
-        float3 position;
-        if (chunk_id < 6400) {
+        float3 position = float3(0);
+        uint object_type = CHUNKS[chunk_id].object_type;
+        if (object_type == 0) {
             // terrain: assuming each object is 128m wide
             float3 chunk_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * 1024 - 40960 + 512);
             float3 object_position = float3(int(id_within_chunk / 8) * 128 - 512 + 64, 0, int(id_within_chunk % 8) * 128 - 512 + 64);
             object_position += chunk_position;
+            float2 uv0 = (object_position.xz + (128.0f * 8.0f * 80.0f * 0.5f)) / (128.0f * 8.0f * 80.0f);
+            uv0 = float2(1,1) + float2(uv0.x, -uv0.y);
+            float height = TEXTURES[2].SampleLevel(uv0,0).x * 1000.0f;
+            object_position.y += height;
             position = object_position - (camera_position / 10); // in meters
-        } else {
+        } else if (object_type == 1) {
             uint2 object = OBJECTS[object_id]; // 8 bytes
             float3 object_position = float3(((int16_t) (object.x & 0xFFFF)), ((int16_t)((object.x >> 16) & 0xFFFF)), ((int16_t) (object.y & 0xFFFF)));
+            float2 uv0 = ((object_position.xz / 10) + (128.0f * 8.0f * 80.0f * 0.5f)) / (128.0f * 8.0f * 80.0f);
+            uv0 = float2(1,1) + float2(uv0.x, -uv0.y);
+            float height = TEXTURES[2].SampleLevel(uv0, 0).x * 10000.0f;
+            object_position.y += height;
             position = object_position - camera_position;
         }
         float position_yaw_z =  camera_yaw_sin * position.x + camera_yaw_cos * position.z; // apply yaw to Z
@@ -183,28 +196,15 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
             -camera_pitch_sin * position.y + camera_pitch_cos * position_yaw_z // apply pitch to Z (using new z)
         );
 
-        // pick lod level
-        // instead of the loop, just have a buffer with object-type info, has a count + an array of meshes
-        // then a buffer with mesh info to know the base mesh id for that mesh
-        // that also has a count + array of animations + array of offsets per animation
-        // -> can read base mesh id + read the offset in frames for that animation + pick frame
-        uint object_type = CHUNKS[chunk_id].object_type;
         uint mesh_offset = OBJECT_METADATA[object_type].meshes_offset;
         uint base_mesh_id = OBJECT_MESH_LIST[mesh_offset];
         float distance = dot(position,position) / 500.0f;
         float radius = OBJECT_METADATA[object_type].radius;
         uint lod_level = choose_lod_step(distance, radius);
-        
-        // calculate frustrum
+        if (object_type == 0) lod_level = 3;
         bool outside_frustrum = (abs(view.x) - radius) > (view.z * tanHalfFovX) || (abs(view.y) - radius) > (view.z * tanHalfFovY);
-
         bool valid = true;
-        // frustrum cull
         if (outside_frustrum) valid = false;
-        // overflow cull
-        // if ((view.x > 32767 || view.z > 32767 || view.x < -32767 || view.z < -32767) && chunk_id >= 6400) valid = false;
-        // near cull
-        // if (view.z < 0) valid = false;
 
         if (valid) {
             uint slot; InterlockedAdd(counts[lod_level], 1, slot);
@@ -268,36 +268,46 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         uint stride, mesh_count;
         MESH_INFO.GetDimensions(mesh_count, stride);
 
-        uint chunk_id = VISIBLE_CHUNK_IDS[gid.x - 100]; // id in global chunk buffer, minus the 100 we added for the 6400 possible chunks tiles
+        bool is_chunk_object = gid.x < 100;
+        uint chunk_id = !is_chunk_object ? VISIBLE_CHUNK_IDS[gid.x - 100] : tid.x; // id in global chunk buffer, minus the 100 we added for the 6400 possible chunks tiles
         uint id_within_chunk = gtid.x;
         uint object_id = (chunk_id * 64) + id_within_chunk; // id in global objects buffer
 
         // WRITE PACKED INSTANCE
         // unpack object position and move to camera space
-        float3 position;
+        float3 chunk_position = float3(0);
+        float3 position = float3(0);
         float object_yaw_cos = 1;
         float object_yaw_sin = 0;
-        bool is_chunk_object = gid.x < 100;
+        uint object_type = CHUNKS[chunk_id].object_type;
         if (is_chunk_object) {
-            chunk_id = tid.x;
             object_id = chunk_id * 64;
-            float3 object_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * 1024 - 40960 + 512);
-            position = object_position - (camera_position / 10); // in meters
-        } else if (object_id < 6400 * 64) {
-            float3 chunk_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * 1024 - 40960 + 512);
+            chunk_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * 1024 - 40960 + 512);
+            float2 uv0 = (chunk_position.xz + (128.0f * 8.0f * 80.0f * 0.5f)) / (128.0f * 8.0f * 80.0f);
+            uv0 = float2(1,1) + float2(uv0.x, -uv0.y);
+            float height = TEXTURES[2].SampleLevel(uv0,0).x * 1000.0f;
+            chunk_position.y += height;
+            position = chunk_position - (camera_position / 10); // in meters
+        } else if (object_type == 0) {
+            chunk_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * 1024 - 40960 + 512);
             float3 object_position = float3(int(id_within_chunk / 8) * 128 - 512 + 64, 0, int(id_within_chunk % 8) * 128 - 512 + 64);
             object_position += chunk_position;
+            float2 uv0 = (object_position.xz + (128.0f * 8.0f * 80.0f * 0.5f)) / (128.0f * 8.0f * 80.0f);
+            uv0 = float2(1,1) + float2(uv0.x, -uv0.y);
+            float height = TEXTURES[2].SampleLevel(uv0,0).x * 1000.0f;
+            object_position.y += height;
             position = object_position - (camera_position / 10); // in meters
-        } else {
-            uint2 object = OBJECTS[object_id];    // 8 bytes
+        } else if (object_type == 1) {
+            uint2 object = OBJECTS[object_id]; // 8 bytes
             float3 object_position = float3(((int16_t) (object.x & 0xFFFF)), ((int16_t)((object.x >> 16) & 0xFFFF)), ((int16_t) (object.y & 0xFFFF)));
+            float2 uv0 = ((object_position.xz / 10) + (128.0f * 8.0f * 80.0f * 0.5f)) / (128.0f * 8.0f * 80.0f);
+            uv0 = float2(1,1) + float2(uv0.x, -uv0.y);
+            float height = TEXTURES[2].SampleLevel(uv0,0).x * 10000.0f;
+            object_position.y += height;
             position = object_position - camera_position;
-            // unpack yaw and pitch
-            object_yaw_cos = float((int8_t)(object.y >> 16 & 0xFF)) * divide_by_127;
-            object_yaw_sin = float((int8_t)(object.y >> 24 & 0xFF)) * divide_by_127;
         }
 
-        float position_yaw_z =  camera_yaw_sin * position.x + camera_yaw_cos * position.z; // apply yaw to Z
+        float position_yaw_z = camera_yaw_sin * position.x + camera_yaw_cos * position.z; // apply yaw to Z
         float3 view = float3(
              camera_yaw_cos   * position.x - camera_yaw_sin   * position.z, // apply yaw to X
              camera_pitch_cos * position.y + camera_pitch_sin * position_yaw_z, // apply pitch to Y (using new z)
@@ -305,28 +315,20 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         );
 
         // pick lod level
-        uint object_type = CHUNKS[chunk_id].object_type;
         uint mesh_offset = OBJECT_METADATA[object_type].meshes_offset;
         uint base_mesh_id = OBJECT_MESH_LIST[mesh_offset];
         float distance = dot(position,position) / 500.0f;
         float radius = OBJECT_METADATA[object_type].radius;
+        if (is_chunk_object) radius = radius * 20;
         uint lod_level = choose_lod_step(distance, radius);
+        if (object_type == 0) lod_level = 3;
         uint mesh_id = base_mesh_id + lod_level;
         
-        // convert to int again
-        int tx_dm = (int)round(view.x);
-        int ty_dm = (int)round(view.y);
-        int tz_dm = (int)round(view.z);
-
-        // compute combined yaw between object and camera
-        float cos_delta =  object_yaw_cos * camera_yaw_cos + object_yaw_sin * camera_yaw_sin; // cos(a-b)
-        float sin_delta =  object_yaw_sin* camera_yaw_cos - object_yaw_cos * camera_yaw_sin; // sin(a-b)
-
         bool outside_frustrum = (abs(view.x) - radius) > (view.z * tanHalfFovX) || (abs(view.y) - radius) > (view.z * tanHalfFovY);
         bool valid = true;
         if (outside_frustrum) valid = false;
 
-        if (is_chunk_object && distance <= d[0] + 50000) valid = false;
+        if (is_chunk_object && !(chunk_position.x < -2048 || chunk_position.x >= 2048 || chunk_position.z < -2048 || chunk_position.z >= 2048)) valid = false;
 
         if (valid) {
             // Grab slot via atomic write head on the draw call
@@ -334,7 +336,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
             const uint dst = OFFSET_PER_MESH[mesh_id] + slot;
             if (is_chunk_object) {
                 RENDERED_INSTANCES[dst] = instance(chunk_id + 1000000, 0);
-            } else if (object_id < 6400 * 64) {
+            } else if (object_type == 0) {
                 RENDERED_INSTANCES[dst] = instance(object_id, 0);
             } else {
                 // ANIMATION
@@ -444,6 +446,7 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
         if (is_chunk_object) vertex *= 8;
         uint vps = MAX_VERTICES >> DRAW_ID;                 // vertices per side
         float step_cm = TILE_SIZE_CM / float(vps - 1);      // neighbor vertex spacing (cm)
+        if (is_chunk_object) step_cm *= 8;
         float2 uv0 = (object_position.xz + (vertex.xz / 100.0f) + (128.0f * 8.0f * 80.0f * 0.5f)) / (128.0f * 8.0f * 80.0f);
         uv0 = float2(1,1) + float2(uv0.x, -uv0.y);
         float hC = TEXTURES[2].SampleLevel(uv0, 0).x * 100000.0f;
@@ -513,7 +516,7 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
         // height
         float2 terrain_uv = ((object_position.xz / 10.0) + (128.0 * 8.0 * 80.0 / 2.0)) / (128.0 * 8.0 * 80.0);
         terrain_uv = float2(1,1) + float2(terrain_uv.x, -terrain_uv.y);
-        float height = TEXTURES[2].Sample(terrain_uv).x;
+        float height = TEXTURES[2].SampleLevel(terrain_uv, 0).x;
         vertex.y += height * 100000.0f; // in cm
     }
 
@@ -582,16 +585,16 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
     }
     // terrain
     if (i.object_id > 1000000 || i.object_id < 6400 * 64) {
-        float hC = i.normal.x;
-        float step_cm = i.normal.y;
+        float hC = TEXTURES[2].Sample(i.uv).x * 200000.0f;
+        float step_cm = 20000.0f;
         float2 duv = float2(step_cm / 100.0f, 0);
         float2 dv  = float2(0, step_cm / 100.0f);
         duv /= (128.0f * 8.0f * 80.0f);
         dv  /= (128.0f * 8.0f * 80.0f);
-        float hL = TEXTURES[2].SampleLevel(i.uv - duv, 0).x * 100000.0f;
-        float hR = TEXTURES[2].SampleLevel(i.uv + duv, 0).x * 100000.0f;
-        float hD = TEXTURES[2].SampleLevel(i.uv - dv,  0).x * 100000.0f;
-        float hU = TEXTURES[2].SampleLevel(i.uv + dv,  0).x * 100000.0f;
+        float hL = TEXTURES[2].Sample(i.uv - duv).x * 200000.0f;
+        float hR = TEXTURES[2].Sample(i.uv + duv).x * 200000.0f;
+        float hD = TEXTURES[2].Sample(i.uv - dv).x * 200000.0f;
+        float hU = TEXTURES[2].Sample(i.uv + dv).x * 200000.0f;
         // --- build normal from grid-space slopes ---
         float3 dPdx = float3(2.0f * step_cm, (hR - hL), 0.0f);
         float3 dPdz = float3(0.0f, (hU - hD), 2.0f * step_cm);
@@ -601,13 +604,13 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
     float ndl = saturate(dot(N, LIGHT_DIR));
     float shade = AMBIENT + (1.0 - AMBIENT) * ndl;
     // // debug draw triangles as distinct colors
-    // float3 color = frac(sin((primID+43) * 43.5453) * float3(23.1407, 85.928, 43.533));
-    // if(color.x+color.y+color.z < 0.1) color = float3(float(primID % 32) / 32, float((primID + 38) % 64) / 64, float((primID + 17) % 32) / 32);
+    float3 color = frac(sin((primID+43) * 43.5453) * float3(23.1407, 85.928, 43.533));
+    if(color.x+color.y+color.z < 0.1) color = float3(float(primID % 32) / 32, float((primID + 38) % 64) / 64, float((primID + 17) % 32) / 32);
     // return float4(color, 1.0);
     // float4 color = TEXTURES[0].Sample(i.uv);
     float4 output = TEXTURES[1].Sample(i.uv);
-    // output.xyz += color / 5;
     o.color = output;
+    o.color.xyz += color / 10;
     o.color *= shade;
     if (i.object_id == selected_object_id) {
         o.color.xyz += float3(0.2);

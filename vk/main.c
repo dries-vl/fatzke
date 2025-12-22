@@ -451,7 +451,7 @@ int main(void) {
         .binding         = TEXTURES_BINDING,
         .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         .descriptorCount = MAX_TEXTURES,
-        .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT,
+        .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
     };
     VkDescriptorSetLayoutCreateInfo set_layout_info = {
         .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -592,13 +592,13 @@ int main(void) {
     static struct Mesh meshes[MESH_TYPE_COUNT] = {
         [MESH_PLANE] = {
             .num_animations = 0, // special case with no frames, only indices
-            .radius = 20.0f, // todo: we 5x it later, kinda hacky
+            .radius = 150.0f, // todo: we 5x it later, kinda hacky
             .lods = {
-                {.num_indices = 5766, /* 961 quads, 31x31 */ .indices = g_indices_plane_lod2 },
-                {.num_indices = 1350, /* 225 quads, 15x15 */ .indices = g_indices_plane_lod3 },
-                {.num_indices = 294,  /* 49 quads, 7x7 */    .indices = g_indices_plane_lod4 },
-                {.num_indices = 54,   /* 9 quads, 3x3 */     .indices = g_indices_plane_lod5 },
-                {.num_indices = 6,    /* 1 quad */           .indices = g_indices_plane_lod6 }
+                {.num_indices = 5766, /* 961 quads, 31x31  */ .indices = g_indices_plane_lod2 },
+                {.num_indices = 1350, /* 225 quads, 15x15  */ .indices = g_indices_plane_lod3 },
+                {.num_indices = 294,  /* 49 quads, 7x7     */ .indices = g_indices_plane_lod4 },
+                {.num_indices = 54,   /* 9 quads, 3x3      */ .indices = g_indices_plane_lod5 },
+                {.num_indices = 6,    /* 1 quad, 128m wide */ .indices = g_indices_plane_lod6 }
             }
         },
         [MESH_BODY] = {0},
