@@ -11,9 +11,15 @@ extern const unsigned char map_end[];
 extern const unsigned char height[];
 extern const unsigned char height_end[];
 #define height_len ((size_t)(height_end - height))
+extern const unsigned char height_detail[];
+extern const unsigned char height_detail_end[];
+#define height_detail_len ((size_t)(height_detail_end - height_detail))
 extern const unsigned char normals[];
 extern const unsigned char normals_end[];
 #define normals_len ((size_t)(normals_end - normals))
+extern const unsigned char noise[];
+extern const unsigned char noise_end[];
+#define noise_len ((size_t)(noise_end - noise))
 
 typedef struct Texture {
     VkImage        image;
@@ -350,9 +356,9 @@ void create_textures(struct Machine *machine, struct Swapchain *swapchain) {
         .magFilter = VK_FILTER_LINEAR,
         .minFilter = VK_FILTER_LINEAR,
         .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
-        .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-        .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-        .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
         .maxLod = 3.40282346638528859811704183484516925e+38F, // float max
     };
     VK_CHECK(vkCreateSampler(machine->device, &sci, NULL, &global_sampler));
@@ -369,6 +375,12 @@ void create_textures(struct Machine *machine, struct Swapchain *swapchain) {
     texture_count++;
     if (!create_texture_from_ktx2_astc(machine, swapchain, normals, normals_len, &textures[3]))
         printf("Failed to create normals texture from KTX2\n");
+    texture_count++;
+    if (!create_texture_from_ktx2_astc(machine, swapchain, noise, noise_len, &textures[4]))
+        printf("Failed to create noise texture from KTX2\n");
+    texture_count++;
+    if (!create_texture_from_ktx2_astc(machine, swapchain, height_detail, height_detail_len, &textures[5]))
+        printf("Failed to create height detail texture from KTX2\n");
     texture_count++;
 
     // later: map/map, world map, per-mesh textures, etc.

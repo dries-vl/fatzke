@@ -1743,6 +1743,18 @@ int main(void) {
                 VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                 0, sizeof(uint32_t), &mode_ui);
             vkCmdDraw(cmd, 3, 1, 0, 0); // ui fullscreen
+            // map fence
+            uint32_t mode_fence = 6;
+            vkCmdPushConstants(cmd, renderer.common_pipeline_layout,
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
+                0, sizeof(uint32_t), &mode_fence);
+            vkCmdDraw(cmd, 24, 1, 0, 0);
+            // sea
+            uint32_t mode_sea = 7;
+            vkCmdPushConstants(cmd, renderer.common_pipeline_layout,
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
+                0, sizeof(uint32_t), &mode_sea);
+            vkCmdDraw(cmd, 6, 1, 0, 0);
             // one GPU-driven draw then a single fullscreen triangle for sky
             uint32_t mode_mesh = 0;
             vkCmdPushConstants(cmd,

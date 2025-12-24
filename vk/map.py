@@ -15,10 +15,10 @@ from rasterio.transform import from_bounds
 # ============================================================
 
 # Your bbox (north, west, south, east)
-north = 38 + 17/60 + 30.9/3600
-west  = 23 +  0/60 + 45.3/3600
-south = 37 + 22/60 + 56.7/3600
-east  = 24 + 18/60 + 26.9/3600
+north = 51 + 45/60 + 35.8/3600
+west  =  3 + 17/60 + 57.4/3600
+south = 51 +  1/60 + 56.3/3600
+east  =  4 + 27/60 + 55.7/3600
 
 # DEM tile zoom (small downloads)
 DEM_ZOOM = 9
