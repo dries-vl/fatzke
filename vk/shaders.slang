@@ -70,6 +70,12 @@ uint choose_lod_step(float distance, float radius) {
     //return 0;
 }
 
+float HeightAtUV(float2 uv0) {
+    return TEXTURES[5].SampleLevel(uv0, 0).x * 15000.0f
+    + (TEXTURES[4].SampleLevel(uv0, 0).x - 0.25) * 150.0f
+    - (TEXTURES[5].SampleLevel(uv0, 1).b - 0.25) * 1000.0f;
+}
+
 static const uint bucket_size = 2; // size in meters of each bucket ~2mx2m
 static const uint map_size = 4096; // 4096m
 static const uint buckets_width = map_size / bucket_size;
@@ -187,9 +193,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
             float3 object_position = float3(((int16_t) (object.x & 0xFFFF)), ((int16_t)((object.x >> 16) & 0xFFFF)), ((int16_t) (object.y & 0xFFFF)));
             float2 uv0 = ((object_position.xz / 10) + (128.0f * 8.0f * 4.0f * 0.5f)) / (128.0f * 8.0f * 4.0f);
             uv0 = float2(0,1) - float2(-uv0.x, uv0.y);
-            float height = TEXTURES[5].SampleLevel(uv0, 0).x * 10000.0f
-            + (TEXTURES[4].SampleLevel(uv0, 0).x - 0.25) * 100.0f
-            - (TEXTURES[5].SampleLevel(uv0, 1).b - 0.5) * 500.0f;
+            float height = HeightAtUV(uv0) / 10;
             object_position.y += height;
             position = object_position - camera_position;
         }
@@ -310,9 +314,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
             float3 object_position = float3(((int16_t) (object.x & 0xFFFF)), ((int16_t)((object.x >> 16) & 0xFFFF)), ((int16_t) (object.y & 0xFFFF)));
             float2 uv0 = ((object_position.xz / 10) + (128.0f * 8.0f * 4.0f * 0.5f)) / (128.0f * 8.0f * 4.0f);
             uv0 = float2(0,1) - float2(-uv0.x, uv0.y);
-            float height = TEXTURES[5].SampleLevel(uv0, 0).x * 10000.0f
-            + (TEXTURES[4].SampleLevel(uv0, 0).x - 0.25) * 100.0f
-            - (TEXTURES[5].SampleLevel(uv0, 1).b - 0.5) * 500.0f;
+            float height = HeightAtUV(uv0) / 10;
             object_position.y += height;
             position = object_position - camera_position;
         }
@@ -427,6 +429,62 @@ float3 plane_position(uint VERTEX_ID, uint grid_scale) {
     float x = (float(col) / float(vertices_per_side - 1)) * TILE_SIZE_CM - (TILE_SIZE_CM / 2);
     float z = (float(row) / float(vertices_per_side - 1)) * TILE_SIZE_CM - (TILE_SIZE_CM / 2);
     return float3(x, 0.0, z);
+}
+
+static const float TILE_M   = 128.0;
+static const float PATCH_M  = 128.0 * 8.0 * 4.0;   // 4096
+static const float2 PATCH_HALF = float2(PATCH_M*0.5, PATCH_M*0.5);
+
+// fixed lattice (finest)
+static const float STEP_M = TILE_M / float(MAX_VERTICES - 1); // 128/31
+
+float2 WorldToInnerUV(float2 worldXZ_m) {
+    // Same as your non-chunk path (just expressed directly on world pos):
+    float2 uv = (worldXZ_m + PATCH_HALF) / PATCH_M;
+    uv = float2(0,1) - float2(-uv.x, uv.y);
+    return uv;
+}
+// returns UVs of the 3 terrain vertices of the triangle under the point
+void SurroundingTerrainVertexUVs(float2 worldXZ_m, out float2 uvA, out float2 uvB, out float2 uvC, out float2 fOut) {
+    // --- tile selection (0..31) ---
+    float2 p = worldXZ_m + PATCH_HALF;            // [0..4096)
+    int2 tile = int2(floor(p / TILE_M));
+    tile = clamp(tile, int2(0,0), int2(31,31));
+
+    // tile origin in world coords (meters)
+    float2 tileOrigin = float2(tile) * TILE_M - PATCH_HALF;
+
+    // tile-local coordinate [0..128)
+    float2 local = worldXZ_m - tileOrigin;
+
+    // --- snap to fixed vertex cell on the 32x32 lattice ---
+    float2 cellF = local / STEP_M;               // 0..31 in ideal range
+    int2 cell = int2(floor(cellF));
+    cell = clamp(cell, int2(0,0), int2(MAX_VERTICES-2, MAX_VERTICES-2));
+    float2 f = frac(cellF);                      // position inside cell [0..1)
+    fOut = f;
+
+    // 4 surrounding lattice vertices in world meters
+    float2 p00 = tileOrigin + float2(cell) * STEP_M;
+    float2 p10 = p00 + float2(STEP_M, 0);
+    float2 p01 = p00 + float2(0, STEP_M);
+    float2 p11 = p00 + float2(STEP_M, STEP_M);
+
+    // choose which tri (diagonal split consistent with a regular grid)
+    if (f.x + f.y <= 1.0)
+    {
+        uvA = WorldToInnerUV(p00);
+        uvB = WorldToInnerUV(p10);
+        uvC = WorldToInnerUV(p01);
+        // weights would be: (1-fx-fy, fx, fy) for (A,B,C)
+    }
+    else
+    {
+        uvA = WorldToInnerUV(p11);
+        uvB = WorldToInnerUV(p01);
+        uvC = WorldToInnerUV(p10);
+        // weights would be: (fx+fy-1, 1-fx, 1-fy) for (A,B,C) in (A,B,C) order
+    }
 }
 
 [shader("vertex")]
@@ -587,12 +645,38 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
             (packed_uv >> 16)    * (1.0/65535.0)
         );
         // height
-        float2 terrain_uv = ((object_position.xz / 10.0) + (128.0 * 8.0 * 4.0 / 2.0)) / (128.0 * 8.0 * 4.0);
-        terrain_uv = float2(0,1) - float2(-terrain_uv.x, terrain_uv.y);
-        float height = TEXTURES[5].SampleLevel(terrain_uv, 0).x * 100000.0f
-        + (TEXTURES[4].SampleLevel(terrain_uv, 0).x - 0.25) * 1000.0f
-        - (TEXTURES[5].SampleLevel(terrain_uv, 1).b - 0.5) * 5000.0f;
-        vertex.y += height; // in cm
+        float2 uvA, uvB, uvC;
+        float2 f;   // barycentric helper (returned)
+        // world XZ in meters, SAME space you already use
+        float2 worldXZ_m = object_position.xz / 10.0f;
+        // get surrounding snapped terrain vertex UVs
+        SurroundingTerrainVertexUVs(worldXZ_m, uvA, uvB, uvC, f);
+        // sample heights at the three terrain vertices
+        float hA = HeightAtUV(uvA);
+        float hB = HeightAtUV(uvB);
+        float hC = HeightAtUV(uvC);
+        // barycentric interpolation (same split rule as helper)
+        float height;
+        if (f.x + f.y <= 1.0) {
+            // tri (A,B,C) = (00,10,01)
+            height = (1.0 - f.x - f.y) * hA
+                   + f.x * hB
+                   + f.y * hC;
+        }
+        else {
+            // tri (A,B,C) = (11,01,10)
+            height = (f.x + f.y - 1.0) * hA
+                   + (1.0 - f.x) * hB
+                   + (1.0 - f.y) * hC;
+        }
+        // apply to vertex
+        vertex.y += height;   // cm
+        // take the height by taking the three surrounding vertices based on the tiling terrain
+        // terrain_uv = float2(0,1) - float2(-terrain_uv.x, terrain_uv.y);
+        // float height = TEXTURES[5].SampleLevel(terrain_uv, 0).x * 100000.0f
+        // + (TEXTURES[4].SampleLevel(terrain_uv, 0).x - 0.25) * 1000.0f
+        // - (TEXTURES[5].SampleLevel(terrain_uv, 1).b - 0.5) * 5000.0f;
+        // vertex.y += height; // in cm
     }
 
     // rotate position around y for the combined camera-instance yaw we saved
