@@ -268,7 +268,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
                 if (steps != 0 && w->on_mouse){
                     // NOTE: for scroll, we pass 'steps' in the 'pressed' parameter
-                    w->on_mouse(w->cb_ud, w->mouse_x, w->mouse_y, MOUSE_SCROLL, -steps * 100);
+                    w->on_mouse(w->cb_ud, w->mouse_x, w->mouse_y, MOUSE_SCROLL, -steps * 10);
                 }
                 return 0; // prevent default scrolling (like scrolling inactive window behind)
             }

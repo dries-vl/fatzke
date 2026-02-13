@@ -10,38 +10,53 @@ static const float divide_by_32767    = float(1.0/32767.0);
 static const float tanHalfFovY = tan(0.5 * fov_y_radians); // for frustrum culling
 static const float tanHalfFovX = tanHalfFovY * aspect_ratio;
 
+// movement of units: just move to next position
+// -> do local per-entity movement cheap collision detection on 4m blocks and slide along to avoid passing through
+// -> to always be able to handle stairs we can do mini local 4m block pathing per entity to avoid permanent stuck
+// ----> because whole-unit movement only moves 1-2 blocks at a time as well, it will always be cheap
+// combat movement: also just move to next position, and fight when collide
+// -> force stay close to side neighbors to avoid blurring the front line in combat
+// don't automatically envelop smaller enemy units, force closeness to lateral right-hand neighbor
+
+// attrition: when death -> search neighborhood and shift the lowest priority entity to your position -> then do same for that one to fill up -> until no lower guy is found
+// don't reform the formation so keep attrition-deformed positions until explicit reform command or far away move order
+
 // conceptually a small amount of meta-object types; inf unit, cav unit, plane, ... -> animations based on this type
 // -> 'animation set' of a mesh, a mesh can only be used for a given animation set
 // let's now just assume there's two animations for units, none for planes
 // todo: hardcode 0 animations for planes, hardcode 8 animations for everything else for easy offsetting no fetch needed
-struct object_metadata {uint meshes_offset, mesh_count; float radius;};
-struct chunk {uint object_type;};
+struct object_metadata { uint meshes_offset, mesh_count; float radius;};
+[UnscopedEnum] enum object_type: int {TERRAIN, UNIT, BUILDING, VEGETATION};
+struct chunk {object_type object_type;};
 struct mdi {uint index_count, instance_count, first_index, base_vertex, first_instance;};
 struct di {uint group_count_x, group_count_y, group_count_z;};
-struct instance {uint object_id, animation;};
+struct instance { uint object_id, animation;};
+struct unit { uint16_t x, y, next_x, next_y;};
 
-[[vk::binding(14,0)]] StructuredBuffer<uint>            OBJECT_MESH_LIST; // list of all the mesh ids that make up objects
-[[vk::binding(15,0)]] StructuredBuffer<object_metadata> OBJECT_METADATA;
-[[vk::binding(9,0)]]  StructuredBuffer<mdi>             MESH_INFO; // instance_count is 'max visible of this mesh in this scene'
+// functional data
+[[vk::binding(17,0)]] RWStructuredBuffer<unit> UNITS;    // size is # of chunks
 [[vk::binding(0,0)]]  StructuredBuffer<chunk>  CHUNKS;    // size is # of chunks
 [[vk::binding(4,0)]]  StructuredBuffer<uint2>  OBJECTS;   // size is total # of objects in scene
+[[vk::binding(16,0)]] RWStructuredBuffer<uint> BUCKETS; // 8mb for 131k buckets, need about 4x the amount of used 2mx2m tiles, appr. 2x the amount of units, this should work up to 60k units
+// base rendering data
+[[vk::binding(14,0)]] StructuredBuffer<uint>            OBJECT_MESH_LIST; // for each object type the mesh ids that make up objects in order
+[[vk::binding(15,0)]] StructuredBuffer<object_metadata> OBJECT_METADATA; // data about object type
+[[vk::binding(9,0)]]  StructuredBuffer<mdi>             MESH_INFO; // render info for mesh (instance_count is 'max visible of this mesh in this scene')
 [[vk::binding(11,0)]] StructuredBuffer<uint>   POSITIONS; // R10G10B10A2
 [[vk::binding(12,0)]] StructuredBuffer<uint>   NORMALS;   // R10G10B10A2_SNORM
 [[vk::binding(13,0)]] StructuredBuffer<uint>   UVS;       // R16G16_UNORM
-// chunk buffers
+// intermediary buffers
 [[vk::binding(1,0)]]  RWStructuredBuffer<uint>  VISIBLE_CHUNK_IDS;     // size is # of chunks
 [[vk::binding(2,0)]]  RWStructuredBuffer<di>    INDIRECT_WORKGROUPS;   // append per 64 directly in chunk pass
-// object buffers
-[[vk::binding(3,0)]]  RWStructuredBuffer<uint>  VISIBLE_OBJECT_COUNT; // compute this in prefix pass
 [[vk::binding(7,0)]]  RWStructuredBuffer<uint>  VISIBLE_OBJECT_IDS;   // size is # of objects in visible chunks
+[[vk::binding(3,0)]]  RWStructuredBuffer<uint>  VISIBLE_OBJECT_COUNT; // compute this in prefix pass
 [[vk::binding(5,0)]]  RWStructuredBuffer<uint>  COUNT_PER_MESH;       // size is # of mesh types
 [[vk::binding(6,0)]]  RWStructuredBuffer<uint>  OFFSET_PER_MESH;      // size is # of mesh types
-[[vk::binding(16,0)]] RWStructuredBuffer<uint>  BUCKETS; // 8mb for 131k buckets, need about 4x the amount of used 2mx2m tiles, appr. 2x the amount of units, this should work up to 60k units
 // final resulting rendering data
 [[vk::binding(10,0)]] RWStructuredBuffer<mdi>      DRAW_CALLS;         // MDI, one struct per mesh type, index is mesh id
 [[vk::binding(8,0)]]  RWStructuredBuffer<instance> RENDERED_INSTANCES; // size is max # of visible mesh instances
 // uniforms
-[[vk::binding(17,0)]]
+[[vk::binding(18,0)]]
 cbuffer uniforms {
     float3 camera_position;
     float  camera_pitch_sin, camera_pitch_cos;
@@ -50,8 +65,7 @@ cbuffer uniforms {
     uint   selected_object_id;
     float  drag_rect_start_x, drag_rect_start_y, drag_rect_end_x, drag_rect_end_y;
 };
-[[vk::binding(18, 0)]] Sampler2D TEXTURES[64];
-
+[[vk::binding(19, 0)]] Sampler2D TEXTURES[64];
 // push constants
 struct push_constants {
     uint mode;
@@ -88,61 +102,66 @@ groupshared uint counts[25];
 
 [shader("compute")] [numthreads(64,1,1)]
 void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_DispatchThreadID) {
-    // CHUNK PASS
+    // workgroup setup
     if (gtid.x < 25) // init to zero
         counts[gtid.x] = 0;
     GroupMemoryBarrierWithGroupSync();
+
+    // chunks
     if (PUSH_CONSTANTS.mode == 0) {
         uint stride, chunk_count;
         CHUNKS.GetDimensions(chunk_count, stride);
         uint chunk_id = tid.x;
-        if (chunk_id >= chunk_count) return;
-        float3 delta_position;
-        float3 chunk_position;
-        if (chunk_id < 6400) {
-            // assuming each tile is 1024m wide, and we use meters instead of dm now
-            chunk_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * 1024 - 40960 + 512);
-            delta_position = chunk_position - (camera_position / 10); // in meters
-        } else {
-            uint2 object = OBJECTS[chunk_id * 64];    // 8 bytes
-            chunk_position = float3(((int16_t) (object.x & 0xFFFF)), ((int16_t)((object.x >> 16) & 0xFFFF)), ((int16_t) (object.y & 0xFFFF)));
-            delta_position = chunk_position - camera_position;
-        }
-        // frustum
-        float position_yaw_z =  camera_yaw_sin * delta_position.x + camera_yaw_cos * delta_position.z; // apply yaw to Z
-        float3 view = float3(
-             camera_yaw_cos   * delta_position.x - camera_yaw_sin   * delta_position.z, // apply yaw to X
-             camera_pitch_cos * delta_position.y + camera_pitch_sin * position_yaw_z, // apply pitch to Y (using new z)
-            -camera_pitch_sin * delta_position.y + camera_pitch_cos * position_yaw_z // apply pitch to Z (using new z)
-        );
-        uint radius = 1524;
-        bool valid = true;
-        bool frustum = (abs(view.x) - radius) > (view.z * tanHalfFovX) || (abs(view.y) - radius) > (view.z * tanHalfFovY);
-        // if (frustum && view.z > 0) valid = false;
-        if (valid) {
-            // distance
-            float distance = dot(delta_position, delta_position) / 500.0f;
-            if (chunk_id < 6400 && (chunk_position.x < -2048 || chunk_position.x >= 2048 || chunk_position.z < -2048 || chunk_position.z >= 2048)) {
-            //if (chunk_id < 6400 && distance > d[0] + 50000) {
-                // if really far, just directly write one visible instance, instead of 64 tile objects
-                uint stride; uint mesh_count;
-                MESH_INFO.GetDimensions(mesh_count, stride);
-                uint object_type = CHUNKS[chunk_id].object_type;
-                // uint lod_level = choose_lod_step(distance, OBJECT_METADATA[object_type].radius * 20);
-                uint lod_level = 3;
-                uint slot; InterlockedAdd(counts[lod_level], 1, slot);
+        bool real_chunk = chunk_id < chunk_count;
+        if (real_chunk) {
+            float3 delta_position;
+            float3 chunk_position;
+            bool terrain_chunk = chunk_id < 6400;
+            if (terrain_chunk) {
+                // assuming each tile is 1024m wide, and we use meters instead of dm now
+                chunk_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * 1024 - 40960 + 512);
+                delta_position = chunk_position - (camera_position / 10); // in meters
             } else {
-                // else spawn a workgroup of 64 objects
-                uint slot; InterlockedAdd(INDIRECT_WORKGROUPS[0].group_count_x, 1, slot);
-                INDIRECT_WORKGROUPS[0].group_count_y = 1;
-                INDIRECT_WORKGROUPS[0].group_count_z = 1;
-                VISIBLE_CHUNK_IDS[slot] = chunk_id;
+                uint2 object = OBJECTS[chunk_id * 64];    // 8 bytes
+                chunk_position = float3(((int16_t) (object.x & 0xFFFF)), ((int16_t)((object.x >> 16) & 0xFFFF)), ((int16_t) (object.y & 0xFFFF)));
+                delta_position = chunk_position - camera_position;
+            }
+            // frustum
+            float position_yaw_z =  camera_yaw_sin * delta_position.x + camera_yaw_cos * delta_position.z; // apply yaw to Z
+            float3 view = float3(
+                 camera_yaw_cos   * delta_position.x - camera_yaw_sin   * delta_position.z, // apply yaw to X
+                 camera_pitch_cos * delta_position.y + camera_pitch_sin * position_yaw_z, // apply pitch to Y (using new z)
+                -camera_pitch_sin * delta_position.y + camera_pitch_cos * position_yaw_z // apply pitch to Z (using new z)
+            );
+            uint radius = 1524;
+            bool valid = true;
+            bool frustum = (abs(view.x) - radius) > (view.z * tanHalfFovX) || (abs(view.y) - radius) > (view.z * tanHalfFovY);
+            // if (frustum && view.z > 0) valid = false;
+            if (valid) {
+                // distance
+                float distance = dot(delta_position, delta_position) / 500.0f;
+                if (chunk_id < 6400 && (chunk_position.x < -2048 || chunk_position.x >= 2048 || chunk_position.z < -2048 || chunk_position.z >= 2048)) {
+                //if (chunk_id < 6400 && distance > d[0] + 50000) {
+                    // if really far, just directly write one visible instance, instead of 64 tile objects
+                    uint stride; uint mesh_count;
+                    MESH_INFO.GetDimensions(mesh_count, stride);
+                    int object_type = (int) CHUNKS[chunk_id].object_type;
+                    // uint lod_level = choose_lod_step(distance, OBJECT_METADATA[object_type].radius * 20);
+                    uint lod_level = 3;
+                    uint slot; InterlockedAdd(counts[lod_level], 1, slot);
+                } else {
+                    // else spawn a workgroup of 64 objects
+                    uint slot; InterlockedAdd(INDIRECT_WORKGROUPS[0].group_count_x, 1, slot);
+                    INDIRECT_WORKGROUPS[0].group_count_y = 1;
+                    INDIRECT_WORKGROUPS[0].group_count_z = 1;
+                    VISIBLE_CHUNK_IDS[slot] = chunk_id;
+                }
             }
         }
         GroupMemoryBarrierWithGroupSync();
-        if (gtid.x == 0) {
+        if (real_chunk && gtid.x == 0) {
             // bodies: 5 LODs
-            uint object_type = CHUNKS[chunk_id].object_type;
+            int object_type = (int) CHUNKS[chunk_id].object_type;
             uint mesh_offset = OBJECT_METADATA[object_type].meshes_offset;
             uint base_mesh_id = OBJECT_MESH_LIST[mesh_offset];
             [unroll]
@@ -154,18 +173,13 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
             }
         }
     }
-    // OBJECT PASS
+    // objects
     else if (PUSH_CONSTANTS.mode == 1) {
-        // workgroup setup
-        if (gtid.x < 25) // init to zero
-            counts[gtid.x] = 0;
-        GroupMemoryBarrierWithGroupSync();
         // same fetches for whole workgroup
-        uint stride, mesh_count, object_count, chunk_count;
+        uint stride, mesh_count, object_count;
         OBJECTS.GetDimensions(object_count, stride);
         MESH_INFO.GetDimensions(mesh_count, stride);
-        CHUNKS.GetDimensions(chunk_count, stride);
-        static const uint max_chunk_tiles = 6400;
+
         uint chunk_id = VISIBLE_CHUNK_IDS[gid.x]; // id in global chunk buffer
 
         // fetches per object
@@ -175,8 +189,8 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
 
         // unpack object position and move to camera space
         float3 position = float3(0);
-        uint object_type = CHUNKS[chunk_id].object_type;
-        if (object_type == 0) {
+        object_type object_type = CHUNKS[chunk_id].object_type;
+        if (object_type == TERRAIN) {
             // terrain: assuming each object is 128m wide
             float3 chunk_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * 1024 - 40960 + 512);
             float3 object_position = float3(int(id_within_chunk / 8) * 128 - 512 + 64, 0, int(id_within_chunk % 8) * 128 - 512 + 64);
@@ -188,9 +202,12 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
             - (TEXTURES[5].SampleLevel(uv0, 1).b - 0.5) * 50.0f;
             object_position.y += height;
             position = object_position - (camera_position / 10); // in meters
-        } else if (object_type == 1) {
+        } else if (object_type == UNIT) {
             uint2 object = OBJECTS[object_id]; // 8 bytes
-            float3 object_position = float3(((int16_t) (object.x & 0xFFFF)), ((int16_t)((object.x >> 16) & 0xFFFF)), ((int16_t) (object.y & 0xFFFF)));
+            float3 object_position = float3(((int16_t)(object.x & 0xFFFF)), ((int16_t)((object.x >> 16) & 0xFFFF)), ((int16_t)(object.y & 0xFFFF)));
+            unit unit = UNITS[0];
+            object_position.x = unit.x;
+            object_position.z = unit.y;
             float2 uv0 = ((object_position.xz / 10) + (128.0f * 8.0f * 4.0f * 0.5f)) / (128.0f * 8.0f * 4.0f);
             uv0 = float2(0,1) - float2(-uv0.x, uv0.y);
             float height = HeightAtUV(uv0) / 10;
@@ -209,7 +226,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         float distance = dot(position,position) / 500.0f;
         float radius = OBJECT_METADATA[object_type].radius;
         uint lod_level = choose_lod_step(distance, radius);
-        if (object_type == 0) lod_level = 2;
+        if (object_type == TERRAIN) lod_level = 2;
         bool outside_frustrum = (abs(view.x) - radius) > (view.z * tanHalfFovX) || (abs(view.y) - radius) > (view.z * tanHalfFovY);
         bool valid = true;
         if (outside_frustrum) valid = false;
@@ -249,7 +266,6 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         if (tid.x != 0) return; // run on a single thread; tiny work
         uint mesh_count, stride; 
         MESH_INFO.GetDimensions(mesh_count, stride);
-
         // calculate the offset for the first instance of each mesh type
         uint total_count = 0;
         for (uint mesh_id = 0; mesh_id < mesh_count; ++mesh_id) {
@@ -262,32 +278,32 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
             DRAW_CALLS[mesh_id].instance_count = 0; // set in scatter pass to have an index returned
             total_count += COUNT_PER_MESH[mesh_id];
         }
-
         // fill the indirect dispatch buffer for the scatter pass with the sum of visible objects
         INDIRECT_WORKGROUPS[0].group_count_x += 100; // add 6400 threads for possible chunk-to-object tiles on the map
-        // INDIRECT_WORKGROUPS[0].group_count_x = (VISIBLE_OBJECT_COUNT[0] + 63) / 64;
-        // INDIRECT_WORKGROUPS[0].group_count_y = 1;
-        // INDIRECT_WORKGROUPS[0].group_count_z = 1;
-        
-        return;
     }
     // scatter
     else if (PUSH_CONSTANTS.mode == 3) {
-        uint stride, mesh_count;
+        // same fetches for whole workgroup
+        uint stride, mesh_count, object_count;
+        OBJECTS.GetDimensions(object_count, stride);
         MESH_INFO.GetDimensions(mesh_count, stride);
 
-        bool is_chunk_object = gid.x < 100;
-        uint chunk_id = !is_chunk_object ? VISIBLE_CHUNK_IDS[gid.x - 100] : tid.x; // id in global chunk buffer, minus the 100 we added for the 6400 possible chunks tiles
+        bool is_chunk_object = gid.x < 100; // first 6400 threads are chunk objects
+        uint chunk_id = !is_chunk_object 
+            ? VISIBLE_CHUNK_IDS[gid.x - 100] // offset the 100 added workgroups
+            : tid.x; // global thread is id, because first 6400 threads
+
+        // fetches per object
         uint id_within_chunk = gtid.x;
         uint object_id = (chunk_id * 64) + id_within_chunk; // id in global objects buffer
+        if (object_id >= object_count) return; // early out
 
-        // WRITE PACKED INSTANCE
         // unpack object position and move to camera space
         float3 chunk_position = float3(0);
         float3 position = float3(0);
         float object_yaw_cos = 1;
         float object_yaw_sin = 0;
-        uint object_type = CHUNKS[chunk_id].object_type;
+        object_type object_type = CHUNKS[chunk_id].object_type;
         if (is_chunk_object) {
             object_id = chunk_id * 64;
             chunk_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * 1024 - 40960 + 512);
@@ -298,7 +314,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
             - (TEXTURES[2].SampleLevel(uv0, 1).b - 0.5) * 50.0f;
             chunk_position.y += height;
             position = chunk_position - (camera_position / 10); // in meters
-        } else if (object_type == 0) {
+        } else if (object_type == TERRAIN) {
             chunk_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * 1024 - 40960 + 512);
             float3 object_position = float3(int(id_within_chunk / 8) * 128 - 512 + 64, 0, int(id_within_chunk % 8) * 128 - 512 + 64);
             object_position += chunk_position;
@@ -309,9 +325,12 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
             - (TEXTURES[5].SampleLevel(uv0, 1).b - 0.5) * 50.0f;
             object_position.y += height;
             position = object_position - (camera_position / 10); // in meters
-        } else if (object_type == 1) {
+        } else if (object_type == UNIT) {
             uint2 object = OBJECTS[object_id]; // 8 bytes
             float3 object_position = float3(((int16_t) (object.x & 0xFFFF)), ((int16_t)((object.x >> 16) & 0xFFFF)), ((int16_t) (object.y & 0xFFFF)));
+            unit unit = UNITS[0];
+            object_position.x = unit.x;
+            object_position.z = unit.y;
             float2 uv0 = ((object_position.xz / 10) + (128.0f * 8.0f * 4.0f * 0.5f)) / (128.0f * 8.0f * 4.0f);
             uv0 = float2(0,1) - float2(-uv0.x, uv0.y);
             float height = HeightAtUV(uv0) / 10;
@@ -333,13 +352,12 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         float radius = OBJECT_METADATA[object_type].radius;
         if (is_chunk_object) radius = radius * 20;
         uint lod_level = choose_lod_step(distance, radius);
-        if (object_type == 0) lod_level = 2;
+        if (object_type == TERRAIN) lod_level = 2;
         uint mesh_id = base_mesh_id + lod_level;
         
         bool outside_frustrum = (abs(view.x) - radius) > (view.z * tanHalfFovX) || (abs(view.y) - radius) > (view.z * tanHalfFovY);
         bool valid = true;
         if (outside_frustrum) valid = false;
-
         if (is_chunk_object && !(chunk_position.x < -2048 || chunk_position.x >= 2048 || chunk_position.z < -2048 || chunk_position.z >= 2048)) valid = false;
 
         if (valid) {
@@ -348,7 +366,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
             const uint dst = OFFSET_PER_MESH[mesh_id] + slot;
             if (is_chunk_object) {
                 RENDERED_INSTANCES[dst] = instance(chunk_id + 1000000, 0);
-            } else if (object_type == 0) {
+            } else if (object_type == TERRAIN) {
                 RENDERED_INSTANCES[dst] = instance(object_id, 0);
             } else {
                 // ANIMATION
@@ -589,6 +607,9 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
         // instance
         uint2 object = OBJECTS[object_id];    // 8 bytes
         float3 object_position = float3(((int16_t) (object.x & 0xFFFF)), ((int16_t)((object.x >> 16) & 0xFFFF)), ((int16_t) (object.y & 0xFFFF)));
+        unit unit = UNITS[0];
+        object_position.x = unit.x;
+        object_position.z = unit.y;
         float3 position = object_position - camera_position;
         // unpack yaw and pitch
         float object_yaw_cos = float((int8_t)(object.y >> 16 & 0xFF)) * divide_by_127;

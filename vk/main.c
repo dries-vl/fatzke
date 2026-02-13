@@ -52,6 +52,7 @@ struct Renderer {
     VkBuffer                  buffer_uvs;        VkDeviceMemory memory_uvs;
     VkBuffer                  buffer_index_ib;   VkDeviceMemory memory_indices;
     VkBuffer                  buffer_buckets;    VkDeviceMemory memory_buckets;
+    VkBuffer                  buffer_units;      VkDeviceMemory memory_units;
     VkBuffer                  buffer_uniforms;   VkDeviceMemory memory_uniforms;
     // main rendering
     VkPipeline                main_pipeline;
@@ -309,15 +310,15 @@ void key_input_callback(void* ud, enum BUTTON button, enum BUTTON_STATE state) {
     else buttons[button] = 0;
 }
 void mouse_input_callback(void* ud, i32 x, i32 y, enum BUTTON button, int state) {
+    if (x < 50) buttons[MOUSE_MARGIN_LEFT] = 200;
+    else buttons[MOUSE_MARGIN_LEFT] = 0;
+    if (x > pf_window_width(w) - 50) buttons[MOUSE_MARGIN_RIGHT] = 200;
+    else buttons[MOUSE_MARGIN_RIGHT] = 0;
+    if (y < 50) buttons[MOUSE_MARGIN_TOP] = 150;
+    else buttons[MOUSE_MARGIN_TOP] = 0;
+    if (y > pf_window_height(w) - 50) buttons[MOUSE_MARGIN_BOTTOM] = 150;
+    else buttons[MOUSE_MARGIN_BOTTOM] = 0;
     if (button == MOUSE_MOVED) {
-        if (x < 50) buttons[MOUSE_MARGIN_LEFT] += 15;
-        else buttons[MOUSE_MARGIN_LEFT] = 0;
-        if (x > pf_window_width(w) - 50) buttons[MOUSE_MARGIN_RIGHT] += 15;
-        else buttons[MOUSE_MARGIN_RIGHT] = 0;
-        if (y < 50) buttons[MOUSE_MARGIN_TOP] += 5;
-        else buttons[MOUSE_MARGIN_TOP] = 0;
-        if (y > pf_window_height(w) - 50) buttons[MOUSE_MARGIN_BOTTOM] += 5;
-        else buttons[MOUSE_MARGIN_BOTTOM] = 0;
         if (g_drag_active) {
             g_drag_end_x = x;
             g_drag_end_y = y;
@@ -430,7 +431,7 @@ int main(void) {
     VkShaderModule shader_module; VK_CHECK(vkCreateShaderModule(machine.device,&smci,NULL,&shader_module));
 
     #pragma region COMPUTE PIPELINE
-    #define BINDINGS 19
+    #define BINDINGS 20
     #define UNIFORM_BINDING (BINDINGS-2)
     #define TEXTURES_BINDING (BINDINGS-1)
     VkDescriptorSetLayoutBinding bindings[BINDINGS];
@@ -438,7 +439,7 @@ int main(void) {
         bindings[i] = (VkDescriptorSetLayoutBinding) {
             .binding         = i,
             .descriptorCount = 1,
-            .stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT
+            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT
         };
         bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     }
@@ -451,7 +452,7 @@ int main(void) {
         .binding         = TEXTURES_BINDING,
         .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         .descriptorCount = MAX_TEXTURES,
-        .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
+        .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT,
     };
     VkDescriptorSetLayoutCreateInfo set_layout_info = {
         .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -538,7 +539,7 @@ int main(void) {
     VkPipelineColorBlendStateCreateInfo color_blend = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
         .attachmentCount = 2,
-        .pAttachments    = &color_blend_attachment
+        .pAttachments    = color_blend_attachment
     };
     VkGraphicsPipelineCreateInfo graphics_info = {
         .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
@@ -681,10 +682,18 @@ int main(void) {
     }
 
     #define OBJECTS_PER_CHUNK 64
+
     #define PLANE_CHUNK_COUNT 6400
-    #define UNIT_CHUNK_COUNT  1024
+
+    struct unit {u16 x, y, next_x, next_y;};
+    struct unit units[1] = {
+        {.x = 0, .y = 0, .next_x = 100, .next_y = 100}
+    };
+    #define UNIT_CHUNK_COUNT 1
+
     #define TOTAL_CHUNK_COUNT (PLANE_CHUNK_COUNT + UNIT_CHUNK_COUNT)
-    struct gpu_chunk { uint32_t object_id; };
+
+    struct gpu_chunk { enum object_type object_type; };
     static struct gpu_chunk gpu_chunks[TOTAL_CHUNK_COUNT] = {0};
     // first 6400 are plane objects, id is zero so default zeroed works out
     static struct object_chunks { u32 chunk_count, first_chunk; } scene[OBJECT_TYPE_COUNT] = {
@@ -696,15 +705,15 @@ int main(void) {
     // todo: ideally we don't even have any plane objects/chunks in memory, as their data is not needed in the shader
     static struct gpu_object gpu_objects[TOTAL_CHUNK_COUNT * OBJECTS_PER_CHUNK];
 
-    // move the unit objects to a square grid for now
+    // move the unit objects to a square grid
     int first_unit_object = PLANE_CHUNK_COUNT * OBJECTS_PER_CHUNK;
     for (int i = 0; i < UNIT_CHUNK_COUNT; ++i) {
-        gpu_chunks[scene[OBJECT_TYPE_UNIT].first_chunk + i].object_id = OBJECT_TYPE_UNIT;
+        gpu_chunks[scene[OBJECT_TYPE_UNIT].first_chunk + i].object_type = OBJECT_TYPE_UNIT;
     }
     for (int i = 0; i < UNIT_CHUNK_COUNT * OBJECTS_PER_CHUNK; ++i) {
-        gpu_objects[first_unit_object + i].x = (uint16_t)(i % 256) * 20;
+        gpu_objects[first_unit_object + i].x = (uint16_t)(i % 256) * 7;
         gpu_objects[first_unit_object + i].y = (uint16_t)((0)) << 16;
-        gpu_objects[first_unit_object + i].z = (uint16_t)((i / 256) * 20);
+        gpu_objects[first_unit_object + i].z = (uint16_t)((i / 256) * 7);
         {
             float yaw = 0.0f;
             gpu_objects[first_unit_object + i].cos = (((uint8_t)lrintf(cosf(yaw) * 127.0f)));
@@ -719,7 +728,7 @@ int main(void) {
     u32 total_instance_count = PLANE_CHUNK_COUNT * OBJECTS_PER_CHUNK * 1; // plane objects are made up of only one mesh
     for (u32 i = 0; i < TOTAL_CHUNK_COUNT - PLANE_CHUNK_COUNT; ++i) {
         u32 chunk_id = PLANE_CHUNK_COUNT + i;
-        u32 object_type = gpu_chunks[chunk_id].object_id;
+        u32 object_type = gpu_chunks[chunk_id].object_type;
         u32 mesh_count = object_metadata[object_type].mesh_count;
         for (u32 m = 0; m < mesh_count; ++m) {
             // only base mesh gets the objects counted, not the lods/frames after it
@@ -746,6 +755,7 @@ int main(void) {
     
     u32 bucket_count = 131072u; // assume for now 131k buckets, which means ok collisions up to about 60k units, could be fine for more, needs to be tested
     VkDeviceSize size_buckets = bucket_count * 16 * sizeof(uint32_t); // 16 max units in a 2mx2m bucket, 64 bytes -> 8mb
+    VkDeviceSize size_units = sizeof(units);
 
     VkDeviceSize size_object_mesh_list = sizeof(object_mesh_offsets);
     VkDeviceSize size_object_metadata = sizeof(object_metadata);
@@ -815,6 +825,13 @@ int main(void) {
         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         &renderer.buffer_uniforms, &renderer.memory_uniforms);
+
+    // UNITS
+    create_and_upload_device_local_buffer(
+        machine.device, machine.physical_device, machine.queue_graphics, upload_pool,
+        size_units, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, 
+        units, // uploaded immediately here
+        &renderer.buffer_units, &renderer.memory_units, 0);
 
     // OBJECT MESH LIST
     create_and_upload_device_local_buffer(
@@ -1069,18 +1086,13 @@ int main(void) {
         {renderer.buffer_object_mesh_list, 0, size_object_mesh_list},
         {renderer.buffer_object_metadata, 0, size_object_metadata},
         {renderer.buffer_buckets, 0, size_buckets},
+        {renderer.buffer_units, 0, size_units},
         {renderer.buffer_uniforms, 0, sizeof(struct Uniforms)}
     };
     #pragma region TEXTURES
     create_textures(&machine, &swapchain);
     VkDescriptorImageInfo tex_infos[MAX_TEXTURES];
-    for (uint32_t i = 0; i < MAX_TEXTURES; ++i) {
-        tex_infos[i] = (VkDescriptorImageInfo){
-            .sampler     = global_sampler,
-            .imageView   = (i < texture_count) ? textures[i].view : VK_NULL_HANDLE,
-            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-        };
-    }
+    fill_texture_descriptor_infos(tex_infos, MAX_TEXTURES);
     VkWriteDescriptorSet writes[BINDINGS];
     for (uint32_t i = 0; i < BINDINGS; ++i) {
         writes[i] = (VkWriteDescriptorSet){
@@ -1096,6 +1108,7 @@ int main(void) {
         .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
         .dstSet          = renderer.descriptor_set,
         .dstBinding      = TEXTURES_BINDING,
+        .dstArrayElement = 0,
         .descriptorCount = MAX_TEXTURES,
         .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         .pImageInfo      = tex_infos,
@@ -1421,7 +1434,7 @@ int main(void) {
             // clamp
             if (x >= swapchain.swapchain_extent.width ||
                 y >= swapchain.swapchain_extent.height)
-                return;
+                return 0;
 
             VkCommandBuffer cmd = begin_single_use_cmd(machine.device, upload_pool);
 
@@ -1722,7 +1735,7 @@ int main(void) {
               .renderArea = { .offset = {0,0}, .extent = swapchain.swapchain_extent },
               .layerCount = 1,
               .colorAttachmentCount = 2,
-              .pColorAttachments = &color_atts,
+              .pColorAttachments = color_atts,
               .pDepthAttachment = &depth_att
             };
             vkCmdBeginRendering(cmd, &ri_swap);

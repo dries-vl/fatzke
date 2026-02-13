@@ -5,13 +5,13 @@ for %%f in (data\*.png) do (
     set "name=%%~nf"
 
     toktx --t2 --encode astc --astc_blk_d 8x8 --srgb --genmipmap ^
-        static/win32/%%~nf.ktx2 data/%%f
+        static/win32/%%~nf.ktx2 %%f
 
     objcopy -I binary -O elf64-x86-64 ^
         --rename-section .data=.rdata,alloc,load,readonly,data,contents ^
         static/win32/%%~nf.ktx2 static/win32/%%~nf.obj ^
-        --redefine-sym _binary_win32_%%~nf_ktx2_start=%%~nf ^
-        --redefine-sym _binary_win32_%%~nf_ktx2_end=%%~nf_end
+        --redefine-sym _binary_static_win32_%%~nf_ktx2_start=%%~nf ^
+        --redefine-sym _binary_static_win32_%%~nf_ktx2_end=%%~nf_end
 
     del static\win32\%%~nf.ktx2
 )
