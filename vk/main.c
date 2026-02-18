@@ -282,18 +282,14 @@ void move_forward(int amount) {
     double rad = (double)(cam_yaw) * 3.14159265f / 32767.0f;
     i16 x_amount = (i16)lroundf(sinf(rad) * amount);
     i16 z_amount = (i16)lroundf(cosf(rad) * amount);
-    if (cam_x + x_amount < 32767 && cam_x + x_amount > -32768)
         cam_x += x_amount;
-    if (cam_z + z_amount < 32767 && cam_z + z_amount > -32768)
         cam_z += z_amount;
 }
 void move_sideways(int amount) {
     double rad = (double)(cam_yaw) * 3.14159265f / 32767.0f;
     i16 x_amount = (i16)lroundf(cosf(rad) * amount);
     i16 z_amount = (i16)lroundf(sinf(rad) * amount);
-    if (cam_x + x_amount < 32767 && cam_x + x_amount > -32768)
         cam_x += x_amount;
-    if (cam_z - z_amount < 32767 && cam_z - z_amount > -32768)
         cam_z -= z_amount;
 }
 int scaled(int value) {
@@ -361,7 +357,7 @@ void process_inputs() {
     if (buttons[MOUSE_MARGIN_TOP]) { cam_pitch -= buttons[MOUSE_MARGIN_TOP]; }
     if (buttons[MOUSE_MARGIN_BOTTOM]) { cam_pitch += buttons[MOUSE_MARGIN_BOTTOM]; }
     if (buttons[MOUSE_SCROLL]) { 
-        if (cam_y + buttons[MOUSE_SCROLL] < 32767 && cam_y + buttons[MOUSE_SCROLL] > 10)
+        if (cam_y + buttons[MOUSE_SCROLL] < (32767 * 16) && cam_y + buttons[MOUSE_SCROLL] > 10)
             cam_y += buttons[MOUSE_SCROLL];
         buttons[MOUSE_SCROLL] = 0;
     }
@@ -595,11 +591,12 @@ int main(void) {
             .num_animations = 0, // special case with no frames, only indices
             .radius = 150.0f, // todo: we 5x it later, kinda hacky
             .lods = {
-                {.num_indices = 5766, /* 961 quads, 31x31  */ .indices = g_indices_plane_lod2 },
-                {.num_indices = 1350, /* 225 quads, 15x15  */ .indices = g_indices_plane_lod3 },
-                {.num_indices = 294,  /* 49 quads, 7x7     */ .indices = g_indices_plane_lod4 },
-                {.num_indices = 54,   /* 9 quads, 3x3      */ .indices = g_indices_plane_lod5 },
-                {.num_indices = 6,    /* 1 quad, 128m wide */ .indices = g_indices_plane_lod6 }
+                {.num_indices = 5766, /* lod 0: 961 quads, 31x31  */ .indices = g_indices_plane_lod2 },
+                {.num_indices = 1350, /* lod 1: 225 quads, 15x15  */ .indices = g_indices_plane_lod3 },
+                // currently hardcoded to use these everywhere -> 
+                {.num_indices = 294,  /* lod 2: 49 quads, 7x7     */ .indices = g_indices_plane_lod4 },
+                {.num_indices = 54,   /* lod 3: 9 quads, 3x3      */ .indices = g_indices_plane_lod5 },
+                {.num_indices = 6,    /* lod 4: 1 quad, 128m wide */ .indices = g_indices_plane_lod6 }
             }
         },
         [MESH_BODY] = {0},
@@ -683,7 +680,7 @@ int main(void) {
 
     #define OBJECTS_PER_CHUNK 64
 
-    #define PLANE_CHUNK_COUNT 6400
+    #define PLANE_CHUNK_COUNT 3200
 
     struct unit {u16 x, y, next_x, next_y;};
     struct unit units[1] = {
@@ -701,7 +698,7 @@ int main(void) {
         [OBJECT_TYPE_UNIT]  = { .chunk_count = UNIT_CHUNK_COUNT,  .first_chunk = PLANE_CHUNK_COUNT }
     };
 
-    struct gpu_object { uint16_t x,y,z; uint8_t cos,sin; };
+    struct gpu_object { int16_t x,y,z; uint8_t cos,sin; };
     // todo: ideally we don't even have any plane objects/chunks in memory, as their data is not needed in the shader
     static struct gpu_object gpu_objects[TOTAL_CHUNK_COUNT * OBJECTS_PER_CHUNK];
 
@@ -880,7 +877,7 @@ int main(void) {
         &renderer.buffer_chunks, &renderer.memory_chunks, 0);
     create_and_upload_device_local_buffer(
         machine.device, machine.physical_device, machine.queue_graphics, upload_pool,
-        size_objects, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        size_objects, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         NULL, // uploaded later per mesh
         &renderer.buffer_objects, &renderer.memory_objects, 0);
     
@@ -1601,11 +1598,9 @@ int main(void) {
             // VISIBLE CHUNKS PASS
             vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,renderer.common_pipeline_layout, 0, 1, &renderer.descriptor_set, 0, NULL);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, renderer.compute_pipeline);
-            uint32_t mode_chunks = 0;
-            vkCmdPushConstants(cmd,
-                renderer.common_pipeline_layout,
-                VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                0, sizeof(uint32_t), &mode_chunks);
+            enum mode {CHUNK_PASS, OBJECT_PASS, PREFIX_PASS, SCATTER_PASS, UI_MODE, FENCE_MODE, SEA_MODE, MESH_MODE, SKY_MODE};
+            enum mode mode = CHUNK_PASS;
+            vkCmdPushConstants(cmd, renderer.common_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(enum mode), &mode);
             vkCmdDispatch(cmd, (total_chunk_count+63)/64, 1, 1);
             VkBufferMemoryBarrier2 b[5];
             b[0] = buf_barrier2(ST_CS, AC_SWR, VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, AC_IND, renderer.buffer_indirect_workgroups, 0, VK_WHOLE_SIZE);
@@ -1628,11 +1623,8 @@ int main(void) {
             // VISIBLE OBJECTS PASS
             vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,renderer.common_pipeline_layout, 0, 1, &renderer.descriptor_set, 0, NULL);
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, renderer.compute_pipeline);
-            uint32_t mode_counts = 1;
-            vkCmdPushConstants(cmd,
-                renderer.common_pipeline_layout,
-                VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                0, sizeof(uint32_t), &mode_counts);
+            mode = OBJECT_PASS;
+            vkCmdPushConstants(cmd, renderer.common_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(enum mode), &mode);
             vkCmdDispatchIndirect(cmd, renderer.buffer_indirect_workgroups, 0);
             VkMemoryBarrier2 after_count_2 = mem_barrier2(ST_CS, AC_SWR, ST_CS, AC_SRD | AC_SWR);
             cmd_barrier2(cmd, &after_count_2, 1, NULL, 0, NULL, 0);
@@ -1642,11 +1634,8 @@ int main(void) {
             #endif
             
             // PREPARE INDIRECT PASS
-            uint32_t mode_prepare = 2;
-            vkCmdPushConstants(cmd,
-                renderer.common_pipeline_layout,
-                VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                0, sizeof(uint32_t), &mode_prepare);
+            mode = PREFIX_PASS;
+            vkCmdPushConstants(cmd, renderer.common_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(enum mode), &mode);
             vkCmdDispatch(cmd, 1, 1, 1);
             VkBufferMemoryBarrier2 prepare_to_scatter_indirect =
                 buf_barrier2(ST_CS, AC_SWR, VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, AC_IND, // indirect args read by compute dispatchIndirect
@@ -1668,11 +1657,8 @@ int main(void) {
             vkCmdFillBuffer(cmd, renderer.buffer_buckets, 0, size_buckets, 0);
             cmd_barrier2(cmd, NULL, 0, &bc_clear_to_cs, 1, NULL, 0);
             // SCATTER PASS
-            uint32_t mode_scatter = 3;
-            vkCmdPushConstants(cmd,
-                renderer.common_pipeline_layout,
-                VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                0, sizeof(uint32_t), &mode_scatter);
+            mode = SCATTER_PASS;
+            vkCmdPushConstants(cmd, renderer.common_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(enum mode), &mode);
             vkCmdDispatchIndirect(cmd, renderer.buffer_indirect_workgroups, 0);
             VkBufferMemoryBarrier2 post[2];
             post[0] = buf_barrier2(ST_CS, AC_SWR, VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, AC_IND, renderer.buffer_draw_calls, 0, VK_WHOLE_SIZE);
@@ -1750,39 +1736,26 @@ int main(void) {
             // index buffer: fixed 1152 indices (values 0..255 in your mesh order)
             vkCmdBindIndexBuffer(cmd, renderer.buffer_index_ib, 0, VK_INDEX_TYPE_UINT16);
             // ui draw
-            uint32_t mode_ui = 5;
-            vkCmdPushConstants(cmd,
-                renderer.common_pipeline_layout,
-                VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                0, sizeof(uint32_t), &mode_ui);
+            mode = UI_MODE;
+            vkCmdPushConstants(cmd, renderer.common_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(enum mode), &mode);
             vkCmdDraw(cmd, 3, 1, 0, 0); // ui fullscreen
             // map fence
-            uint32_t mode_fence = 6;
-            vkCmdPushConstants(cmd, renderer.common_pipeline_layout,
-                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
-                0, sizeof(uint32_t), &mode_fence);
-            vkCmdDraw(cmd, 24, 1, 0, 0);
+            // mode = FENCE_MODE;
+            // vkCmdPushConstants(cmd, renderer.common_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(enum mode), &mode);
+            // vkCmdDraw(cmd, 24, 1, 0, 0);
             // sea
-            uint32_t mode_sea = 7;
-            vkCmdPushConstants(cmd, renderer.common_pipeline_layout,
-                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
-                0, sizeof(uint32_t), &mode_sea);
+            mode = SEA_MODE;
+            vkCmdPushConstants(cmd, renderer.common_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(enum mode), &mode);
             vkCmdDraw(cmd, 6, 1, 0, 0);
             // one GPU-driven draw then a single fullscreen triangle for sky
-            uint32_t mode_mesh = 0;
-            vkCmdPushConstants(cmd,
-                renderer.common_pipeline_layout,
-                VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                0, sizeof(uint32_t), &mode_mesh);
+            mode = MESH_MODE;
+            vkCmdPushConstants(cmd, renderer.common_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(enum mode), &mode);
             vkCmdDrawIndexedIndirect(cmd, renderer.buffer_draw_calls, 0, total_mesh_count, sizeof(VkDrawIndexedIndirectCommand));
             #if DEBUG_APP == 1
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, swapchain.query_pool, q0 + Q_RENDER);
             #endif
-            uint32_t mode_sky = 1;
-            vkCmdPushConstants(cmd,
-                renderer.common_pipeline_layout,
-                VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                0, sizeof(uint32_t), &mode_sky);
+            mode = SKY_MODE;
+            vkCmdPushConstants(cmd, renderer.common_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(enum mode), &mode);
             vkCmdDraw(cmd, 3, 1, 0, 0); // sky fullscreen triangle
             vkCmdEndRendering(cmd);
             #if DEBUG_APP == 1
