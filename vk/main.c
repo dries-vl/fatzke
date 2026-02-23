@@ -593,7 +593,6 @@ int main(void) {
             .lods = {
                 {.num_indices = 5766, /* lod 0: 961 quads, 31x31  */ .indices = g_indices_plane_lod2 },
                 {.num_indices = 1350, /* lod 1: 225 quads, 15x15  */ .indices = g_indices_plane_lod3 },
-                // currently hardcoded to use these everywhere -> 
                 {.num_indices = 294,  /* lod 2: 49 quads, 7x7     */ .indices = g_indices_plane_lod4 },
                 {.num_indices = 54,   /* lod 3: 9 quads, 3x3      */ .indices = g_indices_plane_lod5 },
                 {.num_indices = 6,    /* lod 4: 1 quad, 128m wide */ .indices = g_indices_plane_lod6 }
@@ -680,7 +679,7 @@ int main(void) {
 
     #define OBJECTS_PER_CHUNK 64
 
-    #define PLANE_CHUNK_COUNT 3200
+    #define PLANE_CHUNK_COUNT 6400
 
     struct unit {u16 x, y, next_x, next_y;};
     struct unit units[1] = {

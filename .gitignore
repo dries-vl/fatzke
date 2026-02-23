@@ -7,3 +7,6 @@ target
 build
 cmake-*
 NUL
+*.npy
+*.tif
+vk_tools

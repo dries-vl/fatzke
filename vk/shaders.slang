@@ -85,23 +85,26 @@ uint choose_lod_step(float distance, float radius) {
     return 0;
 }
 
+// 1px = 2km, 1 tile = 16km
+// 40km world map -> 20,000px x 10,000px
+//                -> 2500 tiles x 1250 tiles
 float terrain_height_at_uv(float2 uv) {
     return TEXTURES[5].SampleLevel(uv, 0).x * 100000.0f // height
     + (TEXTURES[4].SampleLevel(uv, 0).x - 0.25) * 1000.0f // noise
     - (TEXTURES[5].SampleLevel(uv, 1).b - 0.25) * 10000.0f; // coast
 }
 float chunk_height_at_uv(float2 uv) {
-    return TEXTURES[2].SampleLevel(uv, 0).x * 20000.0f // height
+    return TEXTURES[2].SampleLevel(uv, 0).x * 100000.0f // height
     + (TEXTURES[4].SampleLevel(uv, 0).x - 0.25) * 250.0f // noise
     - (TEXTURES[2].SampleLevel(uv, 0).b - 0.4) * 10000.0f; // coast
 }
 float chunk_height_at_uv_fs(float2 uv) {
-    return TEXTURES[2].Sample(uv).x * 20000.0f // height
+    return TEXTURES[2].Sample(uv).x * 100000.0f // height
     + (TEXTURES[4].Sample(uv).x - 0.25) * 250.0f // noise
     - (TEXTURES[2].Sample(uv).b - 0.9) * 10000.0f; // coast
 }
 float chunk_height_at_uv_px(int2 px) {
-    return TEXTURES[2].Load(int3(px, 0)).x * 20000.0f // height
+    return TEXTURES[2].Load(int3(px, 0)).x * 100000.0f // height
     + (TEXTURES[4].Load(int3(px, 0)).x - 0.25) * 250.0f // noise
     - (TEXTURES[2].Load(int3(px, 0)).b - 0.9) * 10000.0f; // coast
 }
@@ -686,7 +689,7 @@ struct ps_out {
     float4 color : SV_Target0; // normal color
     uint   id    : SV_Target1; // object ID
 };
-static const float3 LIGHT_DIR = normalize(float3(0.8, 0.1, 0.1)); // points *from surface to light*
+static const float3 LIGHT_DIR = normalize(float3(0.8, 0.4, 0.4)); // points *from surface to light*
 static const float4 SKY_COLOR = float4(0.3, 0.5, 1.0, 1.0);
 static const float4 SEA_COLOR = float4(0.0, 0.3, 0.6, 1.0);
 static const float AMBIENT = 0.3;
@@ -729,14 +732,16 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         float slope = 1.0 - saturate(dot(i.normal, float3(0.0, 1.0, 0.0)));
         slope = pow(slope, 0.1);
 
-        float4 map = TEXTURES[1].Sample(i.uv);
+        // float4 map = TEXTURES[1].Sample(i.uv);
+        float4 map = TEXTURES[1].Load(int3(int2(i.uv * 2048), 0));
         // o.color.xyz = float3(0.5);
         o.color = map * (2 - (slope * 2));
+        o.color.xyz += TEXTURES[2].Sample(i.uv).r;
         float h = chunk_height_at_uv_fs(i.uv) * 0.00033;
-        if (h <= 2.0) {
-            o.color = SEA_COLOR + (h * float4(0.1, 0.2, 0.3, 0.0));
-            i.normal = 0;
-        }
+        // if (h <= 2.0) {
+        //     o.color = SEA_COLOR + (h * float4(0.1, 0.2, 0.3, 0.0));
+        //     i.normal = 0;
+        // }
         // o.color.xyz = (color + o.color.xyz) / 2;
         // o.color *= 1.0 - saturate(i.h * 0.00025);
     }
@@ -746,12 +751,12 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         o.color.xyz += h * float3(0.1, 0.2, 0.3);
     }
 
-    if (PUSH_CONSTANTS.mode == SEA_MODE || PUSH_CONSTANTS.mode == MESH_MODE) {
+    if (PUSH_CONSTANTS.mode == MESH_MODE) {
         // NORMAL
-        // float hL = chunk_height_at_uv_px(int2(i.uv * 2048) + int2(-1, 0));
-        // float hR = chunk_height_at_uv_px(int2(i.uv * 2048) + int2(1, 0));
-        // float hD = chunk_height_at_uv_px(int2(i.uv * 2048) + int2(0, -1));
-        // float hU = chunk_height_at_uv_px(int2(i.uv * 2048) + int2(0, 1));
+        // float hL = chunk_height_at_uv_px(int2(i.uv * 1024) + int2(-1, 0));
+        // float hR = chunk_height_at_uv_px(int2(i.uv * 1024) + int2(1, 0));
+        // float hD = chunk_height_at_uv_px(int2(i.uv * 1024) + int2(0, -1));
+        // float hU = chunk_height_at_uv_px(int2(i.uv * 1024) + int2(0, 1));
         float px_size = 1.0f / 2048.0f;
         float hL = chunk_height_at_uv_fs(i.uv + float2(-px_size, 0));
         float hR = chunk_height_at_uv_fs(i.uv + float2(px_size, 0));
@@ -770,7 +775,7 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         sun = lerp(sun, sun * sun, contrast);      // pushes midtones down, keeps 0 and 1 fixed
         float sky = saturate(i.normal.z * 0.5 + 0.5);
         float fill = lerp(AMBIENT, 0.50, sky);
-        fill = pow(fill, 2);
+        fill = pow(fill, 5);
         float shade = fill + sun * 3.0; // intensity of the sunlight
         o.color *= shade;
     }
