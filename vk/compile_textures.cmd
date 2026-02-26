@@ -17,7 +17,7 @@ for %%f in (data\*.png) do (
 
 :build
     echo Building %%f
-    toktx --t2 --encode astc --astc_blk_d 6x6 --srgb --genmipmap ^
+    toktx --t2 --encode astc --astc_blk_d 4x4 --srgb --genmipmap ^
         static/win32/%%~nf.ktx2 %%f
 
     objcopy -I binary -O elf64-x86-64 ^
@@ -42,7 +42,7 @@ for img in data/*.png; do
     # Build if output is missing OR input is newer than output
     if [ ! -e "$out" ] || [ "$img" -nt "$out" ]; then
         echo "Building $img"
-        toktx --t2 --encode astc --astc_blk_d 6x6 --srgb --genmipmap \
+        toktx --t2 --encode astc --astc_blk_d 4x4 --srgb --genmipmap \
             "static/linux/${base}.ktx2" "$img"
 
         objcopy \

@@ -229,7 +229,7 @@ static int create_texture_from_ktx2_astc(struct Machine* m, struct Swapchain* sw
 
     VkFormat format;
     format = (VkFormat)header.vkFormat;
-    if (format != VK_FORMAT_ASTC_6x6_SRGB_BLOCK) {
+    if (format != VK_FORMAT_ASTC_4x4_SRGB_BLOCK) {
         printf("Unexpected vkFormat in KTX2: %u\n", header.vkFormat);
     }
 

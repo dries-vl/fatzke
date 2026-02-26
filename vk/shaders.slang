@@ -96,17 +96,17 @@ float terrain_height_at_uv(float2 uv) {
 float chunk_height_at_uv(float2 uv) {
     return TEXTURES[2].SampleLevel(uv, 0).x * 100000.0f // height
     + (TEXTURES[4].SampleLevel(uv, 0).x - 0.25) * 250.0f // noise
-    - (TEXTURES[2].SampleLevel(uv, 0).b - 0.4) * 10000.0f; // coast
+    - (TEXTURES[2].SampleLevel(uv, 0).b - 0.5) * 10000.0f; // coast
 }
 float chunk_height_at_uv_fs(float2 uv) {
-    return TEXTURES[2].Sample(uv).x * 100000.0f // height
+    return TEXTURES[2].Sample(uv).x * 500000.0f // height
     + (TEXTURES[4].Sample(uv).x - 0.25) * 250.0f // noise
-    - (TEXTURES[2].Sample(uv).b - 0.9) * 10000.0f; // coast
+    - (TEXTURES[2].Sample(uv).b - 0.4) * 5000.0f; // coast
 }
 float chunk_height_at_uv_px(int2 px) {
-    return TEXTURES[2].Load(int3(px, 0)).x * 100000.0f // height
+    return TEXTURES[2].Load(int3(px, 0)).x * 500000.0f // height
     + (TEXTURES[4].Load(int3(px, 0)).x - 0.25) * 250.0f // noise
-    - (TEXTURES[2].Load(int3(px, 0)).b - 0.9) * 10000.0f; // coast
+    - (TEXTURES[2].Load(int3(px, 0)).b - 0.4) * 5000.0f; // coast
 }
 
 static const uint bucket_size = 2; // size in meters of each bucket ~2mx2m
@@ -173,7 +173,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
                     MESH_INFO.GetDimensions(mesh_count, stride);
                     int object_type = (int) CHUNKS[chunk_id].object_type;
                     // uint lod_level = choose_lod_step(distance, OBJECT_METADATA[object_type].radius * 20);
-                    uint lod_level = 1;
+                    uint lod_level = 2;
                     uint slot; InterlockedAdd(counts[lod_level], 1, slot);
                 } else {
                     // else spawn a workgroup of 64 objects
@@ -270,7 +270,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         if (is_chunk_object) radius = radius * 20;
         uint lod_level = choose_lod_step(distance, radius);
         if (object_type == TERRAIN) lod_level = 1;
-        if (is_chunk_object) lod_level = 1;
+        if (is_chunk_object) lod_level = 2;
         bool outside_frustrum = (abs(view.x) - radius) > (view.z * tanHalfFovX) || (abs(view.y) - radius) > (view.z * tanHalfFovY);
         bool valid = true;
         // if (outside_frustrum) valid = false;
@@ -560,7 +560,9 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
             vertex = 8 * plane_position(VERTEX_ID, DRAW_ID);           // in cm, times 8 because a chunk is 8x wider than a terrain tile
             world_pos = chunk_position.xz + (vertex.xz / 100.0f);
             uv = chunk_uv_at(world_pos);
-            h = chunk_height_at_uv(uv);
+            //h = chunk_height_at_uv(uv);
+            float px_size = 1.0f / 560.0f; // offset by
+            h = chunk_height_at_uv_px(int2((uv + (px_size / 2)) * 560));
             vertex.y += h;
         } else {
             uint id_within_chunk = object_id - (chunk_id * 64);
@@ -689,7 +691,7 @@ struct ps_out {
     float4 color : SV_Target0; // normal color
     uint   id    : SV_Target1; // object ID
 };
-static const float3 LIGHT_DIR = normalize(float3(0.8, 0.4, 0.4)); // points *from surface to light*
+static const float3 LIGHT_DIR = normalize(float3(1.0, 0.8, 0.0)); // points *from surface to light*
 static const float4 SKY_COLOR = float4(0.3, 0.5, 1.0, 1.0);
 static const float4 SEA_COLOR = float4(0.0, 0.3, 0.6, 1.0);
 static const float AMBIENT = 0.3;
@@ -723,60 +725,112 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
     else if (PUSH_CONSTANTS.mode == SEA_MODE) o.color = SEA_COLOR;
     else if (PUSH_CONSTANTS.mode == MESH_MODE) {
         // debug draw triangles as distinct colors
-        float3 color = frac(sin((primID+43) * 43.5453) * float3(23.1407, 85.928, 43.533));
-        if(color.x+color.y+color.z < 0.1) color = float3(float(primID % 32) / 32, float((primID + 38) % 64) / 64, float((primID + 17) % 32) / 32);
+        // float3 color = frac(sin((primID+43) * 43.5453) * float3(23.1407, 85.928, 43.533));
+        // if(color.x+color.y+color.z < 0.1) color = float3(float(primID % 32) / 32, float((primID + 38) % 64) / 64, float((primID + 17) % 32) / 32);
+        float g = frac(sin(primID * 12.9898) * 43758.5453);
+        float3 color = g.xxx;
         // float3 color = frac(sin((i.object_id+43) * 43.5453) * float3(23.1407, 85.928, 43.533));
         // if(color.x+color.y+color.z < 0.1) color = float3(float(i.object_id % 32) / 32, float((i.object_id + 38) % 64) / 64, float((i.object_id + 17) % 32) / 32);
         // return float4(color, 1.0);
         
-        float slope = 1.0 - saturate(dot(i.normal, float3(0.0, 1.0, 0.0)));
-        slope = pow(slope, 0.1);
-
         // float4 map = TEXTURES[1].Sample(i.uv);
-        float4 map = TEXTURES[1].Load(int3(int2(i.uv * 2048), 0));
+        float px_size = 1.0f / 560.0f; // offset by 
+        float4 map = TEXTURES[1].Load(int3(int2((i.uv + (0.5 * px_size)) * 560), 0));
         // o.color.xyz = float3(0.5);
-        o.color = map * (2 - (slope * 2));
-        o.color.xyz += TEXTURES[2].Sample(i.uv).r;
-        float h = chunk_height_at_uv_fs(i.uv) * 0.00033;
+        o.color = map;
+        // o.color.xyz += TEXTURES[2].Sample(i.uv).r;
+        // float h = chunk_height_at_uv_fs(i.uv) * 0.00033;
         // if (h <= 2.0) {
         //     o.color = SEA_COLOR + (h * float4(0.1, 0.2, 0.3, 0.0));
         //     i.normal = 0;
         // }
-        // o.color.xyz = (color + o.color.xyz) / 2;
+        // o.color.xyz += color;
         // o.color *= 1.0 - saturate(i.h * 0.00025);
     }
     
+
+    // QUAD OUTLINES
+    float2 p = (i.uv) * 560; // which quad are we on (not vertex)
+    float2 nearestV = round(p);
+    float d = length(p - nearestV);
+    float2 f = frac(p);
+    float dEdge = min(min(f.x, 1.0 - f.x), min(f.y, 1.0 - f.y));
+    float dDiag = abs(f.x - f.y) * 0.70710678; // 0 on diagonal
+    float t = 0.01;        // thickness
+    float feather = 0.005; // softness
+    float point = 1.0 - smoothstep((t * 4) - feather, (t * 4) + feather, d);
+    float outerLine = 1.0 - smoothstep(t - feather, t + feather, dEdge);
+    float diagLine = 1.0 - smoothstep(t - feather, t + feather, dDiag);
+    float px = max(fwidth(p.x), fwidth(p.y)); // how much does p change between two pixels
+    float enable = smoothstep(0, px, t * 2); // 1 when change in grid position for one pixel is smaller than width t
+    float mask = enable * saturate(point + outerLine + diagLine); // gradually dissolve the grid
+    o.color.rgb = lerp(o.color.rgb, 1.0.xxx, mask);
+
+    float px_size = 1.0f / 560.0f; // offset by
+    float2 fs_uv = ((i.uv + (px_size / 2)) * 560.0) / 561.0;
+
     if (PUSH_CONSTANTS.mode == SEA_MODE) {
-        float h = chunk_height_at_uv_fs(i.uv) * 0.00033;
+        float h = chunk_height_at_uv_fs(fs_uv) * 0.00033;
         o.color.xyz += h * float3(0.1, 0.2, 0.3);
     }
 
     if (PUSH_CONSTANTS.mode == MESH_MODE) {
-        // NORMAL
-        // float hL = chunk_height_at_uv_px(int2(i.uv * 1024) + int2(-1, 0));
-        // float hR = chunk_height_at_uv_px(int2(i.uv * 1024) + int2(1, 0));
-        // float hD = chunk_height_at_uv_px(int2(i.uv * 1024) + int2(0, -1));
-        // float hU = chunk_height_at_uv_px(int2(i.uv * 1024) + int2(0, 1));
-        float px_size = 1.0f / 2048.0f;
-        float hL = chunk_height_at_uv_fs(i.uv + float2(-px_size, 0));
-        float hR = chunk_height_at_uv_fs(i.uv + float2(px_size, 0));
-        float hD = chunk_height_at_uv_fs(i.uv + float2(0, -px_size));
-        float hU = chunk_height_at_uv_fs(i.uv + float2(0, px_size));
-        float3 dPdx = float3(2.0f * 5000, hR - hL, 0.0f);
-        float3 dPdz = float3(0.0f, hU - hD, 2.0f * 5000);
-        i.normal = normalize(cross(dPdz, dPdx));
+        // NORMAL SMOOTH
+        // float px = 1.0f / (561.0f * 2.0); // offset by
+        // float hTL = chunk_height_at_uv_fs(fs_uv + float2(-px,  px));
+        // float hT  = chunk_height_at_uv_fs(fs_uv + float2( 0.0,      px));
+        // float hTR = chunk_height_at_uv_fs(fs_uv + float2( px,  px));
+        // float hL  = chunk_height_at_uv_fs(fs_uv + float2(-px,  0.0));
+        // float hR  = chunk_height_at_uv_fs(fs_uv + float2( px,  0.0));
+        // float hBL = chunk_height_at_uv_fs(fs_uv + float2(-px, -px));
+        // float hB  = chunk_height_at_uv_fs(fs_uv + float2( 0.0,     -px));
+        // float hBR = chunk_height_at_uv_fs(fs_uv + float2( px, -px));
+        // float heightScale = 10.0;
+        // hTL *= heightScale; hT *= heightScale; hTR *= heightScale;
+        // hL  *= heightScale;                hR  *= heightScale;
+        // hBL *= heightScale; hB *= heightScale; hBR *= heightScale;
+        // float dx = 5000.0;
+        // float dz = 5000.0;
+        // float dHdx = ((hTR + 2.0*hR + hBR) - (hTL + 2.0*hL + hBL)) / (8.0 * dx);
+        // float dHdz = ((hBL + 2.0*hB + hBR) - (hTL + 2.0*hT + hTR)) / (8.0 * dz);
+        // float3 N = normalize(float3(-dHdx, 1.0, -dHdz));
+        // i.normal = N;
+        
+        // NORMAL TRIANGLE
+        int2 p = int2(i.uv * 560);
+        float sx = 2.0f * 5000.0f;
+        float sz = 2.0f * 5000.0f;
+        float h00 = chunk_height_at_uv_px(p);
+        float h11 = chunk_height_at_uv_px(p + int2(1,1));
+        bool odd = (primID & 1) != 0;
+        float3 e1, e2;
+        if (odd) {
+            float h10 = chunk_height_at_uv_px(p + int2(1,0));
+            e1 = float3(sx,  (h10 - h00) * 10.0, 0.0f);   // 00 -> 10
+            e2 = float3(sx,  (h11 - h00) * 10.0, sz);     // 00 -> 11
+            i.normal = normalize(cross(e2, e1));    // if inverted, use cross(e1,e2)
+        } else {
+            float h01 = chunk_height_at_uv_px(p + int2(0,1));
+            e1 = float3(0.0f, (h01 - h00) * 10.0, sz);    // 00 -> 01
+            e2 = float3(sx,   (h11 - h00) * 10.0, sz);    // 00 -> 11
+            i.normal = -normalize(cross(e2, e1));    // if inverted, use cross(e1,e2)
+        }
+        
+        // slope
+        float slope = 1.0 - saturate(dot(i.normal, float3(0,1,0)));
+        float slope_shade = 1.0 - slope * 0.4;
+        o.color *= slope_shade;
 
-
-
+        // lighting
         float ndl = saturate(dot(i.normal, LIGHT_DIR));
-        float wrap = 0.05;
+        float wrap = 0.1;
         float sun = saturate((ndl + wrap) / (1.0 + wrap));
-        float contrast = 0.85;                     // 0..1
+        float contrast = 0.3;                     // 0..1
         sun = lerp(sun, sun * sun, contrast);      // pushes midtones down, keeps 0 and 1 fixed
         float sky = saturate(i.normal.z * 0.5 + 0.5);
-        float fill = lerp(AMBIENT, 0.50, sky);
-        fill = pow(fill, 5);
-        float shade = fill + sun * 3.0; // intensity of the sunlight
+        float fill = lerp(AMBIENT, 1.0, sky);
+        fill = pow(fill, 1);
+        float shade = fill + sun * 1.0; // intensity of the sunlight
         o.color *= shade;
     }
 
