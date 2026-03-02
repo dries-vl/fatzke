@@ -594,7 +594,7 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
             vertex.y += h;
         }
         // normal
-        float step_m = 100.0f; float step_cm = step_m * 100.0;
+        float step_m = 1.0f; float step_cm = step_m * 100.0;
         float hL = chunk_height_at_uv(chunk_uv_at(world_pos + float2(-step_m, 0)));
         float hR = chunk_height_at_uv(chunk_uv_at(world_pos + float2( step_m, 0)));
         float hD = chunk_height_at_uv(chunk_uv_at(world_pos + float2(0, -step_m)));
@@ -754,8 +754,8 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         // float4 map = TEXTURES[1].Sample(i.uv);
         float px_size = 1.0f / 640.0f; // offset by 
         float4 map = TEXTURES[1].Load(int3(int2((i.uv + (px_size / 2)) * 640), 0));
-        o.color.xyz = float3(0.5);
-        // o.color = map;
+        // o.color.xyz = float3(0.5);
+        o.color = map;
         // o.color.xyz += TEXTURES[2].Sample(i.uv).r;
         // float h = chunk_height_at_uv_fs(i.uv) * 0.00033;
         // if (h <= 2.0) {
@@ -830,7 +830,7 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         float hm11 = chunk_height_at_uv_px(pi + int2(-1,1)); // below left
         float sx = 2.0f * 5000.0f;
         float sz = 2.0f * 5000.0f;
-        float slope_strength = 10.0f;
+        float slope_strength = 2.0f;
         float3 e1, e2;
         if (flipped_triangle) { // 4 triangles
             if (odd_row) { // pointing down, row offset to left, 00 is top left vertex, 10 is directly to the right
@@ -856,7 +856,7 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         // slope
         float slope = 1.0 - saturate(dot(i.normal, float3(0,1,0)));
         float slope_shade = 1.0 - slope * 1.0; // last 1.0 is 0.0 to 1.0 weak to strong effect
-        // o.color *= slope_shade;
+        o.color *= pow(slope_shade, 2);
 
         // lighting
         float ndl = saturate(dot(i.normal, LIGHT_DIR));
@@ -868,7 +868,7 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         float fill = lerp(AMBIENT, 1.0, sky);
         fill = pow(fill, 1);
         float shade = fill + sun * 1.0; // intensity of the sunlight
-        o.color *= shade;
+        o.color *= min(1, pow(shade, 2));
     }
 
     if (PUSH_CONSTANTS.mode != SKY_MODE && i.object_id == selected_object_id) {

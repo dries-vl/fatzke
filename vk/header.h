@@ -54,9 +54,9 @@ enum BUTTON {
 typedef void (*KEYBOARD_CB)(void*,enum BUTTON,enum BUTTON_STATE);
 typedef void (*MOUSE_CB)(void*,i32,i32,enum BUTTON,int);
 u64 pf_ns_now(void);
+#include<math.h>
 #ifdef _WIN32 // todo: more elegant solution without ifdefs
 u64 pf_ticks_to_ns(u64);
-#include <math.h>
 #ifdef tanf
 #undef tanf
 #endif
