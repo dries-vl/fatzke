@@ -1,5 +1,4 @@
 #pragma once
-#include<math.h>
 #ifdef _WIN32
 #define cosf cos
 #define sinf sin

@@ -56,6 +56,11 @@ typedef void (*MOUSE_CB)(void*,i32,i32,enum BUTTON,int);
 u64 pf_ns_now(void);
 #ifdef _WIN32 // todo: more elegant solution without ifdefs
 u64 pf_ticks_to_ns(u64);
+#include <math.h>
+#ifdef tanf
+#undef tanf
+#endif
+static inline float tanf(float x) { return (float)tan((double)x); }
 #endif
 void pf_time_reset(void);
 u64 pf_ns_start(void);

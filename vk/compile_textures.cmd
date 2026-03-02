@@ -3,34 +3,38 @@
 @echo off
 setlocal EnableDelayedExpansion
 
-for %%f in (data\*.png) do (
-    set "name=%%~nf"
-    set "in=%%f"
-    set "out=static\win32\%%~nf.obj"
+for %%F in (data\*.png) do (
+    set "in=%%F"
+    set "name=%%~nF"
+    set "out=static\win32\%%~nF.obj"
 
-    rem Build if output is missing OR input is newer than output
-    if not exist "!out!" goto build
-    for %%o in ("!out!") do if "!in!" NEQ "" if "%%~tf" GTR "%%~to" goto build
-
-    echo Skipping %%f (up to date)
-    goto next
-
-:build
-    echo Building %%f
-    toktx --t2 --encode astc --astc_blk_d 4x4 --srgb --genmipmap ^
-        static/win32/%%~nf.ktx2 %%f
-
-    objcopy -I binary -O elf64-x86-64 ^
-        --rename-section .data=.rdata,alloc,load,readonly,data,contents ^
-        static/win32/%%~nf.ktx2 static/win32/%%~nf.obj ^
-        --redefine-sym _binary_static_win32_%%~nf_ktx2_start=%%~nf ^
-        --redefine-sym _binary_static_win32_%%~nf_ktx2_end=%%~nf_end
-
-    del static\win32\%%~nf.ktx2
-
-:next
+    rem build if missing
+    if not exist "!out!" (
+        call :build "%%F" "%%~nF"
+    ) else (
+        rem build if input newer than output
+        for %%O in ("!out!") do (
+            if "%%~tF" GTR "%%~tO" call :build "%%F" "%%~nF"
+        )
+    )
 )
 goto :eof
+
+:build
+echo Building %~1
+toktx --t2 --encode astc --astc_blk_d 6x6 --srgb --genmipmap ^
+    "static/win32/%~2.ktx2" "%~1"
+if errorlevel 1 exit /b 1
+
+objcopy -I binary -O elf64-x86-64 ^
+    --rename-section .data=.rdata,alloc,load,readonly,data,contents ^
+    "static/win32/%~2.ktx2" "static/win32/%~2.obj" ^
+    --redefine-sym _binary_static_win32_%~2_ktx2_start=%~2 ^
+    --redefine-sym _binary_static_win32_%~2_ktx2_end=%~2_end
+if errorlevel 1 exit /b 1
+
+del "static\win32\%~2.ktx2"
+exit /b 0
 '
 
 # Linux portion
@@ -42,7 +46,7 @@ for img in data/*.png; do
     # Build if output is missing OR input is newer than output
     if [ ! -e "$out" ] || [ "$img" -nt "$out" ]; then
         echo "Building $img"
-        toktx --t2 --encode astc --astc_blk_d 4x4 --srgb --genmipmap \
+        toktx --t2 --encode astc --astc_blk_d 6x6 --srgb --genmipmap \
             "static/linux/${base}.ktx2" "$img"
 
         objcopy \
