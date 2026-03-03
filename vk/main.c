@@ -592,7 +592,7 @@ int main(void) {
             .radius = 150.0f, // todo: we 5x it later, kinda hacky
             .lods = {
                 {.num_indices = 5766, /* lod 0: 961 quads, 31x31  */ .indices = g_indices_plane_lod2 },
-                {.num_indices = 1350, /* lod 1: 225 quads, 15x15  */ .indices = g_indices_plane_lod3 },
+                {.num_indices = 1536, /* lod 1: 225 quads, 15x15  */ .indices = g_indices_plane_lod3 }, 
                 {.num_indices = 384,  /* lod 2: 49 quads, 7x7     */ .indices = g_indices_plane_lod4 },
                 {.num_indices = 54,   /* lod 3: 9 quads, 3x3      */ .indices = g_indices_plane_lod5 },
                 {.num_indices = 6,    /* lod 4: 1 quad, 128m wide */ .indices = g_indices_plane_lod6 }

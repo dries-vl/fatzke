@@ -93,18 +93,19 @@ float terrain_height_at_uv(float2 uv) {
     - (TEXTURES[5].SampleLevel(uv, 1).b - 0.25) * 10000.0f; // coast
 }
 float chunk_height_at_uv(float2 uv) {
-    return TEXTURES[2].SampleLevel(uv, 0).x * 1000000.0f // height
-    - (TEXTURES[2].SampleLevel(uv, 0).b - 0.5) * 10000.0f; // coast
+    float h = TEXTURES[2].SampleLevel(uv, 0).x; // height
+    float w = TEXTURES[2].SampleLevel(uv, 0).b; // coast
+    return (h * 300000.0f) + (step(w, 0.001) * 2000.0f);
 }
 float chunk_height_at_uv_fs(float2 uv) {
     float h = TEXTURES[2].Sample(uv).x; // height
     float w = TEXTURES[2].Sample(uv).b; // coast
-    return (h * 300000.0f) + (step(w, 0.001) * 500.0f);
+    return (h * 300000.0f) + (step(w, 0.001) * 2000.0f);
 }
 float chunk_height_at_uv_px(int2 px) {
     float h = TEXTURES[2].Load(int3(px, 0)).x; // height
     float w = TEXTURES[2].Load(int3(px, 0)).b; // coast
-    return (h * 300000.0f) + (step(w, 0.001) * 500.0f);
+    return (h * 300000.0f) + (step(w, 0.001) * 2000.0f);
 }
 float chunk_height_at_uv_px_2(int2 px) {
     return TEXTURES[2].Load(int3(px, 0)).x * 1000000.0f // height
@@ -271,7 +272,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         float radius = OBJECT_METADATA[object_type].radius;
         if (is_chunk_object) radius = radius * 20;
         uint lod_level = choose_lod_step(distance, radius);
-        if (object_type == TERRAIN) lod_level = 2;
+        if (object_type == TERRAIN) lod_level = 1;
         if (is_chunk_object) lod_level = 2;
         bool outside_frustrum = (abs(view.x) - radius) > (view.z * tanHalfFovX) || (abs(view.y) - radius) > (view.z * tanHalfFovY);
         bool valid = true;
@@ -378,10 +379,10 @@ static const float FENCE_S = 2048; // meters
 static const float FENCE_H = 200;   // meters
 static const float SEA_S = 81920 / 2;   // meters
 static const float3 SEA_V[4] = {
-    float3(-SEA_S, 2, -SEA_S),
-    float3( SEA_S, 2, -SEA_S),
-    float3( SEA_S, 2,  SEA_S),
-    float3(-SEA_S, 2,  SEA_S),
+    float3(-SEA_S, 16, -SEA_S),
+    float3( SEA_S, 16, -SEA_S),
+    float3( SEA_S, 16,  SEA_S),
+    float3(-SEA_S, 16,  SEA_S),
 };
 static const uint SEA_I[6] = {
     0,1,2, 2,3,0
@@ -590,7 +591,7 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
             world_pos = object_position.xz + (vertex.xz / 100.0f);
             uv = chunk_uv_at(world_pos);
             float px_size = 1.0f / 640.0f; // offset by
-            h = chunk_height_at_uv_px(int2((uv + (px_size / 2)) * 640));
+            h = chunk_height_at_uv(uv + (px_size / 2));
             vertex.y += h;
         }
         // normal
@@ -752,10 +753,9 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         // return float4(color, 1.0);
         
         // float4 map = TEXTURES[1].Sample(i.uv);
+        float2 puv = round(i.uv * 640) / 640; // which quad are we on (not vertex)
         float px_size = 1.0f / 640.0f; // offset by 
-        float4 map = TEXTURES[1].Load(int3(int2((i.uv + (px_size / 2)) * 640), 0));
         // o.color.xyz = float3(0.5);
-        o.color = map;
         // o.color.xyz += TEXTURES[2].Sample(i.uv).r;
         // float h = chunk_height_at_uv_fs(i.uv) * 0.00033;
         // if (h <= 2.0) {
@@ -779,26 +779,6 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
     }
 
     if (PUSH_CONSTANTS.mode == MESH_MODE) {
-        // QUAD OUTLINES
-        float2 f = frac(p);
-        const float INV_SQRT5_TIMES_2 = 0.894427191; // 2/sqrt(5)
-        float dU = min(f.x, 1.0 - f.x) * INV_SQRT5_TIMES_2;
-        float dV = min(f.y, 1.0 - f.y);
-        float dDiag = odd_row
-            ? abs((f.x + f.y - 1.0)) * INV_SQRT5_TIMES_2
-            : abs(f.x - f.y) * INV_SQRT5_TIMES_2;
-        float dEdge = min(dU, min(dV, dDiag));
-        float2 nearestV = round(p);
-        float d = length(p - nearestV);
-        float t = 0.01;        // thickness
-        float feather = 0.005; // softness
-        float point = 1.0 - smoothstep((t * 4) - feather, (t * 4) + feather, d);
-        float outerLine = 1.0 - smoothstep(t - feather, t + feather, dEdge);
-        float diagLine = 1.0 - smoothstep(t - feather, t + feather, dDiag);
-        float px_p = max(fwidth(p.x), fwidth(p.y)); // how much does p change between two pixels
-        float enable = smoothstep(0, px_p, t * 2); // 1 when change in grid position for one pixel is smaller than width t
-        float mask = enable * saturate(point + outerLine + diagLine); // gradually dissolve the grid
-        o.color.rgb = lerp(o.color.rgb, 1.0.xxx, mask);
 
         // NORMAL SMOOTH
         // float px = 1.0f / (641.0f * 2.0); // offset by
@@ -820,9 +800,16 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         // float dHdz = ((hBL + 2.0*hB + hBR) - (hTL + 2.0*hT + hTR)) / (8.0 * dz);
         // float3 N = normalize(float3(-dHdx, 1.0, -dHdz));
         // i.normal = N;
+        
+        // COLOR
+        int2 pi = int2(floor(p));
+        float resolution = 640.0f;
+        float2 v00 = float2(pi) / resolution;
+        // Pick the 3 vertices for *this* triangle
+        float2 a, b, c;
+        float2 a_uv, b_uv, c_uv;
 
         // NORMAL TRIANGLE
-        int2 pi = int2(p);
         float h00 = chunk_height_at_uv_px(pi); // this pixel
         float h11 = chunk_height_at_uv_px(pi + int2(1,1)); // below right
         float h10 = chunk_height_at_uv_px(pi + int2(1,0)); // to the right
@@ -837,26 +824,80 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
                 e1 = float3(0.0f, (h01 - h00) * slope_strength, sz);
                 e2 = float3(sx,  (h10 - h00) * slope_strength, 0.0);
                 i.normal = -normalize(cross(e2, e1));
+                a = v00; b = v00 + float2(px_size, 0); c = v00 + float2(px_size * 0.5, px_size);
+                a_uv = v00; b_uv = v00 + float2(px_size, 0); c_uv = v00 + float2(0, px_size);
             } else { // pointing down, row not offset, 00 is top left vertex, 10 is directly to the right
                 e1 = float3(sx, (h10 - h00) * slope_strength, 0.0f);      // 10 - 00
                 e2 = float3(sx, (h11 - h00) * slope_strength, sz);        // 11 - 00
-                i.normal = normalize(cross(e2, e1)); 
+                i.normal = normalize(cross(e2, e1));
+                a = v00; b = v00 + float2(px_size, 0); c = v00 + float2(px_size * 0.5, px_size);
+                a_uv = v00; b_uv = v00 + float2(px_size, 0); c_uv = v00 + float2(px_size, px_size);
             }
         } else {
             if (odd_row) { // pointing up, row offset to the left, 10 is top vertex
                 e1 = float3(0.0f,  (h11 - h10) * slope_strength, sz);     // 11 - 10
                 e2 = float3(-sx,   (h01 - h10) * slope_strength, sz);     // 01 - 10  (note -sx)
                 i.normal = normalize(cross(e2, e1));
+                a = v00 + float2(px_size, 0); b = v00 + float2(px_size * 1.5, px_size); c = v00 + float2(px_size * 0.5, px_size);
+                a_uv = v00 + float2(px_size, 0); b_uv = v00 + float2(px_size, px_size); c_uv = v00 + float2(0, px_size);
             } else { // pointing up, row not offset, 00 is top vertex
                 e1 = float3(0.0f, (h01 - h00) * slope_strength, sz);
-                e2 = float3(sx,  (h11 - h00) * slope_strength, sz); 
-                i.normal = -normalize(cross(e2, e1)); 
+                e2 = float3(sx,  (h11 - h00) * slope_strength, sz);
+                i.normal = -normalize(cross(e2, e1));
+                a = v00; b = v00 + float2(px_size * -0.5, px_size); c = v00 + float2(px_size * 0.5, px_size);
+                a_uv = v00; b_uv = v00 + float2(0, px_size); c_uv = v00 + float2(px_size, px_size);
             }
-        }        
+        }
+
+        // bary closest
+        float2 v0 = b_uv - a_uv;
+        float2 v1 = c_uv - a_uv;
+        float2 v2 = i.uv - a_uv;
+
+        float den = v0.x * v1.y - v1.x * v0.y;
+
+        float wB = (v2.x * v1.y - v1.x * v2.y) / den;
+        float wC = (v0.x * v2.y - v2.x * v0.y) / den;
+        float wA = 1.0 - wB - wC;
+
+        // pick max weight
+        int closest = 0;
+        float2 hex_uv = a_uv;
+        float wMax = wA;
+        if (wB > wMax) { wMax = wB; closest = 1; hex_uv = b_uv;}
+        if (wC > wMax) { closest = 2; hex_uv = c_uv;}
+        // if (closest == 0) o.color = float4(1, 0, 0, 1);
+        // if (closest == 1) o.color = float4(0, 1, 0, 1);
+        // if (closest == 2) o.color = float4(0, 0, 1, 1);
+        float4 map = TEXTURES[1].Load(int3(int2((hex_uv + (px_size / 2)) * 640), 0));
+        o.color = map;
+
+        // QUAD OUTLINES
+        float2 f = frac(p);
+        const float INV_SQRT5_TIMES_2 = 0.894427191; // 2/sqrt(5)
+        float dU = min(f.x, 1.0 - f.x) * INV_SQRT5_TIMES_2;
+        float dV = min(f.y, 1.0 - f.y);
+        float dDiag = odd_row
+            ? abs((f.x + f.y - 1.0)) * INV_SQRT5_TIMES_2
+            : abs(f.x - f.y) * INV_SQRT5_TIMES_2;
+        float dEdge = min(dU, min(dV, dDiag));
+        float2 nearestV = round(p);
+        float d = length(p - nearestV);
+        float t = 0.01;        // thickness
+        float feather = 0.005; // softness
+        float point = 1.0 - smoothstep((t * 4) - feather, (t * 4) + feather, d);
+        float outerLine = 1.0 - smoothstep(t - feather, t + feather, dEdge);
+        float diagLine = 1.0 - smoothstep(t - feather, t + feather, dDiag);
+        float px_p = max(fwidth(p.x), fwidth(p.y)); // how much does p change between two pixels
+        float enable = smoothstep(0, px_p, t * 2); // 1 when change in grid position for one pixel is smaller than width t
+        float mask = enable * saturate(point + outerLine + diagLine); // gradually dissolve the grid
+        o.color.rgb = lerp(o.color.rgb, 1.0.xxx, mask);
+
         // slope
         float slope = 1.0 - saturate(dot(i.normal, float3(0,1,0)));
         float slope_shade = 1.0 - slope * 1.0; // last 1.0 is 0.0 to 1.0 weak to strong effect
-        o.color *= pow(slope_shade, 2);
+        // if (slope > 0.05) o.color *= 0.1;
+        // o.color *= slope_shade;
 
         // lighting
         float ndl = saturate(dot(i.normal, LIGHT_DIR));
@@ -868,7 +909,7 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         float fill = lerp(AMBIENT, 1.0, sky);
         fill = pow(fill, 1);
         float shade = fill + sun * 1.0; // intensity of the sunlight
-        o.color *= min(1, pow(shade, 2));
+        // o.color *= min(1, pow(shade, 2));
     }
 
     if (PUSH_CONSTANTS.mode != SKY_MODE && i.object_id == selected_object_id) {
