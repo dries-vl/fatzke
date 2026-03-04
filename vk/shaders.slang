@@ -95,17 +95,17 @@ float terrain_height_at_uv(float2 uv) {
 float chunk_height_at_uv(float2 uv) {
     float h = TEXTURES[2].SampleLevel(uv, 0).x; // height
     float w = TEXTURES[2].SampleLevel(uv, 0).b; // coast
-    return (h * 300000.0f) + (step(w, 0.001) * 2000.0f);
+    return (h * 600000.0f) + (step(w, 0.001) * 2000.0f);
 }
 float chunk_height_at_uv_fs(float2 uv) {
     float h = TEXTURES[2].Sample(uv).x; // height
     float w = TEXTURES[2].Sample(uv).b; // coast
-    return (h * 300000.0f) + (step(w, 0.001) * 2000.0f);
+    return (h * 600000.0f) + (step(w, 0.001) * 2000.0f);
 }
 float chunk_height_at_uv_px(int2 px) {
     float h = TEXTURES[2].Load(int3(px, 0)).x; // height
     float w = TEXTURES[2].Load(int3(px, 0)).b; // coast
-    return (h * 300000.0f) + (step(w, 0.001) * 2000.0f);
+    return (h * 600000.0f) + (step(w, 0.001) * 2000.0f);
 }
 float chunk_height_at_uv_px_2(int2 px) {
     return TEXTURES[2].Load(int3(px, 0)).x * 1000000.0f // height
@@ -379,10 +379,10 @@ static const float FENCE_S = 2048; // meters
 static const float FENCE_H = 200;   // meters
 static const float SEA_S = 81920 / 2;   // meters
 static const float3 SEA_V[4] = {
-    float3(-SEA_S, 16, -SEA_S * 0.866),
-    float3( SEA_S, 16, -SEA_S * 0.866),
-    float3( SEA_S, 16,  SEA_S * 0.866),
-    float3(-SEA_S, 16,  SEA_S * 0.866),
+    float3(-SEA_S, 16, -SEA_S),
+    float3( SEA_S, 16, -SEA_S),
+    float3( SEA_S, 16,  SEA_S),
+    float3(-SEA_S, 16,  SEA_S),
 };
 static const uint SEA_I[6] = {
     0,1,2, 2,3,0
@@ -413,7 +413,6 @@ float3 plane_position(uint VERTEX_ID, uint grid_scale) {
     // Normalize to [0,1] then scale to the fixed tile size
     float x = (float(col) / float(vertices_per_side - 1)) * TILE_SIZE_CM - (TILE_SIZE_CM / 2);
     float z = (float(row) / float(vertices_per_side - 1)) * TILE_SIZE_CM - (TILE_SIZE_CM / 2);
-    if (row % 2 == 1) x -= (TILE_SIZE_CM / float(vertices_per_side - 1) / 2);
     return float3(x, 0.0, z);
 }
 
@@ -425,12 +424,12 @@ static const float PLAYABLE_WIDTH = TILE_WIDTH * TILES_PER_CHUNK * CHUNKS_PLAYAB
 static const float TOTAL_WIDTH = TILE_WIDTH * TILES_PER_CHUNK * CHUNKS_TOTAL;
 static const float VERTEX_WIDTH = TILE_WIDTH / float((MAX_VERTICES >> 2) - 1); // >> 2 because terrain lod is always 2
 float2 terrain_uv_at(float2 worldXZ_m) {
-    float2 uv = (worldXZ_m + float2(PLAYABLE_WIDTH / 2, (PLAYABLE_WIDTH / 2) * 0.866)) / float2(PLAYABLE_WIDTH, PLAYABLE_WIDTH * 0.866);
+    float2 uv = (worldXZ_m + float2(PLAYABLE_WIDTH / 2, (PLAYABLE_WIDTH / 2))) / float2(PLAYABLE_WIDTH, PLAYABLE_WIDTH);
     uv = float2(0,1) - float2(-uv.x, uv.y);
     return uv;
 }
 float2 chunk_uv_at(float2 worldXZ_m) {
-    float2 uv = (worldXZ_m + float2(TOTAL_WIDTH * 0.5f, TOTAL_WIDTH * 0.5f * 0.866)) / float2(TOTAL_WIDTH, TOTAL_WIDTH * 0.866);
+    float2 uv = (worldXZ_m + float2(TOTAL_WIDTH * 0.5f, TOTAL_WIDTH * 0.5f)) / float2(TOTAL_WIDTH, TOTAL_WIDTH);
     uv = float2(0, 1) - float2(-uv.x, uv.y);
     return uv;
 }
@@ -535,7 +534,7 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
         o.pos = float4(proj_scale_x * vx, proj_scale_y * vy, near_plane, vz);
         o.uv = 0;
         if (PUSH_CONSTANTS.mode == SEA_MODE) {
-            o.uv = (p.xz + float2(SEA_S, SEA_S * 0.866)) * (1.0f / (2.0f * SEA_S * 0.866));
+            o.uv = (p.xz + SEA_S) * (1.0f / (2.0f * SEA_S));
             o.uv.y = 1.0f - o.uv.y;
         }
         o.normal = 0;
@@ -559,7 +558,7 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
     if (is_terrain) {
         object_id = is_chunk ? object_id - 1000000 : object_id;
         uint chunk_id = is_chunk ? object_id : object_id / 64;
-        float3 chunk_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * (1024*0.866) - (40960*0.866) + (512*0.866));
+        float3 chunk_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * 1024 - 40960 + 512);
         float2 world_pos;
         if (is_chunk) {
             position = 10 * (chunk_position - (camera_position / 10)); // in meters
@@ -569,16 +568,10 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
             uint col = VERTEX_ID / vertices_per_side;        // 0 .. vertices_per_side-1
             // Normalize to [0,1] then scale to the fixed tile size
             float x = (float(col) / float(vertices_per_side - 1)) * TILE_SIZE_CM - (TILE_SIZE_CM / 2);
-            float z = (float(row) / float(vertices_per_side - 1)) * (TILE_SIZE_CM*0.866) - ((TILE_SIZE_CM*0.866) / 2);
+            float z = (float(row) / float(vertices_per_side - 1)) * TILE_SIZE_CM - (TILE_SIZE_CM / 2);
             vertex = 8 * float3(x, 0.0, z);
             world_pos = chunk_position.xz + (vertex.xz / 100.0f);
             uv = chunk_uv_at(world_pos);
-
-            bool odd_row = row % 2 == 1;
-            if (odd_row) {
-                vertex.x -= 8 * ((TILE_SIZE_CM / float(vertices_per_side - 1) / 2));
-            }
-
             float px_size = 1.0f / 640.0f; // offset by
             h = chunk_height_at_uv_px(int2((uv + (px_size / 2)) * 640));
             vertex.y += h;
@@ -595,13 +588,13 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
             vertex.y += h;
         }
         // normal
-        float step_m = 1.0f; float step_cm = step_m * 100.0;
+        float step_m = 100.0f; float step_cm = step_m * 100.0;
         float hL = chunk_height_at_uv(chunk_uv_at(world_pos + float2(-step_m, 0)));
         float hR = chunk_height_at_uv(chunk_uv_at(world_pos + float2( step_m, 0)));
         float hD = chunk_height_at_uv(chunk_uv_at(world_pos + float2(0, -step_m)));
         float hU = chunk_height_at_uv(chunk_uv_at(world_pos + float2(0,  step_m)));
-        float3 dPdx = float3(2.0f * step_cm, hR - hL, 0.0f);
-        float3 dPdz = float3(0.0f, hU - hD, 2.0f * step_cm);
+        float3 dPdx = float3(2.0f * step_cm, (hR - hL)*10.0, 0.0f);
+        float3 dPdz = float3(0.0f, (hU - hD)*10.0, 2.0f * step_cm);
         normal = normalize(cross(dPdz, dPdx));
     } else {
         // unit
@@ -755,14 +748,14 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         // float4 map = TEXTURES[1].Sample(i.uv);
         float2 puv = round(i.uv * 640) / 640; // which quad are we on (not vertex)
         float px_size = 1.0f / 640.0f; // offset by 
-        // o.color.xyz = float3(0.5);
+        o.color.xyz = float3(0.5);
         // o.color.xyz += TEXTURES[2].Sample(i.uv).r;
         // float h = chunk_height_at_uv_fs(i.uv) * 0.00033;
         // if (h <= 2.0) {
         //     o.color = SEA_COLOR + (h * float4(0.1, 0.2, 0.3, 0.0));
         //     i.normal = 0;
         // }
-        // o.color.xyz *= color;
+        o.color.xyz *= color;
         // o.color *= 1.0 - saturate(i.h * 0.00025);
     }
 
@@ -774,14 +767,13 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
     float2 fs_uv = ((i.uv + (px_size / 2)) * 640.0) / 641.0;
 
     if (PUSH_CONSTANTS.mode == SEA_MODE) {
-        float w = 1.0 - TEXTURES[2].Sample(i.uv).b; // coast
+        float w = 1.0 - TEXTURES[2].Sample(fs_uv).b; // coast
         o.color.xyz += w * 5 * float3(0.1, 0.2, 0.3);
     }
 
     if (PUSH_CONSTANTS.mode == MESH_MODE) {
-
         // NORMAL SMOOTH
-        // float px = 1.0f / (641.0f * 2.0); // offset by
+        // float px = 1.0f / (641.0f); // offset by
         // float hTL = chunk_height_at_uv_fs(fs_uv + float2(-px,  px));
         // float hT  = chunk_height_at_uv_fs(fs_uv + float2( 0.0,      px));
         // float hTR = chunk_height_at_uv_fs(fs_uv + float2( px,  px));
@@ -801,75 +793,28 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         // float3 N = normalize(float3(-dHdx, 1.0, -dHdz));
         // i.normal = N;
         
-        // COLOR
-        int2 pi = int2(floor(p));
-        float resolution = 640.0f;
-        float2 v00 = float2(pi) / resolution;
-        // Pick the 3 vertices for *this* triangle
-        float2 a, b, c;
-        float2 a_uv, b_uv, c_uv;
-
         // NORMAL TRIANGLE
-        float h00 = chunk_height_at_uv_px(pi); // this pixel
-        float h11 = chunk_height_at_uv_px(pi + int2(1,1)); // below right
-        float h10 = chunk_height_at_uv_px(pi + int2(1,0)); // to the right
-        float h01 = chunk_height_at_uv_px(pi + int2(0,1)); // below
-        float hm11 = chunk_height_at_uv_px(pi + int2(-1,1)); // below left
-        float sx = 2.0f * 5000.0f;
-        float sz = 2.0f * 5000.0f;
-        float slope_strength = 2.0f;
-        float3 e1, e2;
-        if (flipped_triangle) { // 4 triangles
-            if (odd_row) { // pointing down, row offset to left, 00 is top left vertex, 10 is directly to the right
-                e1 = float3(0.0f, (h01 - h00) * slope_strength, sz);
-                e2 = float3(sx,  (h10 - h00) * slope_strength, 0.0);
-                i.normal = -normalize(cross(e2, e1));
-                a = v00; b = v00 + float2(px_size, 0); c = v00 + float2(px_size * 0.5, px_size);
-                a_uv = v00; b_uv = v00 + float2(px_size, 0); c_uv = v00 + float2(0, px_size);
-            } else { // pointing down, row not offset, 00 is top left vertex, 10 is directly to the right
-                e1 = float3(sx, (h10 - h00) * slope_strength, 0.0f);      // 10 - 00
-                e2 = float3(sx, (h11 - h00) * slope_strength, sz);        // 11 - 00
-                i.normal = normalize(cross(e2, e1));
-                a = v00; b = v00 + float2(px_size, 0); c = v00 + float2(px_size * 0.5, px_size);
-                a_uv = v00; b_uv = v00 + float2(px_size, 0); c_uv = v00 + float2(px_size, px_size);
-            }
-        } else {
-            if (odd_row) { // pointing up, row offset to the left, 10 is top vertex
-                e1 = float3(0.0f,  (h11 - h10) * slope_strength, sz);     // 11 - 10
-                e2 = float3(-sx,   (h01 - h10) * slope_strength, sz);     // 01 - 10  (note -sx)
-                i.normal = normalize(cross(e2, e1));
-                a = v00 + float2(px_size, 0); b = v00 + float2(px_size * 1.5, px_size); c = v00 + float2(px_size * 0.5, px_size);
-                a_uv = v00 + float2(px_size, 0); b_uv = v00 + float2(px_size, px_size); c_uv = v00 + float2(0, px_size);
-            } else { // pointing up, row not offset, 00 is top vertex
-                e1 = float3(0.0f, (h01 - h00) * slope_strength, sz);
-                e2 = float3(sx,  (h11 - h00) * slope_strength, sz);
-                i.normal = -normalize(cross(e2, e1));
-                a = v00; b = v00 + float2(px_size * -0.5, px_size); c = v00 + float2(px_size * 0.5, px_size);
-                a_uv = v00; b_uv = v00 + float2(0, px_size); c_uv = v00 + float2(px_size, px_size);
-            }
-        }
-
-        // bary closest
-        float2 v0 = b_uv - a_uv;
-        float2 v1 = c_uv - a_uv;
-        float2 v2 = i.uv - a_uv;
-
-        float den = v0.x * v1.y - v1.x * v0.y;
-
-        float wB = (v2.x * v1.y - v1.x * v2.y) / den;
-        float wC = (v0.x * v2.y - v2.x * v0.y) / den;
-        float wA = 1.0 - wB - wC;
-
-        // pick max weight
-        int closest = 0;
-        float2 hex_uv = a_uv;
-        float wMax = wA;
-        if (wB > wMax) { wMax = wB; closest = 1; hex_uv = b_uv;}
-        if (wC > wMax) { closest = 2; hex_uv = c_uv;}
-        // if (closest == 0) o.color = float4(1, 0, 0, 1);
-        // if (closest == 1) o.color = float4(0, 1, 0, 1);
-        // if (closest == 2) o.color = float4(0, 0, 1, 1);
-        float4 map = TEXTURES[1].Load(int3(int2((hex_uv + (px_size / 2)) * 640), 0));
+        // int2 pi = int2(p);
+        // float sx = 2.0f * 5000.0f;
+        // float sz = 2.0f * 5000.0f;
+        // float h00 = chunk_height_at_uv_px(pi);
+        // float h11 = chunk_height_at_uv_px(pi + int2(1,1));
+        // bool odd = (primID & 1) != 0;
+        // float3 e1, e2;
+        // if (odd) {
+        //     float h10 = chunk_height_at_uv_px(pi + int2(1,0));
+        //     e1 = float3(sx,  (h10 - h00) * 10.0, 0.0f);   // 00 -> 10
+        //     e2 = float3(sx,  (h11 - h00) * 10.0, sz);     // 00 -> 11
+        //     i.normal = normalize(cross(e2, e1));    // if inverted, use cross(e1,e2)
+        // } else {
+        //     float h01 = chunk_height_at_uv_px(pi + int2(0,1));
+        //     e1 = float3(0.0f, (h01 - h00) * 10.0, sz);    // 00 -> 01
+        //     e2 = float3(sx,   (h11 - h00) * 10.0, sz);    // 00 -> 11
+        //     i.normal = -normalize(cross(e2, e1));    // if inverted, use cross(e1,e2)
+        // }
+        
+        // COLOR
+        float4 map = TEXTURES[1].Load(int3(int2((i.uv + (px_size / 2)) * 640), 0));
         o.color = map;
 
         // QUAD OUTLINES
@@ -891,7 +836,7 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         float px_p = max(fwidth(p.x), fwidth(p.y)); // how much does p change between two pixels
         float enable = smoothstep(0, px_p, t * 2); // 1 when change in grid position for one pixel is smaller than width t
         float mask = enable * saturate(point + outerLine + diagLine); // gradually dissolve the grid
-        o.color.rgb = lerp(o.color.rgb, 1.0.xxx, mask);
+        o.color.rgb = lerp(o.color.rgb, 0.0.xxx, mask);
 
         // slope
         float slope = 1.0 - saturate(dot(i.normal, float3(0,1,0)));
@@ -909,7 +854,7 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         float fill = lerp(AMBIENT, 1.0, sky);
         fill = pow(fill, 1);
         float shade = fill + sun * 1.0; // intensity of the sunlight
-        o.color *= min(1, pow(shade, 2));
+        o.color *= shade;
     }
 
     if (PUSH_CONSTANTS.mode != SKY_MODE && i.object_id == selected_object_id) {
