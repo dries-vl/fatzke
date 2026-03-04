@@ -22,7 +22,7 @@ goto :eof
 
 :build
 echo Building %~1
-toktx --t2 --encode astc --astc_blk_d 6x6 --srgb --genmipmap ^
+toktx --t2 --encode astc --astc_blk_d 4x4 --srgb --genmipmap ^
     "static/win32/%~2.ktx2" "%~1"
 if errorlevel 1 exit /b 1
 
@@ -46,7 +46,7 @@ for img in data/*.png; do
     # Build if output is missing OR input is newer than output
     if [ ! -e "$out" ] || [ "$img" -nt "$out" ]; then
         echo "Building $img"
-        toktx --t2 --encode astc --astc_blk_d 6x6 --srgb --genmipmap \
+        toktx --t2 --encode astc --astc_blk_d 4x4 --srgb --genmipmap \
             "static/linux/${base}.ktx2" "$img"
 
         objcopy \

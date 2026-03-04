@@ -379,10 +379,10 @@ static const float FENCE_S = 2048; // meters
 static const float FENCE_H = 200;   // meters
 static const float SEA_S = 81920 / 2;   // meters
 static const float3 SEA_V[4] = {
-    float3(-SEA_S, 16, -SEA_S),
-    float3( SEA_S, 16, -SEA_S),
-    float3( SEA_S, 16,  SEA_S),
-    float3(-SEA_S, 16,  SEA_S),
+    float3(-SEA_S, 16, -SEA_S * 0.866),
+    float3( SEA_S, 16, -SEA_S * 0.866),
+    float3( SEA_S, 16,  SEA_S * 0.866),
+    float3(-SEA_S, 16,  SEA_S * 0.866),
 };
 static const uint SEA_I[6] = {
     0,1,2, 2,3,0
@@ -425,12 +425,12 @@ static const float PLAYABLE_WIDTH = TILE_WIDTH * TILES_PER_CHUNK * CHUNKS_PLAYAB
 static const float TOTAL_WIDTH = TILE_WIDTH * TILES_PER_CHUNK * CHUNKS_TOTAL;
 static const float VERTEX_WIDTH = TILE_WIDTH / float((MAX_VERTICES >> 2) - 1); // >> 2 because terrain lod is always 2
 float2 terrain_uv_at(float2 worldXZ_m) {
-    float2 uv = (worldXZ_m + (PLAYABLE_WIDTH / 2)) / PLAYABLE_WIDTH;
+    float2 uv = (worldXZ_m + float2(PLAYABLE_WIDTH / 2, (PLAYABLE_WIDTH / 2) * 0.866)) / float2(PLAYABLE_WIDTH, PLAYABLE_WIDTH * 0.866);
     uv = float2(0,1) - float2(-uv.x, uv.y);
     return uv;
 }
 float2 chunk_uv_at(float2 worldXZ_m) {
-    float2 uv = (worldXZ_m + (TOTAL_WIDTH * 0.5f)) / (TOTAL_WIDTH);
+    float2 uv = (worldXZ_m + float2(TOTAL_WIDTH * 0.5f, TOTAL_WIDTH * 0.5f * 0.866)) / float2(TOTAL_WIDTH, TOTAL_WIDTH * 0.866);
     uv = float2(0, 1) - float2(-uv.x, uv.y);
     return uv;
 }
@@ -535,7 +535,7 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
         o.pos = float4(proj_scale_x * vx, proj_scale_y * vy, near_plane, vz);
         o.uv = 0;
         if (PUSH_CONSTANTS.mode == SEA_MODE) {
-            o.uv = (p.xz + SEA_S) * (1.0f / (2.0f * SEA_S));
+            o.uv = (p.xz + float2(SEA_S, SEA_S * 0.866)) * (1.0f / (2.0f * SEA_S * 0.866));
             o.uv.y = 1.0f - o.uv.y;
         }
         o.normal = 0;
@@ -559,7 +559,7 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
     if (is_terrain) {
         object_id = is_chunk ? object_id - 1000000 : object_id;
         uint chunk_id = is_chunk ? object_id : object_id / 64;
-        float3 chunk_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * 1024 - 40960 + 512);
+        float3 chunk_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * (1024*0.866) - (40960*0.866) + (512*0.866));
         float2 world_pos;
         if (is_chunk) {
             position = 10 * (chunk_position - (camera_position / 10)); // in meters
@@ -569,7 +569,7 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
             uint col = VERTEX_ID / vertices_per_side;        // 0 .. vertices_per_side-1
             // Normalize to [0,1] then scale to the fixed tile size
             float x = (float(col) / float(vertices_per_side - 1)) * TILE_SIZE_CM - (TILE_SIZE_CM / 2);
-            float z = (float(row) / float(vertices_per_side - 1)) * TILE_SIZE_CM - (TILE_SIZE_CM / 2);
+            float z = (float(row) / float(vertices_per_side - 1)) * (TILE_SIZE_CM*0.866) - ((TILE_SIZE_CM*0.866) / 2);
             vertex = 8 * float3(x, 0.0, z);
             world_pos = chunk_position.xz + (vertex.xz / 100.0f);
             uv = chunk_uv_at(world_pos);
@@ -896,7 +896,7 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         // slope
         float slope = 1.0 - saturate(dot(i.normal, float3(0,1,0)));
         float slope_shade = 1.0 - slope * 1.0; // last 1.0 is 0.0 to 1.0 weak to strong effect
-        // if (slope > 0.05) o.color *= 0.1;
+        // if (slope > 0.08) o.color *= 0.1;
         // o.color *= slope_shade;
 
         // lighting
@@ -909,7 +909,7 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         float fill = lerp(AMBIENT, 1.0, sky);
         fill = pow(fill, 1);
         float shade = fill + sun * 1.0; // intensity of the sunlight
-        // o.color *= min(1, pow(shade, 2));
+        o.color *= min(1, pow(shade, 2));
     }
 
     if (PUSH_CONSTANTS.mode != SKY_MODE && i.object_id == selected_object_id) {
