@@ -760,6 +760,7 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
     }
 
     float2 p = i.uv * 640; // which quad are we on (not vertex)
+    if (!i.is_chunk) p *= 8;
     bool odd_row = (int(p.y) % 2) != 0; // offset row or not
     bool flipped_triangle = (primID % 2) != 0; // triangle is pointing down if true, up if false
 
