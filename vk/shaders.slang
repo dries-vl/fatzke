@@ -1,4 +1,4 @@
-static const float PI                 = 3.14560265359f;                       // π constant for degree→radian conversions
+static const float PI                 = 3.1415926535f;                       // π constant for degree→radian conversions
 static const float fov_y_radians      = 60.0f * PI / 180.0f;                  // vertical field of view in radians (60°)
 static const float proj_scale_y       = 1.0f / tan(fov_y_radians * 0.5f);     // cot(FoV/2), projection scale factor for Y
 static const float aspect_ratio       = 16.0f / 9.0f;                         // screen aspect ratio (width / height)
@@ -85,31 +85,50 @@ uint choose_lod_step(float distance, float radius) {
     return 0;
 }
 
-// 1px = 2km, 1 tile = 16km
-// 40km world map -> 20,000px x 10,000px
-//                -> 2500 tiles x 1250 tiles
+static const float SEA_LEVEL = 64.0f;
+static const float TILE_WIDTH = 128.0;
+static const float TILES_PER_CHUNK = 8.0; // width
+static const float CHUNKS_PLAYABLE = 4.0; // width
+static const float CHUNKS_TOTAL = 80.0; // width
+static const float PLAYABLE_WIDTH = TILE_WIDTH * TILES_PER_CHUNK * CHUNKS_PLAYABLE;
+static const float TOTAL_WIDTH = TILE_WIDTH * TILES_PER_CHUNK * CHUNKS_TOTAL;
+static const float VERTEX_WIDTH = TILE_WIDTH / float((MAX_VERTICES >> 2) - 1); // >> 2 because terrain lod is always 2
+
 float terrain_height_at_uv(float2 uv) {
     return TEXTURES[5].SampleLevel(uv, 0).x * 5000000.0f // height
     - (TEXTURES[5].SampleLevel(uv, 1).b - 0.25) * 10000.0f; // coast
 }
-float chunk_height_at_uv(float2 uv) {
-    float h = TEXTURES[2].SampleLevel(uv, 0).x; // height
-    float w = TEXTURES[2].SampleLevel(uv, 0).b; // coast
-    return (h * 600000.0f) + (step(w, 0.001) * 2000.0f);
+
+float2 chunk_uv_at(float2 worldXZ_m) {
+    float2 uv = (worldXZ_m + float2(TOTAL_WIDTH * 0.5f, TOTAL_WIDTH * 0.5f)) / float2(TOTAL_WIDTH, TOTAL_WIDTH);
+    uv = float2(0, 1) - float2(-uv.x, uv.y);
+    return uv;
 }
-float chunk_height_at_uv_fs(float2 uv) {
-    float h = TEXTURES[2].Sample(uv).x; // height
-    float w = TEXTURES[2].Sample(uv).b; // coast
-    return (h * 600000.0f) + (step(w, 0.001) * 2000.0f);
-}
-float chunk_height_at_uv_px(int2 px) {
-    float h = TEXTURES[2].Load(int3(px, 0)).x; // height
-    float w = TEXTURES[2].Load(int3(px, 0)).b; // coast
-    return (h * 600000.0f) + (step(w, 0.001) * 2000.0f);
-}
-float chunk_height_at_uv_px_2(int2 px) {
-    return TEXTURES[2].Load(int3(px, 0)).x * 1000000.0f // height
-    - (TEXTURES[2].Load(int3(px, 0)).b - 0.5) * 10000.0f; // coast
+
+float chunk_height_at_uv(float2 uv, bool fs) {
+    float h, detail;
+    if (fs) {
+        h = TEXTURES[2].Sample(uv).x * 1000000.0f;
+        detail = TEXTURES[4].Sample(uv).x;
+    } else {
+        h = TEXTURES[2].SampleLevel(uv, 0).x * 1000000.0f;
+        detail = TEXTURES[4].SampleLevel(uv, 0).x;
+    }
+    // optional micro detail
+    h += (detail - 0.25f) * 1000.0f;
+    // sea plane height in same units as h
+    // signed height relative to sea
+    float d = h - SEA_LEVEL;
+    // beach band width
+    float beachWidth = 4000.0f;
+    // 0 at sea level edge, 1 away from coast, symmetric
+    float coast = saturate(abs(d) / beachWidth);
+    // strongest exactly near coast, fades away inland and offshore
+    float beachShape = 1.0f - coast;
+    beachShape = beachShape * beachShape;
+    // flatten coast slightly into a gentler transition
+    h -= beachShape * 2000.0f;
+    return h;
 }
 
 static const uint bucket_size = 2; // size in meters of each bucket ~2mx2m
@@ -229,23 +248,11 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         if (is_chunk_object) {
             object_id = chunk_id * 64;
             chunk_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * 1024 - 40960 + 512);
-            float2 uv0 = (chunk_position.xz + (TOTAL_WIDTH * 0.5f)) / (TOTAL_WIDTH);
-            uv0 = float2(0,1) - float2(-uv0.x, uv0.y);
-            float height = TEXTURES[2].SampleLevel(uv0, 0).x * 1000.0f
-            + (TEXTURES[4].SampleLevel(uv0, 0).x - 0.25) * 10.0f
-            - (TEXTURES[2].SampleLevel(uv0, 1).b - 0.5) * 50.0f;
-            chunk_position.y += height;
             position = chunk_position - (camera_position / 10); // in meters
         } else if (object_type == TERRAIN) {
             chunk_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * 1024 - 40960 + 512);
             float3 object_position = float3(int(id_within_chunk / 8) * 128 - 512 + 64, 0, int(id_within_chunk % 8) * 128 - 512 + 64);
             object_position += chunk_position;
-            float2 uv0 = (object_position.xz + (TOTAL_WIDTH * 0.5f)) / (TOTAL_WIDTH);
-            uv0 = float2(0,1) - float2(-uv0.x, uv0.y);
-            float height = TEXTURES[5].SampleLevel(uv0, 0).x * 1000.0f
-            + (TEXTURES[4].SampleLevel(uv0, 0).x - 0.25) * 10.0f
-            - (TEXTURES[5].SampleLevel(uv0, 1).b - 0.5) * 50.0f;
-            object_position.y += height;
             position = object_position - (camera_position / 10); // in meters
         } else if (object_type == UNIT) {
             object object = OBJECTS[object_id]; // 8 bytes
@@ -379,10 +386,10 @@ static const float FENCE_S = 2048; // meters
 static const float FENCE_H = 200;   // meters
 static const float SEA_S = 81920 / 2;   // meters
 static const float3 SEA_V[4] = {
-    float3(-SEA_S, 16, -SEA_S),
-    float3( SEA_S, 16, -SEA_S),
-    float3( SEA_S, 16,  SEA_S),
-    float3(-SEA_S, 16,  SEA_S),
+    float3(-SEA_S, SEA_LEVEL, -SEA_S),
+    float3( SEA_S, SEA_LEVEL, -SEA_S),
+    float3( SEA_S, SEA_LEVEL,  SEA_S),
+    float3(-SEA_S, SEA_LEVEL,  SEA_S),
 };
 static const uint SEA_I[6] = {
     0,1,2, 2,3,0
@@ -405,34 +412,6 @@ static const uint FENCE_I[24] = {
 };
 
 static const uint MAX_VERTICES = 32u;
-static const float TILE_SIZE_CM = 128.0 * 100.0; // in cm
-float3 plane_position(uint VERTEX_ID, uint grid_scale) {
-    uint vertices_per_side = (MAX_VERTICES >> grid_scale) + 1;     // 32, 16, 8, 4, 2 (ie. scale 6 becomes 2 -> quad)
-    uint row = VERTEX_ID % vertices_per_side;        // 0 .. vertices_per_side-1
-    uint col = VERTEX_ID / vertices_per_side;        // 0 .. vertices_per_side-1
-    // Normalize to [0,1] then scale to the fixed tile size
-    float x = (float(col) / float(vertices_per_side - 1)) * TILE_SIZE_CM - (TILE_SIZE_CM / 2);
-    float z = (float(row) / float(vertices_per_side - 1)) * TILE_SIZE_CM - (TILE_SIZE_CM / 2);
-    return float3(x, 0.0, z);
-}
-
-static const float TILE_WIDTH = 128.0;
-static const float TILES_PER_CHUNK = 8.0; // width
-static const float CHUNKS_PLAYABLE = 4.0; // width
-static const float CHUNKS_TOTAL = 80.0; // width
-static const float PLAYABLE_WIDTH = TILE_WIDTH * TILES_PER_CHUNK * CHUNKS_PLAYABLE;
-static const float TOTAL_WIDTH = TILE_WIDTH * TILES_PER_CHUNK * CHUNKS_TOTAL;
-static const float VERTEX_WIDTH = TILE_WIDTH / float((MAX_VERTICES >> 2) - 1); // >> 2 because terrain lod is always 2
-float2 terrain_uv_at(float2 worldXZ_m) {
-    float2 uv = (worldXZ_m + float2(PLAYABLE_WIDTH / 2, (PLAYABLE_WIDTH / 2))) / float2(PLAYABLE_WIDTH, PLAYABLE_WIDTH);
-    uv = float2(0,1) - float2(-uv.x, uv.y);
-    return uv;
-}
-float2 chunk_uv_at(float2 worldXZ_m) {
-    float2 uv = (worldXZ_m + float2(TOTAL_WIDTH * 0.5f, TOTAL_WIDTH * 0.5f)) / float2(TOTAL_WIDTH, TOTAL_WIDTH);
-    uv = float2(0, 1) - float2(-uv.x, uv.y);
-    return uv;
-}
 // returns UVs of the 3 terrain vertices of the triangle under the point
 float terrain_height_at(float2 worldXZ_m) {
     float2 p = worldXZ_m + (PLAYABLE_WIDTH / 2);            // [0..4096)
@@ -455,20 +434,20 @@ float terrain_height_at(float2 worldXZ_m) {
     float2 uvA, uvB, uvC;
     // choose which tri (diagonal split consistent with a regular grid)
     if (f.x + f.y <= 1.0) {
-        uvA = terrain_uv_at(p00);
-        uvB = terrain_uv_at(p10);
-        uvC = terrain_uv_at(p01);
+        uvA = chunk_uv_at(p00);
+        uvB = chunk_uv_at(p10);
+        uvC = chunk_uv_at(p01);
         // weights would be: (1-fx-fy, fx, fy) for (A,B,C)
     } else {
-        uvA = terrain_uv_at(p11);
-        uvB = terrain_uv_at(p01);
-        uvC = terrain_uv_at(p10);
+        uvA = chunk_uv_at(p11);
+        uvB = chunk_uv_at(p01);
+        uvC = chunk_uv_at(p10);
         // weights would be: (fx+fy-1, 1-fx, 1-fy) for (A,B,C) in (A,B,C) order
     }
     // sample heights at the three terrain vertices
-    float hA = terrain_height_at_uv(uvA);
-    float hB = terrain_height_at_uv(uvB);
-    float hC = terrain_height_at_uv(uvC);
+    float hA = chunk_height_at_uv(uvA, false);
+    float hB = chunk_height_at_uv(uvB, false);
+    float hC = chunk_height_at_uv(uvC, false);
     // barycentric interpolation (same split rule as helper)
     float height;
     if (f.x + f.y <= 1.0) {
@@ -485,6 +464,14 @@ float terrain_height_at(float2 worldXZ_m) {
     return height;
 }
 
+bool at_battle_map_edge(float2 world_pos) {
+    bool seam_west  = abs(world_pos.x + PLAYABLE_WIDTH/2) < 16;
+    bool seam_east  = abs(world_pos.x - PLAYABLE_WIDTH/2) < 16;
+    bool seam_north = abs(world_pos.y + PLAYABLE_WIDTH/2) < 16; // if world_pos is float2(x,z), use .y for z
+    bool seam_south = abs(world_pos.y - PLAYABLE_WIDTH/2) < 16;
+    return seam_west || seam_east || seam_north || seam_south;
+}
+
 struct vs_out {
     float4 pos    : SV_Position;                                           // clip-space position
     float2 uv     : TEXCOORD0;                                             // texture coordinates
@@ -492,6 +479,7 @@ struct vs_out {
     bool is_chunk : TEXCOORD2;
     uint object_id : TEXCOORD3;
     float h : TEXCOORD4;
+    float2 world_pos: TEXCOORD5;
 };
 
 [shader("vertex")]
@@ -509,8 +497,11 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
         float2 ndc = p * 0.5f + 0.5f;
         o.uv = float2(ndc.x, 1.0 - ndc.y);
         if (PUSH_CONSTANTS.mode == UI_MODE) o.pos.z = 1.0; // ui on top of everything
+        o.world_pos = 0;
         return o;
-    } else if (PUSH_CONSTANTS.mode == FENCE_MODE || PUSH_CONSTANTS.mode == SEA_MODE) { // fence and sea
+    } 
+    
+    if (PUSH_CONSTANTS.mode == FENCE_MODE || PUSH_CONSTANTS.mode == SEA_MODE) { // fence and sea
         float3 p;
         if (PUSH_CONSTANTS.mode == FENCE_MODE)
             p = FENCE_V[FENCE_I[VERTEX_ID]];
@@ -519,7 +510,7 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
             p.y += 0.1 * sin(time);
         }
         float3 d = p - (camera_position / 10.0);
-        // yaw + pitch (same math as rest of engine)
+        // yaw + pitch
         float zYaw = camera_yaw_sin * d.x + camera_yaw_cos * d.z;
         float3 vM = float3(
             camera_yaw_cos   * d.x - camera_yaw_sin   * d.z,
@@ -538,6 +529,7 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
             o.uv.y = 1.0f - o.uv.y;
         }
         o.normal = 0;
+        o.world_pos = p.xz;
         o.object_id = 900000000u; // optional pick id
         return o;
     }
@@ -548,21 +540,22 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
     float3 position;
     float3 vertex;
     float3 normal;
+    float2 world_pos = float2(0.0, 0.0);
     float h = 0.0;
     float2 uv;
+    float px_size = 1.0f / 641.0f;
 
     // draw id is essentially just the mesh id in this case
     uint object_id = INSTANCE.object_id;
     bool is_chunk = object_id > 1000000;
     bool is_terrain = DRAW_ID < 5; // first five draw ids are the five terrain lod levels
+    static const float TILE_SIZE_CM = 128.0 * 100.0; // in cm
     if (is_terrain) {
         object_id = is_chunk ? object_id - 1000000 : object_id;
         uint chunk_id = is_chunk ? object_id : object_id / 64;
         float3 chunk_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * 1024 - 40960 + 512);
-        float2 world_pos;
         if (is_chunk) {
             position = 10 * (chunk_position - (camera_position / 10)); // in meters
-            
             uint vertices_per_side = (MAX_VERTICES >> DRAW_ID) + 1;     // 32, 16, 8, 4, 2 (ie. scale 6 becomes 2 -> quad)
             uint row = VERTEX_ID % vertices_per_side;        // 0 .. vertices_per_side-1
             uint col = VERTEX_ID / vertices_per_side;        // 0 .. vertices_per_side-1
@@ -572,29 +565,36 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
             vertex = 8 * float3(x, 0.0, z);
             world_pos = chunk_position.xz + (vertex.xz / 100.0f);
             uv = chunk_uv_at(world_pos);
-            float px_size = 1.0f / 640.0f; // offset by
-            h = chunk_height_at_uv_px(int2((uv + (px_size / 2)) * 640));
+            h = chunk_height_at_uv(uv + (px_size / 2), false);
             vertex.y += h;
         } else {
             uint id_within_chunk = object_id - (chunk_id * 64);
             float3 object_position = float3(int(id_within_chunk / 8) * 128 - 512 + 64, 0, int(id_within_chunk % 8) * 128 - 512 + 64);
             object_position += chunk_position;
             position = 10 * (object_position - (camera_position / 10)); // in meters
-            vertex = plane_position(VERTEX_ID, DRAW_ID);                // in cm
+            uint vertices_per_side = (MAX_VERTICES >> DRAW_ID) + 1;     // 32, 16, 8, 4, 2 (ie. scale 6 becomes 2 -> quad)
+            uint row = VERTEX_ID % vertices_per_side;        // 0 .. vertices_per_side-1
+            uint col = VERTEX_ID / vertices_per_side;        // 0 .. vertices_per_side-1
+            // Normalize to [0,1] then scale to the fixed tile size
+            float x = (float(col) / float(vertices_per_side - 1)) * TILE_SIZE_CM - (TILE_SIZE_CM / 2);
+            float z = (float(row) / float(vertices_per_side - 1)) * TILE_SIZE_CM - (TILE_SIZE_CM / 2);
+            vertex = float3(x, 0.0, z);
             world_pos = object_position.xz + (vertex.xz / 100.0f);
             uv = chunk_uv_at(world_pos);
-            float px_size = 1.0f / 640.0f; // offset by
-            h = chunk_height_at_uv(uv + (px_size / 2));
+            h = chunk_height_at_uv(uv + (px_size / 2), false);
+            if (at_battle_map_edge(world_pos)) h += 1000.0; // RAISE THE EDGE TO HIDE SEAMS AND CREATE BARRIER
             vertex.y += h;
         }
         // normal
-        float step_m = 100.0f; float step_cm = step_m * 100.0;
-        float hL = chunk_height_at_uv(chunk_uv_at(world_pos + float2(-step_m, 0)));
-        float hR = chunk_height_at_uv(chunk_uv_at(world_pos + float2( step_m, 0)));
-        float hD = chunk_height_at_uv(chunk_uv_at(world_pos + float2(0, -step_m)));
-        float hU = chunk_height_at_uv(chunk_uv_at(world_pos + float2(0,  step_m)));
-        float3 dPdx = float3(2.0f * step_cm, (hR - hL)*10.0, 0.0f);
-        float3 dPdz = float3(0.0f, (hU - hD)*10.0, 2.0f * step_cm);
+        float texel = 1.0 / 641.0;
+        float hL = chunk_height_at_uv(uv + float2(-texel,0), false);
+        float hR = chunk_height_at_uv(uv + float2( texel,0), false);
+        float hD = chunk_height_at_uv(uv + float2(0,-texel), false);
+        float hU = chunk_height_at_uv(uv + float2(0, texel), false);
+        float dx = TOTAL_WIDTH / 640.0 * 100.0;   // convert meters → cm to match vertex space
+        float dz = dx;
+        float3 dPdx = float3(2.0*dx, hR - hL, 0.0);
+        float3 dPdz = float3(0.0, hU - hD, 2.0*dz);
         normal = normalize(cross(dPdz, dPdx));
     } else {
         // unit
@@ -603,6 +603,7 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
         int rank = object_id % 64;
         float2 formation = float2(rank % 8, rank / 8) * /*spacing*/ 10.0f;
         float3 object_position = float3(formation.x, 0, formation.y);
+        world_pos = object_position.xz;
         position = object_position - camera_position;
         float object_yaw_cos = float(object.cos) * divide_by_127;
         float object_yaw_sin = float(object.sin) * divide_by_127;
@@ -687,7 +688,23 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
     o.is_chunk = is_chunk;
     o.object_id = INSTANCE.object_id;
     o.h = h;
+    o.world_pos = world_pos;
     return o;
+}
+
+// 4x4 Bayer ordered dither threshold in [0,1)
+float Bayer4x4(uint2 p) {
+    uint x = p.x & 3;
+    uint y = p.y & 3;
+
+    // Values 0..15 laid out as a 4x4 Bayer matrix
+    uint b =
+        (y == 0) ? ((x==0)? 0 : (x==1)?  8 : (x==2)?  2 : 10) :
+        (y == 1) ? ((x==0)?12 : (x==1)?  4 : (x==2)? 14 :  6) :
+        (y == 2) ? ((x==0)? 3 : (x==1)? 11 : (x==2)?  1 :  9) :
+                   ((x==0)?15 : (x==1)?  7 : (x==2)? 13 :  5);
+
+    return (b + 0.5) / 16.0;
 }
 
 // idea: deterministic hash based on object id -> 0 or 1
@@ -703,10 +720,9 @@ struct ps_out {
     float4 color : SV_Target0; // normal color
     uint   id    : SV_Target1; // object ID
 };
-static const float3 LIGHT_DIR = normalize(float3(1.0, 0.8, 0.0)); // points *from surface to light*
-static const float4 SKY_COLOR = float4(0.3, 0.5, 1.0, 1.0);
+static const float3 LIGHT_DIR = normalize(float3(0.0, 0.95, -1.0)); // points *from surface to light*
+static const float4 SKY_COLOR = float4(0.55, 0.65, 0.85, 1.0);
 static const float4 SEA_COLOR = float4(0.0, 0.2, 0.7, 1.0);
-static const float AMBIENT = 0.3;
 [shader("fragment")]
 ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
     ps_out o;
@@ -747,15 +763,42 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         
         // float4 map = TEXTURES[1].Sample(i.uv);
         float2 puv = round(i.uv * 640) / 640; // which quad are we on (not vertex)
-        float px_size = 1.0f / 640.0f; // offset by 
-        o.color.xyz = float3(0.5);
+        float px_size = 1.0f / 640.0f;        // offset by
+        
+        // LAND COLOR
+        {
+            // o.color.xyz = float3(0.5);
+            float h = i.h / 100.0f;              // same units as your ddx/ddy normal test
+            float d = h - SEA_LEVEL;
+            // masks
+            float underwater = 1.0f - smoothstep(-40.0f,   0.0f, d);
+            float shallow    = 1.0f - smoothstep(-100.0f, -5.0f, d);
+            float wet        = 1.0f - smoothstep(   0.0f,  20.0f, d);
+            float land       =        smoothstep( -5.0f,  40.0f, d);
+            float beach      =        smoothstep(  -2.0f,  17.0f, d) * (1.0f - smoothstep(40.0f, 90.0f, d));
+            float3 sand  = float3(0.78, 0.74, 0.62);
+            float3 grass = float3(0.30, 0.42, 0.24);
+            float3 rock  = float3(0.42, 0.40, 0.38);
+            float slope = 1.0f - saturate(i.normal.y);
+            float rockiness = smoothstep(0.05f, 0.25f, slope);
+            float3 landColor = lerp(sand, grass, land);
+            landColor *= lerp(0.35.xxx, 1.0.xxx, 1.0 - wet);
+            landColor = lerp(landColor, float3(0.10, 0.24, 0.34), shallow * 0.75);
+            landColor = lerp(landColor, sand, beach * 0.85);
+            float3 terrainColor = lerp(landColor, rock, rockiness);
+            o.color.rgb = terrainColor;
+        }
+
+        // COLOR THE EDGE RED
+        if (at_battle_map_edge(i.world_pos) && !i.is_chunk) o.color.r = 1.0;
+
         // o.color.xyz += TEXTURES[2].Sample(i.uv).r;
         // float h = chunk_height_at_uv_fs(i.uv) * 0.00033;
         // if (h <= 2.0) {
         //     o.color = SEA_COLOR + (h * float4(0.1, 0.2, 0.3, 0.0));
         //     i.normal = 0;
         // }
-        o.color.xyz *= color;
+        // o.color.xyz *= color;
         // o.color *= 1.0 - saturate(i.h * 0.00025);
     }
 
@@ -768,8 +811,16 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
     float2 fs_uv = ((i.uv + (px_size / 2)) * 640.0) / 641.0;
 
     if (PUSH_CONSTANTS.mode == SEA_MODE) {
-        float w = 1.0 - TEXTURES[2].Sample(fs_uv).b; // coast
-        o.color.xyz += w * 5 * float3(0.1, 0.2, 0.3);
+        float terrainH = chunk_height_at_uv(i.uv + (px_size / 2), true) / 100.0f;
+        float depth = max(0.0f, SEA_LEVEL - terrainH);
+        float shallowW = 1.0f - smoothstep(0.0f, 40.0f, depth);
+        float deepW    = smoothstep(10.0f, 120.0f, depth);
+        float3 shallowColor = float3(0.22, 0.48, 0.50);
+        float3 deepColor    = float3(0.02, 0.10, 0.22);
+        float3 waterColor = lerp(shallowColor, deepColor, deepW);
+        float foam = 1.0f - smoothstep(0.0f, 24.0f, depth);
+        waterColor = lerp(waterColor, float3(0.92, 0.95, 0.98), foam * 0.9);
+        o.color.rgb = waterColor;
     }
 
     if (PUSH_CONSTANTS.mode == MESH_MODE) {
@@ -815,8 +866,8 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         // }
         
         // COLOR
-        float4 map = TEXTURES[1].Load(int3(int2((i.uv + (px_size / 2)) * 640), 0));
-        o.color = map;
+        // float4 map = TEXTURES[1].Sample(i.uv + (px_size / 2));
+        // o.color = map;
 
         // QUAD OUTLINES
         float2 f = frac(p);
@@ -840,29 +891,41 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         o.color.rgb = lerp(o.color.rgb, 0.0.xxx, mask);
 
         // slope
-        float slope = 1.0 - saturate(dot(i.normal, float3(0,1,0)));
-        float slope_shade = 1.0 - slope * 1.0; // last 1.0 is 0.0 to 1.0 weak to strong effect
+        // float slope = 1.0 - saturate(dot(i.normal, float3(0,1,0)));
+        // float slope_shade = 1.0 - slope * 1.0; // last 1.0 is 0.0 to 1.0 weak to strong effect
         // if (slope > 0.08) o.color *= 0.1;
         // o.color *= slope_shade;
+        
+        // debug frag normal (replace with vertex normal later)
+        // float3 P = float3(i.world_pos.x, i.h / 100.0f, i.world_pos.y); // h is 100x 
+        // float3 N = normalize(cross(ddx(P), ddy(P)));   // or swap if upside down
+        // if (N.y < 0.0) N = -N; // force upward-facing terrain
+        float3 N = i.normal;
 
         // lighting
-        float ndl = saturate(dot(i.normal, LIGHT_DIR));
-        float wrap = 0.1;
-        float sun = saturate((ndl + wrap) / (1.0 + wrap));
-        float contrast = 0.3;                     // 0..1
-        sun = lerp(sun, sun * sun, contrast);      // pushes midtones down, keeps 0 and 1 fixed
-        float sky = saturate(i.normal.z * 0.5 + 0.5);
-        float fill = lerp(AMBIENT, 1.0, sky);
-        fill = pow(fill, 1);
-        float shade = fill + sun * 1.0; // intensity of the sunlight
-        o.color *= shade;
+        // sun
+        float ndl = saturate(dot(N, LIGHT_DIR));
+        float sun = ndl * ndl;
+        float up = saturate(N.y * 0.5 + 0.5);
+        float3 skyLight = lerp(float3(0.35,0.36,0.38), SKY_COLOR.rgb, up);
+        float down = saturate(-N.y * 0.5 + 0.5);
+        float3 bounce = float3(0.18,0.16,0.14) * down * 0.3;
+        float slope = 1.0 - saturate(N.y);
+        float slopeOcc = 1.0 - slope * 0.35;
+        float3 light = skyLight * 0.6 + bounce + sun * float3(1.0,0.96,0.9) * 1.2;
+        o.color.rgb *= light * slopeOcc;
     }
 
     if (PUSH_CONSTANTS.mode != SKY_MODE && i.object_id == selected_object_id) {
         o.color.xyz += float3(0.2);
     }
-    float fog_t = saturate((max(0.0f,(1.0f/i.pos.w)*0.01f) - 40000.0f) * (1.0f/15000.0f));
-    fog_t = fog_t * fog_t * (3.0f - 2.0f * fog_t); // smoothstep
-    o.color = lerp(o.color, SKY_COLOR, fog_t);
+    // fade to fog at distance to avoid cutoff, seems like it continues further
+    // todo: we want to have the actual sky there instead of the fog
+    float d = length(i.world_pos.xy);
+    float fog_t = smoothstep(10000.0f, 81920.0f / 2.0f, d);
+    // uint2 pix = (uint2)i.pos.xy;
+    // float t   = Bayer4x4(pix);
+    // clip((1.0 - fog_t) - t); // dither
+    o.color = lerp(o.color, SKY_COLOR, fog_t); // later just use same calculation for sky color by starting from pixel location
     return o;
 }
