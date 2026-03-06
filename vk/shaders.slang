@@ -94,11 +94,6 @@ static const float PLAYABLE_WIDTH = TILE_WIDTH * TILES_PER_CHUNK * CHUNKS_PLAYAB
 static const float TOTAL_WIDTH = TILE_WIDTH * TILES_PER_CHUNK * CHUNKS_TOTAL;
 static const float VERTEX_WIDTH = TILE_WIDTH / float((MAX_VERTICES >> 2) - 1); // >> 2 because terrain lod is always 2
 
-float terrain_height_at_uv(float2 uv) {
-    return TEXTURES[5].SampleLevel(uv, 0).x * 5000000.0f // height
-    - (TEXTURES[5].SampleLevel(uv, 1).b - 0.25) * 10000.0f; // coast
-}
-
 float2 chunk_uv_at(float2 worldXZ_m) {
     float2 uv = (worldXZ_m + float2(TOTAL_WIDTH * 0.5f, TOTAL_WIDTH * 0.5f)) / float2(TOTAL_WIDTH, TOTAL_WIDTH);
     uv = float2(0, 1) - float2(-uv.x, uv.y);
@@ -131,6 +126,11 @@ float chunk_height_at_uv(float2 uv, bool fs) {
     return h;
 }
 
+float3 get_camera_position() {
+    float2 uv = chunk_uv_at(camera_position.xz / 10); // camera is in dm -> convert to m
+    return camera_position + float3(0, chunk_height_at_uv(uv, false) / 10, 0); // chunk height is in cm -> convert to dm
+}
+
 static const uint bucket_size = 2; // size in meters of each bucket ~2mx2m
 static const uint map_size = 4096; // 4096m
 static const uint buckets_width = map_size / bucket_size;
@@ -161,11 +161,11 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
             if (terrain_chunk) {
                 // assuming each tile is 1024m wide, and we use meters instead of dm now
                 chunk_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * 1024 - 40960 + 512);
-                delta_position = chunk_position - (camera_position / 10); // in meters
+                delta_position = chunk_position - (get_camera_position() / 10); // in meters
             } else {
                 object object = OBJECTS[chunk_id * 64];    // 8 bytes
                 chunk_position = float3(object.x, object.y, object.z);
-                delta_position = chunk_position - camera_position;
+                delta_position = chunk_position - get_camera_position();
             }
             // frustum
             float position_yaw_z =  camera_yaw_sin * delta_position.x + camera_yaw_cos * delta_position.z; // apply yaw to Z
@@ -245,6 +245,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         object_type object_type = CHUNKS[chunk_id].object_type;
         float3 position = float3(0);
         float3 chunk_position = float3(0);
+        // todo: this code is totally busted, changing minor things makes terrain disappear; memory issue in prefix pass (?)
         if (is_chunk_object) {
             object_id = chunk_id * 64;
             chunk_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * 1024 - 40960 + 512);
@@ -262,7 +263,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
             float2 object_position = formation;
             float2 uv0 = ((object_position.xy / 10) + (128.0f * 8.0f * 4.0f * 0.5f)) / (128.0f * 8.0f * 4.0f);
             uv0 = float2(0,1) - float2(-uv0.x, uv0.y);
-            float height = terrain_height_at_uv(uv0) / 10;
+            float height = (TEXTURES[5].SampleLevel(uv0, 0).x * 5000000.0f - (TEXTURES[5].SampleLevel(uv0, 1).b - 0.25) * 10000.0f) / 10;
             position = float3(object_position.x, height, object_position.y) - camera_position;
         }
         float position_yaw_z = camera_yaw_sin * position.x + camera_yaw_cos * position.z; // apply yaw to Z
@@ -507,9 +508,9 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
             p = FENCE_V[FENCE_I[VERTEX_ID]];
         else {
             p = SEA_V[SEA_I[VERTEX_ID]];
-            p.y += 0.1 * sin(time);
+            p.y += 5.0 * sin(time);
         }
-        float3 d = p - (camera_position / 10.0);
+        float3 d = p - (get_camera_position() / 10.0);
         // yaw + pitch
         float zYaw = camera_yaw_sin * d.x + camera_yaw_cos * d.z;
         float3 vM = float3(
@@ -555,7 +556,7 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
         uint chunk_id = is_chunk ? object_id : object_id / 64;
         float3 chunk_position = float3(int(chunk_id / 80) * 1024 - 40960 + 512, 0, int(chunk_id % 80) * 1024 - 40960 + 512);
         if (is_chunk) {
-            position = 10 * (chunk_position - (camera_position / 10)); // in meters
+            position = 10 * (chunk_position - (get_camera_position() / 10)); // in meters
             uint vertices_per_side = (MAX_VERTICES >> DRAW_ID) + 1;     // 32, 16, 8, 4, 2 (ie. scale 6 becomes 2 -> quad)
             uint row = VERTEX_ID % vertices_per_side;        // 0 .. vertices_per_side-1
             uint col = VERTEX_ID / vertices_per_side;        // 0 .. vertices_per_side-1
@@ -571,7 +572,7 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
             uint id_within_chunk = object_id - (chunk_id * 64);
             float3 object_position = float3(int(id_within_chunk / 8) * 128 - 512 + 64, 0, int(id_within_chunk % 8) * 128 - 512 + 64);
             object_position += chunk_position;
-            position = 10 * (object_position - (camera_position / 10)); // in meters
+            position = 10 * (object_position - (get_camera_position() / 10)); // in meters
             uint vertices_per_side = (MAX_VERTICES >> DRAW_ID) + 1;     // 32, 16, 8, 4, 2 (ie. scale 6 becomes 2 -> quad)
             uint row = VERTEX_ID % vertices_per_side;        // 0 .. vertices_per_side-1
             uint col = VERTEX_ID / vertices_per_side;        // 0 .. vertices_per_side-1
@@ -604,7 +605,7 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
         float2 formation = float2(rank % 8, rank / 8) * /*spacing*/ 10.0f;
         float3 object_position = float3(formation.x, 0, formation.y);
         world_pos = object_position.xz;
-        position = object_position - camera_position;
+        position = object_position - get_camera_position();
         float object_yaw_cos = float(object.cos) * divide_by_127;
         float object_yaw_sin = float(object.sin) * divide_by_127;
         uint packed_anim = INSTANCE.animation;
