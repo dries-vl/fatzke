@@ -768,6 +768,23 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         
         // LAND COLOR
         {
+            // FRACTAL TEXTURE
+            float depth = distance(get_camera_position() / 10, float3(i.world_pos.x, i.h/100, i.world_pos.y)) / 100000;
+            float lod = log(depth);
+            float lodFloor = floor(lod);
+            float lodFract = frac(lod);
+            float s0 = exp(lodFloor - 1.0);
+            float s1 = exp(lodFloor + 0.0);
+            float s2 = exp(lodFloor + 1.0);
+            float2 scaled_uv = (i.uv * 100.0) % 1.0f;
+            float2 uv0 = i.uv / s0;
+            float2 uv1 = i.uv / s1;
+            float2 uv2 = i.uv / s2;
+            float4 tex0 = TEXTURES[5].Sample(uv0);
+            float4 tex1 = TEXTURES[5].Sample(uv1);
+            float4 tex2 = TEXTURES[5].Sample(uv2);
+            float4 t_color = (tex1 + lerp(tex0, tex2, lodFract)) * 0.5;
+
             // o.color.xyz = float3(0.5);
             float h = i.h / 100.0f;              // same units as your ddx/ddy normal test
             float d = h - SEA_LEVEL;
@@ -778,7 +795,7 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
             float land       =        smoothstep( -5.0f,  40.0f, d);
             float beach      =        smoothstep(  -2.0f,  17.0f, d) * (1.0f - smoothstep(40.0f, 90.0f, d));
             float3 sand  = float3(0.78, 0.74, 0.62);
-            float3 grass = float3(0.30, 0.42, 0.24);
+            float3 grass = t_color.rgb;
             float3 rock  = float3(0.42, 0.40, 0.38);
             float slope = 1.0f - saturate(i.normal.y);
             float rockiness = smoothstep(0.05f, 0.25f, slope);
