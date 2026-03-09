@@ -92,7 +92,6 @@ static const float CHUNKS_PLAYABLE = 4.0; // width
 static const float CHUNKS_TOTAL = 80.0; // width
 static const float PLAYABLE_WIDTH = TILE_WIDTH * TILES_PER_CHUNK * CHUNKS_PLAYABLE;
 static const float TOTAL_WIDTH = TILE_WIDTH * TILES_PER_CHUNK * CHUNKS_TOTAL;
-static const float VERTEX_WIDTH = TILE_WIDTH / float((MAX_VERTICES >> 2) - 1); // >> 2 because terrain lod is always 2
 
 float2 chunk_uv_at(float2 worldXZ_m) {
     float2 uv = (worldXZ_m + float2(TOTAL_WIDTH * 0.5f, TOTAL_WIDTH * 0.5f)) / float2(TOTAL_WIDTH, TOTAL_WIDTH);
@@ -413,36 +412,28 @@ static const uint FENCE_I[24] = {
 };
 
 static const uint MAX_VERTICES = 32u;
+static const float VERTEX_WIDTH = TILE_WIDTH / float(((MAX_VERTICES >> 1) + 1) - 1); // >> 1 because terrain lod is always 1
 // returns UVs of the 3 terrain vertices of the triangle under the point
 float terrain_height_at(float2 worldXZ_m) {
-    float2 p = worldXZ_m + (PLAYABLE_WIDTH / 2);            // [0..4096)
-    int2 tile = int2(floor(p / TILE_WIDTH));
-    tile = clamp(tile, int2(0,0), int2(31,31));
-    // tile origin in world coords (meters)
-    float2 tileOrigin = float2(tile) * TILE_WIDTH - (PLAYABLE_WIDTH / 2);
-    // tile-local coordinate [0..128)
-    float2 local = worldXZ_m - tileOrigin;
-    // --- snap to fixed vertex cell on the 32x32 lattice ---
-    float2 cellF = local / VERTEX_WIDTH;               // 0..31 in ideal range
-    int2 cell = int2(floor(cellF));
-    cell = clamp(cell, int2(0,0), int2(MAX_VERTICES-2, MAX_VERTICES-2));
-    float2 f = frac(cellF);                      // position inside cell [0..1)
+    float2 vertex_xz = worldXZ_m - worldXZ_m % 8;
+    float2 f = (worldXZ_m % 8) / 8.0;
     // 4 surrounding lattice vertices in world meters
-    float2 p00 = tileOrigin + float2(cell) * VERTEX_WIDTH;
-    float2 p10 = p00 + float2(VERTEX_WIDTH, 0);
-    float2 p01 = p00 + float2(0, VERTEX_WIDTH);
-    float2 p11 = p00 + float2(VERTEX_WIDTH, VERTEX_WIDTH);
+    float2 p00 = vertex_xz;
+    float2 p10 = p00 + float2(8, 0);
+    float2 p01 = p00 + float2(0, 8);
+    float2 p11 = p00 + float2(8, 8);
     float2 uvA, uvB, uvC;
     // choose which tri (diagonal split consistent with a regular grid)
+    float px_size = 1.0 / 641.0;
     if (f.x + f.y <= 1.0) {
-        uvA = chunk_uv_at(p00);
-        uvB = chunk_uv_at(p10);
-        uvC = chunk_uv_at(p01);
+        uvA = chunk_uv_at(p00) + (px_size / 2);
+        uvB = chunk_uv_at(p10) + (px_size / 2);
+        uvC = chunk_uv_at(p01) + (px_size / 2);
         // weights would be: (1-fx-fy, fx, fy) for (A,B,C)
     } else {
-        uvA = chunk_uv_at(p11);
-        uvB = chunk_uv_at(p01);
-        uvC = chunk_uv_at(p10);
+        uvA = chunk_uv_at(p11) + (px_size / 2);
+        uvB = chunk_uv_at(p01) + (px_size / 2);
+        uvC = chunk_uv_at(p10) + (px_size / 2);
         // weights would be: (fx+fy-1, 1-fx, 1-fy) for (A,B,C) in (A,B,C) order
     }
     // sample heights at the three terrain vertices
@@ -602,8 +593,9 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
         object object = OBJECTS[object_id];    // 8 bytes
         unit UNIT = UNITS[0];
         int rank = object_id % 64;
-        float2 formation = float2(rank % 8, rank / 8) * /*spacing*/ 10.0f;
-        float3 object_position = float3(formation.x, 0, formation.y);
+        float2 formation = float2(rank % 8, rank / 8) * 10.0f;
+        // float3 object_position = float3(formation.x, 0, formation.y);
+        float3 object_position = float3(object.x, 0, object.z);
         world_pos = object_position.xz;
         position = object_position - get_camera_position();
         float object_yaw_cos = float(object.cos) * divide_by_127;
@@ -717,6 +709,34 @@ float Bayer4x4(uint2 p) {
 // -> extremely far away grass should just disappear entirely over distance
 // -> should dynamically go from 1 to 2 for 1 to 4 for 1 to 8 for 1 to 16 for 1, etc. until basically none
 
+float4 blurred_texture(float2 uv, float2 pixelCoord, float2 resolution, float blurAmount, int quality, int frame) {
+    const float TAU = 6.28318530718;
+    quality = clamp(quality, 1, 4);
+    float2 aspect = float2(1.0, 1.0);
+    if (resolution.x > resolution.y)
+        aspect.x = resolution.y / resolution.x;
+    else
+        aspect.y = resolution.x / resolution.y;
+    float2 blurRadius = blurAmount * aspect;
+    float noise = frac(
+        52.9829189 *
+        frac(dot(pixelCoord + (frame % 60) * float2(2.083, 4.867),
+                 float2(0.06711056, 0.00583715)))
+    );
+    float angle = noise * TAU;
+    float2 dir = float2(cos(angle), sin(angle));
+    float4 acc = 0.0;
+    [loop]
+    for (int i = 0; i < quality; ++i)
+    {
+        acc += TEXTURES[5].Sample(uv + dir * blurRadius);
+
+        // rotate 90 degrees
+        dir = float2(-dir.y, dir.x);
+    }
+    return acc / quality;
+}
+
 struct ps_out {
     float4 color : SV_Target0; // normal color
     uint   id    : SV_Target1; // object ID
@@ -784,8 +804,8 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
             float4 tex1 = TEXTURES[5].Sample(uv1);
             float4 tex2 = TEXTURES[5].Sample(uv2);
             float4 t_color = (tex1 + lerp(tex0, tex2, lodFract)) * 0.5;
+            // t_color.rgb += (color / 2); // show actual triangle primitives
 
-            // o.color.xyz = float3(0.5);
             float h = i.h / 100.0f;              // same units as your ddx/ddy normal test
             float d = h - SEA_LEVEL;
             // masks
@@ -809,6 +829,9 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
 
         // COLOR THE EDGE RED
         if (at_battle_map_edge(i.world_pos) && !i.is_chunk) o.color.r = 1.0;
+        // ORIGIN
+        float distance_from_origin = distance(i.world_pos, float2(0, 0));
+        if (distance_from_origin < 1.0) o.color.g = 1.0;
 
         // o.color.xyz += TEXTURES[2].Sample(i.uv).r;
         // float h = chunk_height_at_uv_fs(i.uv) * 0.00033;
@@ -821,12 +844,30 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
     }
 
     float2 p = i.uv * 640; // which quad are we on (not vertex)
-    if (!i.is_chunk) p *= 8;
+    if (!i.is_chunk) p *= 16;
     bool odd_row = (int(p.y) % 2) != 0; // offset row or not
     bool flipped_triangle = (primID % 2) != 0; // triangle is pointing down if true, up if false
 
     float px_size = 1.0f / 640.0f; // offset by
     float2 fs_uv = ((i.uv + (px_size / 2)) * 640.0) / 641.0;
+
+    // MOVEMENT GRID
+    if (!i.is_chunk && PUSH_CONSTANTS.mode == MESH_MODE) {
+        float2 snapped_world_pos = i.world_pos - (i.world_pos % float2(4.0));
+        float h00 = chunk_height_at_uv(chunk_uv_at(snapped_world_pos) + (px_size / 2), true);
+        float h10 = chunk_height_at_uv(chunk_uv_at(snapped_world_pos + float2(4, 0)) + (px_size / 2), true);
+        float h01 = chunk_height_at_uv(chunk_uv_at(snapped_world_pos + float2(0, 4)) + (px_size / 2), true);
+        float h11 = chunk_height_at_uv(chunk_uv_at(snapped_world_pos + float2(4, 4)) + (px_size / 2), true);
+        float hmin = min(min(h00, h10), min(h01, h11));
+        float hmax = max(max(h00, h10), max(h01, h11));
+        float steepness = hmax - hmin;
+        // if (steepness > 400.0) o.color.rb = float2(1,1);
+        // else if (steepness > 300.0) o.color.b = 1;
+        // else if (steepness > 200.0) o.color.g = 1;
+        // else if (steepness > 100.0) o.color.g = 0.5;
+        // else if (steepness > 50.0) o.color.g = 0.25;
+        if (steepness >= 260.0) o.color.r = 1;
+    }
 
     if (PUSH_CONSTANTS.mode == SEA_MODE) {
         float terrainH = chunk_height_at_uv(i.uv + (px_size / 2), true) / 100.0f;
@@ -887,24 +928,33 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         // float4 map = TEXTURES[1].Sample(i.uv + (px_size / 2));
         // o.color = map;
 
-        // QUAD OUTLINES
+        // OUTLINING THICKNESS
         float2 f = frac(p);
+        float t = 0.02;        // thickness
+        float feather = 0.01; // softness
+        float px_p = max(fwidth(p.x), fwidth(p.y)); // how much does p change between two pixels
+        // MEASURING GRID
+        float grid_1m = min(min(1.0 - abs(i.world_pos.x % 1.0), abs(i.world_pos.x % 1.0)), min(1.0 - abs(i.world_pos.y % 1.0), abs(i.world_pos.y % 1.0)));
+        float grid_4m = min(min(4.0 - abs(i.world_pos.x % 4.0), abs(i.world_pos.x % 4.0)), min(4.0 - abs(i.world_pos.y % 4.0), abs(i.world_pos.y % 4.0))) / 4.0;
+        float m1 = 1.0 - smoothstep(t - feather, t + feather, grid_1m);
+        float m4 = 1.0 - smoothstep(t - feather, t + feather, grid_4m);
+        float enable_measure = smoothstep(0, px_p, t / 2); // 1 when change in grid position for one pixel is smaller than width t
+        float measure_mask = enable_measure * saturate(m1 + m4); // gradually dissolve the grid
+        o.color.rgb = lerp(o.color.rgb, 0.025.xxx, measure_mask);
+        // QUAD OUTLINES
         const float INV_SQRT5_TIMES_2 = 0.894427191; // 2/sqrt(5)
         float dU = min(f.x, 1.0 - f.x) * INV_SQRT5_TIMES_2;
         float dV = min(f.y, 1.0 - f.y);
-        float dDiag = odd_row
+        float dDiag = (odd_row && i.is_chunk)
             ? abs((f.x + f.y - 1.0)) * INV_SQRT5_TIMES_2
             : abs(f.x - f.y) * INV_SQRT5_TIMES_2;
         float dEdge = min(dU, min(dV, dDiag));
         float2 nearestV = round(p);
         float d = length(p - nearestV);
-        float t = 0.01;        // thickness
-        float feather = 0.005; // softness
         float point = 1.0 - smoothstep((t * 4) - feather, (t * 4) + feather, d);
         float outerLine = 1.0 - smoothstep(t - feather, t + feather, dEdge);
         float diagLine = 1.0 - smoothstep(t - feather, t + feather, dDiag);
-        float px_p = max(fwidth(p.x), fwidth(p.y)); // how much does p change between two pixels
-        float enable = smoothstep(0, px_p, t * 2); // 1 when change in grid position for one pixel is smaller than width t
+        float enable = smoothstep(0, px_p, t); // 1 when change in grid position for one pixel is smaller than width t
         float mask = enable * saturate(point + outerLine + diagLine); // gradually dissolve the grid
         o.color.rgb = lerp(o.color.rgb, 0.0.xxx, mask);
 
