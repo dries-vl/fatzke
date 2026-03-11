@@ -1300,30 +1300,6 @@ int main(void) {
             // );
         }
 
-        #pragma region update uniforms
-        struct Uniforms u = {0};
-        encode_uniforms(&u, cam_x, cam_y, cam_z, cam_yaw, cam_pitch);
-        u.time = (f32) (pf_ns_now() - pf_ns_start()) / 1e9; // send time in seconds to the gpu
-        u.selected_object_id = selected_object_id;
-        if (buttons[MOUSE_LEFT]) {
-            u.drag_rect_start_x = rect_x0; u.drag_rect_start_y = rect_y0;
-            u.drag_rect_end_x = rect_x1; u.drag_rect_end_y = rect_y1;
-        }
-        if (buttons[MOUSE_RIGHT]) {
-            u.drag_world_pos_x = drag_world_x;
-            u.drag_world_pos_z = drag_world_z;
-            u.click_world_pos_x = click_world_x;
-            u.click_world_pos_z = click_world_z;
-        }
-        void*dst=NULL;
-        VK_CHECK(vkMapMemory(machine.device, renderer.memory_uniforms, 0, sizeof u, 0, &dst));
-        memcpy(dst, &u, sizeof u);
-        vkUnmapMemory(machine.device, renderer.memory_uniforms);
-        
-        // do pick
-        vkQueueWaitIdle(machine.queue_graphics);
-        do_pick(&machine, &swapchain);
-        
         // region pick
         if (buttons[MOUSE_LEFT]) {
             // read back a rectangle of ids from the pick image
@@ -1439,6 +1415,9 @@ int main(void) {
             }
         }
         
+        struct Uniforms u = {0};
+        encode_uniforms(&u, cam_x, cam_y, cam_z, cam_yaw, cam_pitch);
+
         // READBACK DEPTH
         if (buttons[MOUSE_RIGHT]) {
             u32 x, y;
@@ -1541,6 +1520,29 @@ int main(void) {
             }
         }
 
+        // do pick
+        vkQueueWaitIdle(machine.queue_graphics);
+        do_pick(&machine, &swapchain);
+
+        #pragma region update uniforms
+        u.time = (f32) (pf_ns_now() - pf_ns_start()) / 1e9; // send time in seconds to the gpu
+        u.selected_object_id = selected_object_id;
+        if (buttons[MOUSE_LEFT]) {
+            u.drag_rect_start_x = rect_x0; u.drag_rect_start_y = rect_y0;
+            u.drag_rect_end_x = rect_x1; u.drag_rect_end_y = rect_y1;
+        }
+        if (buttons[MOUSE_RIGHT]) {
+            u.drag_world_pos_x = drag_world_x;
+            u.drag_world_pos_z = drag_world_z;
+            u.click_world_pos_x = click_world_x;
+            u.click_world_pos_z = click_world_z;
+        }
+        void*dst=NULL;
+        VK_CHECK(vkMapMemory(machine.device, renderer.memory_uniforms, 0, sizeof u, 0, &dst));
+        memcpy(dst, &u, sizeof u);
+        vkUnmapMemory(machine.device, renderer.memory_uniforms);
+        
+        
         // start recording for this frame's command buffer
         f32 frame_start_time = (f32) (pf_ns_now() - pf_ns_start()) / 1e6;
         VkCommandBuffer cmd = swapchain.command_buffers_per_image[swap_image_index];

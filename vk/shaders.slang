@@ -835,10 +835,56 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         if (distance_from_origin < 1.0) o.color.g = 1.0;
 
         // CLICK POSITION
-        float dist_from_click = distance(i.world_pos, float2(click_world_pos_x, click_world_pos_z));
-        float dist_from_drag = distance(i.world_pos, float2(drag_world_pos_x, drag_world_pos_z));
-        if (dist_from_click < 1.0) o.color.b = 1.0;
-        if (dist_from_drag < 1.0) o.color.g = 1.0;
+        if (drag_world_pos_x != 0 && drag_world_pos_z != 0) {
+            float2 p1 = float2(click_world_pos_x, click_world_pos_z);
+            float2 p2 = float2(drag_world_pos_x,  drag_world_pos_z);
+            float2 q  = i.world_pos;   // if i.world_pos is float3, use i.world_pos.xz
+            // top edge basis
+            float2 d = p2 - p1;
+            float w = max(length(d), 1e-5);
+            float2 u = d / w;
+            float2 n = float2(u.y, -u.x);   // opposite orientation
+            // fixed circle settings
+            const float r    = 0.5;
+            const float N    = 64.0;
+            const float diam = 2.0 * r;
+            // debug endpoints
+            float dist_from_click = distance(q, p1);
+            float dist_from_drag  = distance(q, p2);
+            o.color.b += 1.0 - step(r, dist_from_click);
+            o.color.g += 1.0 - step(r, dist_from_drag);
+            // number of columns that fit along the drag span,
+            // but at least 1 and never more than N
+            float cols = floor(w / diam) + 1.0;
+            cols = clamp(cols, 1.0, N);
+            // rows needed for N circles
+            float rows = ceil(N / cols);
+            // local coordinates relative to first circle center
+            float2 v = q - p1;
+            float a = dot(v, u);
+            float b = dot(v, n);
+            // nearest grid index, with first center at (0, 0)
+            float ix = floor(a / diam + 0.5);
+            float iy = floor(b / diam + 0.5);
+            // nearest circle center in local coordinates
+            float cx = ix * diam;
+            float cy = iy * diam;
+            // rectangular range of valid indices
+            float inIndexRange =
+                step(0.0, ix) *
+                step(ix, cols - 1.0) *
+                step(0.0, iy) *
+                step(iy, rows - 1.0);
+            // valid circle mask for partial last row
+            float idx = iy * cols + ix;
+            float validCircle = step(idx, N - 1.0);
+            // circle membership
+            float2 dc = float2(a - cx, b - cy);
+            float inCircle = 1.0 - step(r * r, dot(dc, dc));
+            // final mask
+            float insideMask = inIndexRange * validCircle * inCircle;
+            o.color.r += 0.5 * insideMask;
+        }
 
         // o.color.xyz += TEXTURES[2].Sample(i.uv).r;
         // float h = chunk_height_at_uv_fs(i.uv) * 0.00033;
