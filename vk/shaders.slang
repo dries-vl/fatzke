@@ -64,7 +64,8 @@ cbuffer uniforms {
     float  camera_yaw_sin, camera_yaw_cos;
     float  time; // seconds
     uint   selected_object_id;
-    float  drag_rect_start_x, drag_rect_start_y, drag_rect_end_x, drag_rect_end_y;
+    float drag_rect_start_x, drag_rect_start_y, drag_rect_end_x, drag_rect_end_y;
+    float click_world_pos_x, click_world_pos_z, drag_world_pos_x, drag_world_pos_z;
 };
 [[vk::binding(19, 0)]] Sampler2D TEXTURES[64];
 [UnscopedEnum] enum mode: int {CHUNK_PASS, OBJECT_PASS, PREFIX_PASS, SCATTER_PASS, UI_MODE, FENCE_MODE, SEA_MODE, MESH_MODE, SKY_MODE};
@@ -833,6 +834,12 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         float distance_from_origin = distance(i.world_pos, float2(0, 0));
         if (distance_from_origin < 1.0) o.color.g = 1.0;
 
+        // CLICK POSITION
+        float dist_from_click = distance(i.world_pos, float2(click_world_pos_x, click_world_pos_z));
+        float dist_from_drag = distance(i.world_pos, float2(drag_world_pos_x, drag_world_pos_z));
+        if (dist_from_click < 1.0) o.color.b = 1.0;
+        if (dist_from_drag < 1.0) o.color.g = 1.0;
+
         // o.color.xyz += TEXTURES[2].Sample(i.uv).r;
         // float h = chunk_height_at_uv_fs(i.uv) * 0.00033;
         // if (h <= 2.0) {
@@ -851,8 +858,8 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
     float px_size = 1.0f / 640.0f; // offset by
     float2 fs_uv = ((i.uv + (px_size / 2)) * 640.0) / 641.0;
 
-    // MOVEMENT GRID
-    if (!i.is_chunk && PUSH_CONSTANTS.mode == MESH_MODE) {
+    // PASSABLE GRID
+    if (PUSH_CONSTANTS.mode == MESH_MODE) {
         float2 snapped_world_pos = i.world_pos - (i.world_pos % float2(4.0));
         float h00 = chunk_height_at_uv(chunk_uv_at(snapped_world_pos) + (px_size / 2), true);
         float h10 = chunk_height_at_uv(chunk_uv_at(snapped_world_pos + float2(4, 0)) + (px_size / 2), true);

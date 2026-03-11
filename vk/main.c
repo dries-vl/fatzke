@@ -75,6 +75,7 @@ struct Uniforms {
     float time; // seconds
     u32 selected_object_id;
     float drag_rect_start_x, drag_rect_start_y, drag_rect_end_x, drag_rect_end_y; // in uv
+    float click_world_pos_x, click_world_pos_z, drag_world_pos_x, drag_world_pos_z;
 };
 
 #if DEBUG_APP == 1
@@ -739,6 +740,10 @@ int main(void) {
     for (u32 m = 1; m < total_mesh_count; ++m) {
         mesh_info[m].firstInstance = mesh_info[m-1].firstInstance + mesh_info[m-1].instanceCount;
     }
+    
+    // movement grid (131kb)
+    struct block { u64 tiles[4][4]; }; // 16 8b tiles per block, 128 bytes matching double cacheline, 32x32 bit per block 
+    static struct block passable_tiles[32][32]; // 1024x1024 grid becomes 32x32 times a 32x32 block, each block 16 64bit, 1bit for passable vs impassable
 
     VkDeviceSize size_visible_chunk_ids = total_chunk_count * sizeof(uint32_t);
     VkDeviceSize size_indirect_workgroups = 3 * sizeof(uint32_t);
@@ -1262,6 +1267,10 @@ int main(void) {
         
         #pragma region HANDLE INPUT
         process_inputs();
+        
+        // click world pos
+        static float click_world_x, click_world_y, click_world_z;
+        static float drag_world_x, drag_world_y, drag_world_z;
 
         // rect to ndc
         float rect_x0 = 0.0f, rect_y0 = 0.0f;
@@ -1285,10 +1294,10 @@ int main(void) {
                 rect_x1 = (float)max_sx / (float)swapchain.swapchain_extent.width;
                 rect_y1 = (float)max_sy / (float)swapchain.swapchain_extent.height;
             }
-            printf("Drag rect screen: (%d,%d)-(%d,%d)  normalized: (%.3f,%.3f)-(%.3f,%.3f)\n",
-                min_sx, min_sy, max_sx, max_sy,
-                rect_x0, rect_y0, rect_x1, rect_y1
-            );
+            // printf("Drag rect screen: (%d,%d)-(%d,%d)  normalized: (%.3f,%.3f)-(%.3f,%.3f)\n",
+            //     min_sx, min_sy, max_sx, max_sy,
+            //     rect_x0, rect_y0, rect_x1, rect_y1
+            // );
         }
 
         #pragma region update uniforms
@@ -1296,8 +1305,16 @@ int main(void) {
         encode_uniforms(&u, cam_x, cam_y, cam_z, cam_yaw, cam_pitch);
         u.time = (f32) (pf_ns_now() - pf_ns_start()) / 1e9; // send time in seconds to the gpu
         u.selected_object_id = selected_object_id;
-        u.drag_rect_start_x = rect_x0; u.drag_rect_start_y = rect_y0;
-        u.drag_rect_end_x = rect_x1; u.drag_rect_end_y = rect_y1;
+        if (buttons[MOUSE_LEFT]) {
+            u.drag_rect_start_x = rect_x0; u.drag_rect_start_y = rect_y0;
+            u.drag_rect_end_x = rect_x1; u.drag_rect_end_y = rect_y1;
+        }
+        if (buttons[MOUSE_RIGHT]) {
+            u.drag_world_pos_x = drag_world_x;
+            u.drag_world_pos_z = drag_world_z;
+            u.click_world_pos_x = click_world_x;
+            u.click_world_pos_z = click_world_z;
+        }
         void*dst=NULL;
         VK_CHECK(vkMapMemory(machine.device, renderer.memory_uniforms, 0, sizeof u, 0, &dst));
         memcpy(dst, &u, sizeof u);
@@ -1418,22 +1435,22 @@ int main(void) {
             }
             // Use the result
             for (uint32_t i = 0; i < unique_count; ++i) {
-                printf("Selected object: %u\n", tmp_ids[i]);
+                // printf("Selected object: %u\n", tmp_ids[i]);
             }
         }
         
         // READBACK DEPTH
         if (buttons[MOUSE_RIGHT]) {
-            uint32_t x = (uint32_t)g_mouse_x;
-            uint32_t y = (uint32_t)g_mouse_y;
-
-            // clamp
-            if (x >= swapchain.swapchain_extent.width ||
-                y >= swapchain.swapchain_extent.height)
-                return 0;
-
+            u32 x, y;
+            if (g_drag_start_x == g_drag_end_x && g_drag_start_y == g_drag_end_y) {
+                x = (uint32_t)g_drag_start_x;
+                y = (uint32_t)g_drag_start_y;
+            } else {
+                x = (uint32_t)g_drag_end_x;
+                y = (uint32_t)g_drag_end_y;
+            }
+            if (x >= swapchain.swapchain_extent.width || y >= swapchain.swapchain_extent.height) return 0;
             VkCommandBuffer cmd = begin_single_use_cmd(machine.device, upload_pool);
-
             // transition depth image for read
             VkImageMemoryBarrier2 to_src = {
                 .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
@@ -1456,7 +1473,6 @@ int main(void) {
                 .imageMemoryBarrierCount = 1,
                 .pImageMemoryBarriers    = &to_src
             });
-
             // copy 1×1 depth pixel
             VkBufferImageCopy region = {
                 .imageSubresource = {
@@ -1468,102 +1484,60 @@ int main(void) {
                 .imageOffset = { (int32_t)x, (int32_t)y, 0 },
                 .imageExtent = { 1, 1, 1 },
             };
-
             vkCmdCopyImageToBuffer(
                 cmd,
                 swapchain.depth_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                 swapchain.depth_readback_buffer,
                 1, &region
             );
-
             end_single_use_cmd(machine.device, machine.queue_graphics, upload_pool, cmd);
-
             // read back the depth
             float depth = 0.0f;
             void* ptr = NULL;
             VK_CHECK(vkMapMemory(machine.device, swapchain.depth_readback_memory, 0, sizeof(float), 0, &ptr));
             memcpy(&depth, ptr, sizeof(float));
             vkUnmapMemory(machine.device, swapchain.depth_readback_memory);
-            printf("Depth at (%u,%u): %f\n", g_mouse_x, g_mouse_y, depth);
-
-            // ---- interpret depth into world position ----
             // interpret depth -> world position
             float fov_y_radians = 60.0f * 3.14159265359f / 180.0f;   // MUST match shader
             float proj_scale_y  = 1.0f / tanf(fov_y_radians * 0.5f);
             float aspect_ratio  = 16.0f / 9.0f;                      // MUST match shader
             float proj_scale_x  = proj_scale_y / aspect_ratio;
             float near_plane    = 5.0f;                              // MUST match shader
-
             if (depth > 0.0f) {
-                // ------------------------------------------------
-                // 1) Screen -> NDC
-                // ------------------------------------------------
-                float ndc_x =  2.0f * ((g_mouse_x + 0.5f) / (float)swapchain.swapchain_extent.width)  - 1.0f;
-                float ndc_y =  1.0f - 2.0f * ((g_mouse_y + 0.5f) / (float)swapchain.swapchain_extent.height);
-
-                // ------------------------------------------------
-                // 2) Depth -> camera-space (vx,vy,vz)
-                //
-                // From VS:
-                //   z_ndc = near_plane / vz
-                //   depth ≈ z_ndc
-                // => vz = near_plane / depth
-                // ------------------------------------------------
-                // vz is in the same units VS used (centimeters)
+                float ndc_x =  2.0f * ((x + 0.5f) / (float)swapchain.swapchain_extent.width)  - 1.0f;
+                float ndc_y =  1.0f - 2.0f * ((y + 0.5f) / (float)swapchain.swapchain_extent.height);
                 float vz_cm = near_plane / depth;
                 float vx_cm = ndc_x * vz_cm / proj_scale_x;
                 float vy_cm = ndc_y * vz_cm / proj_scale_y;
-
-                // Convert back to meters to match terrain/object_position math
                 float vx = vx_cm / 100.0f;
                 float vy = vy_cm / 100.0f;
                 float vz = vz_cm / 100.0f;
-
-                // Now (vx,vy,vz) is the same "view" space your shader gets *before* scaling by 100
-
-                // ------------------------------------------------
-                // 3) Undo pitch & yaw (exact inverse of shader code)
-                //
-                // Shader:
-                //   position_yaw_z = sy*pos.x + cy*pos.z;
-                //   view.x = cy*pos.x - sy*pos.z;
-                //   view.y = cp*pos.y + sp*position_yaw_z;
-                //   view.z = -sp*pos.y + cp*position_yaw_z;
-                //
-                // We want pos from view, so we apply R^T:
-                // ------------------------------------------------
                 float cp = u.camera_pitch_cos;
                 float sp = u.camera_pitch_sin;
                 float cy = u.camera_yaw_cos;
                 float sy = u.camera_yaw_sin;
-
-                // undo pitch
                 float ypp = vy;
                 float zpp = vz;
                 float pos_y =  cp * ypp - sp * zpp;   // position.y in meters
                 float z_yaw = sp * ypp + cp * zpp;    // yaw-space Z'
-
-                // undo yaw
                 float pos_x =  cy * vx + sy * z_yaw;  // position.x in meters
                 float pos_z = -sy * vx + cy * z_yaw;  // position.z in meters
 
-                // Now (pos_x,pos_y,pos_z) = object_position - (camera_position/10) in meters
-
-                // ------------------------------------------------
-                // 4) Add camera position (in meters) to get world position
-                //
-                // IMPORTANT: camera_position is in decimeters in the uniform.
-                // Shader uses camera_position/10 for all components, so do the same here.
-                // ------------------------------------------------
                 float cam_world_x = u.camera_position[0] / 10.0f;
                 float cam_world_y = u.camera_position[1] / 10.0f;  // *** THIS WAS THE BIG MISSING /10 ***
                 float cam_world_z = u.camera_position[2] / 10.0f;
 
-                float world_x = cam_world_x + pos_x;
-                float world_y = cam_world_y + pos_y;
-                float world_z = cam_world_z + pos_z;
+                if (g_drag_start_x == g_drag_end_x && g_drag_start_y == g_drag_end_y) {
+                    click_world_x = cam_world_x + pos_x;
+                    click_world_y = cam_world_y + pos_y;
+                    click_world_z = cam_world_z + pos_z;
+                } else {
+                    drag_world_x = cam_world_x + pos_x;
+                    drag_world_y = cam_world_y + pos_y;
+                    drag_world_z = cam_world_z + pos_z;
+                }
 
-                printf("World position: %.3f, %.3f, %.3f\n", world_x, world_y, world_z);
+                printf("World position: %.3f, %.3f, %.3f\n", click_world_x, click_world_y, click_world_z);
             }
         }
 
