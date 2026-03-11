@@ -835,7 +835,7 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         if (distance_from_origin < 1.0) o.color.g = 1.0;
 
         // CLICK POSITION
-        if (drag_world_pos_x != 0 && drag_world_pos_z != 0) {
+        if (drag_world_pos_x != 0 && drag_world_pos_z != 0 && (drag_world_pos_x != click_world_pos_x || drag_world_pos_z != click_world_pos_z)) {
             float2 p1 = float2(click_world_pos_x, click_world_pos_z);
             float2 p2 = float2(drag_world_pos_x,  drag_world_pos_z);
             float2 q  = i.world_pos;   // if i.world_pos is float3, use i.world_pos.xz

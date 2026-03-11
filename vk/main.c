@@ -1421,7 +1421,7 @@ int main(void) {
         // READBACK DEPTH
         if (buttons[MOUSE_RIGHT]) {
             u32 x, y;
-            if (g_drag_start_x == g_drag_end_x && g_drag_start_y == g_drag_end_y) {
+            if (click_world_x == 0 && click_world_z == 0) {
                 x = (uint32_t)g_drag_start_x;
                 y = (uint32_t)g_drag_start_y;
             } else {
@@ -1506,7 +1506,7 @@ int main(void) {
                 float cam_world_y = u.camera_position[1] / 10.0f;  // *** THIS WAS THE BIG MISSING /10 ***
                 float cam_world_z = u.camera_position[2] / 10.0f;
 
-                if (g_drag_start_x == g_drag_end_x && g_drag_start_y == g_drag_end_y) {
+                if (click_world_x == 0 && click_world_z == 0) {
                     click_world_x = cam_world_x + pos_x;
                     click_world_y = cam_world_y + pos_y;
                     click_world_z = cam_world_z + pos_z;
@@ -1536,7 +1536,7 @@ int main(void) {
             u.drag_world_pos_z = drag_world_z;
             u.click_world_pos_x = click_world_x;
             u.click_world_pos_z = click_world_z;
-        }
+        } else { drag_world_x = 0; drag_world_z = 0; click_world_x = 0; click_world_z = 0;}
         void*dst=NULL;
         VK_CHECK(vkMapMemory(machine.device, renderer.memory_uniforms, 0, sizeof u, 0, &dst));
         memcpy(dst, &u, sizeof u);
