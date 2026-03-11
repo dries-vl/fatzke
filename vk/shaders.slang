@@ -102,13 +102,13 @@ float2 chunk_uv_at(float2 worldXZ_m) {
 
 float chunk_height_at_uv(float2 uv, bool fs) {
     float h, detail;
-    if (fs) {
-        h = TEXTURES[2].Sample(uv).x * 1000000.0f;
-        detail = TEXTURES[4].Sample(uv).x;
-    } else {
+    // if (fs) {
+        // h = TEXTURES[2].Sample(uv).x * 1000000.0f;
+        // detail = TEXTURES[4].Sample(uv).x;
+    // } else {
         h = TEXTURES[2].SampleLevel(uv, 0).x * 1000000.0f;
         detail = TEXTURES[4].SampleLevel(uv, 0).x;
-    }
+    // }
     // optional micro detail
     h += (detail - 0.25f) * 1000.0f;
     // sea plane height in same units as h
@@ -258,13 +258,14 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         } else if (object_type == UNIT) {
             object object = OBJECTS[object_id]; // 8 bytes
             unit UNIT = UNITS[0];
-            int rank = object_id % 64;
-            float2 formation = float2(rank % 8, rank / 8) * 10.0f;
-            float2 object_position = formation;
-            float2 uv0 = ((object_position.xy / 10) + (128.0f * 8.0f * 4.0f * 0.5f)) / (128.0f * 8.0f * 4.0f);
-            uv0 = float2(0,1) - float2(-uv0.x, uv0.y);
-            float height = (TEXTURES[5].SampleLevel(uv0, 0).x * 5000000.0f - (TEXTURES[5].SampleLevel(uv0, 1).b - 0.25) * 10000.0f) / 10;
-            position = float3(object_position.x, height, object_position.y) - camera_position;
+            // int rank = object_id % 64;
+            // float2 formation = float2(rank % 8, rank / 8) * 10.0f;
+            // float2 object_position = formation;
+            float2 world_pos = float2(object.x, object.z);
+            float px_size = 1.0 / 641.0;
+            float2 uv = chunk_uv_at(world_pos) + (px_size / 2);
+            float height = chunk_height_at_uv(uv, false) / 10;
+            position = float3(object.x, height, object.z) - get_camera_position();
         }
         float position_yaw_z = camera_yaw_sin * position.x + camera_yaw_cos * position.z; // apply yaw to Z
         float3 view = float3(
@@ -282,6 +283,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         uint lod_level = choose_lod_step(distance, radius);
         if (object_type == TERRAIN) lod_level = 1;
         if (is_chunk_object) lod_level = 2;
+        // if (object_type == UNIT) lod_level = 0;
         bool outside_frustrum = (abs(view.x) - radius) > (view.z * tanHalfFovX) || (abs(view.y) - radius) > (view.z * tanHalfFovY);
         bool valid = true;
         // if (outside_frustrum) valid = false;
