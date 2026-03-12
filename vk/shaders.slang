@@ -150,6 +150,15 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
 
     switch (PUSH_CONSTANTS.mode) {
     case CHUNK_PASS: {
+        if (tid.x == 0) {
+            INDIRECT_WORKGROUPS[0].group_count_x = 0;
+            INDIRECT_WORKGROUPS[0].group_count_y = 0;
+            INDIRECT_WORKGROUPS[0].group_count_z = 0;
+            for (int mesh_id = 0; mesh_id < 10; mesh_id++) {
+                COUNT_PER_MESH[mesh_id] = 0;
+                OFFSET_PER_MESH[mesh_id] = 0; // optional but useful for debug
+            }
+        }
         uint stride, chunk_count;
         CHUNKS.GetDimensions(chunk_count, stride);
         uint chunk_id = tid.x;
@@ -228,13 +237,17 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         OBJECTS.GetDimensions(object_count, stride);
         MESH_INFO.GetDimensions(mesh_count, stride);
 
-        bool is_chunk_object = PUSH_CONSTANTS.mode == SCATTER_PASS
-            ? gid.x < 100 // first 6400 threads are chunk objects in scatter pass
-            : false;
-
-        uint chunk_id = !is_chunk_object 
-            ? VISIBLE_CHUNK_IDS[gid.x - 100] // offset the 100 added workgroups
-            : tid.x; // global thread is id, because first 6400 threads
+        uint chunk_id;
+        bool is_chunk_object = false;
+        if (PUSH_CONSTANTS.mode == SCATTER_PASS) {
+            is_chunk_object = gid.x < 100;
+            chunk_id = is_chunk_object
+                ? tid.x
+                : VISIBLE_CHUNK_IDS[gid.x - 100];
+        } else {
+            // OBJECT_PASS
+            chunk_id = VISIBLE_CHUNK_IDS[gid.x];
+        }
 
         // fetches per object
         uint id_within_chunk = gtid.x;
@@ -261,7 +274,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
             // int rank = object_id % 64;
             // float2 formation = float2(rank % 8, rank / 8) * 10.0f;
             // float2 object_position = formation;
-            float2 world_pos = float2(object.x, object.z);
+            float2 world_pos = float2(object.x, object.z) / 10;
             float px_size = 1.0 / 641.0;
             float2 uv = chunk_uv_at(world_pos) + (px_size / 2);
             float height = chunk_height_at_uv(uv, false) / 10;
@@ -277,7 +290,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
         // pick lod level
         uint mesh_offset = OBJECT_METADATA[object_type].meshes_offset;
         uint base_mesh_id = OBJECT_MESH_LIST[mesh_offset];
-        float distance = dot(position,position) / 500.0f;
+        float distance = dot(position,position) / 500.0f; // todo: maybe just length() instead
         float radius = OBJECT_METADATA[object_type].radius;
         if (is_chunk_object) radius = radius * 20;
         uint lod_level = choose_lod_step(distance, radius);
