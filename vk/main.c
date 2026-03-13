@@ -686,7 +686,7 @@ int main(void) {
     struct unit units[1] = {
         {.x = 0, .y = 0, .next_x = 100, .next_y = 100}
     };
-    #define UNIT_CHUNK_COUNT 1
+    #define UNIT_CHUNK_COUNT 1000
 
     #define TOTAL_CHUNK_COUNT (PLANE_CHUNK_COUNT + UNIT_CHUNK_COUNT)
 

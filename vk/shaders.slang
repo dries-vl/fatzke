@@ -33,12 +33,13 @@ struct mdi {uint index_count, instance_count, first_index, base_vertex, first_in
 struct di {uint group_count_x, group_count_y, group_count_z;};
 struct instance { uint object_id, animation;};
 struct unit { uint16_t x, y, next_x, next_y;};
+struct bucket{uint ids[16];};
 
 // functional data
 [[vk::binding(17,0)]] RWStructuredBuffer<unit> UNITS;    // size is # of chunks
 [[vk::binding(0,0)]]  StructuredBuffer<chunk>  CHUNKS;    // size is # of chunks
 [[vk::binding(4,0)]]  RWStructuredBuffer<object>  OBJECTS;   // size is total # of objects in scene
-[[vk::binding(16,0)]] RWStructuredBuffer<uint> BUCKETS; // 8mb for 131k buckets, need about 4x the amount of used 2mx2m tiles, appr. 2x the amount of units, this should work up to 60k units
+[[vk::binding(16,0)]] RWStructuredBuffer<bucket> BUCKETS; // 8mb for 131k buckets, need about 4x the amount of used 2mx2m tiles, appr. 2x the amount of units, this should work up to 60k units
 // base rendering data
 [[vk::binding(14,0)]] StructuredBuffer<uint>            OBJECT_MESH_LIST; // for each object type the mesh ids that make up objects in order
 [[vk::binding(15,0)]] StructuredBuffer<object_metadata> OBJECT_METADATA; // data about object type
@@ -275,6 +276,13 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
             // float2 formation = float2(rank % 8, rank / 8) * 10.0f;
             // float2 object_position = formation;
             float2 world_pos = float2(object.x, object.z) / 10;
+            if (PUSH_CONSTANTS.mode == SCATTER_PASS) {
+                uint bucket_id = get_bucket_id(world_pos.x + 2048, world_pos.y + 2048);
+                uint slot; InterlockedAdd(BUCKETS[bucket_id].ids[0], 1, slot);
+                if (slot < 15) BUCKETS[bucket_id].ids[slot] = object_id;
+                // OBJECTS[object_id].z -= 1;
+                // OBJECTS[object_id].x -= 1;
+            }
             float px_size = 1.0 / 641.0;
             float2 uv = chunk_uv_at(world_pos) + (px_size / 2);
             float height = chunk_height_at_uv(uv, false) / 10;
@@ -792,7 +800,9 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         // debug draw triangles as distinct colors
         // float3 color = frac(sin((primID+43) * 43.5453) * float3(23.1407, 85.928, 43.533));
         // if(color.x+color.y+color.z < 0.1) color = float3(float(primID % 32) / 32, float((primID + 38) % 64) / 64, float((primID + 17) % 32) / 32);
-        float g = frac(sin(primID * 12.9898) * 43758.5453);
+        uint bucket_id = get_bucket_id(i.world_pos.x + 2048, i.world_pos.y + 2048);
+        // float g = frac(sin(primID * 12.9898) * 43758.5453);
+        float g = frac(sin(bucket_id * 12.9898) * 43758.5453);
         float3 color = g.xxx;
         // float3 color = frac(sin((i.object_id+43) * 43.5453) * float3(23.1407, 85.928, 43.533));
         // if(color.x+color.y+color.z < 0.1) color = float3(float(i.object_id % 32) / 32, float((i.object_id + 38) % 64) / 64, float((i.object_id + 17) % 32) / 32);
@@ -907,7 +917,16 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         //     o.color = SEA_COLOR + (h * float4(0.1, 0.2, 0.3, 0.0));
         //     i.normal = 0;
         // }
-        // o.color.xyz *= color;
+        // if (!i.is_chunk) o.color.xyz = color;
+        if (BUCKETS[bucket_id].ids[0] != 0) {
+            uint2 pix = (uint2)i.pos.xy;
+            uint v = (pix.x & 3) | ((pix.y & 3) << 2);
+            uint unit_id = BUCKETS[bucket_id].ids[v];
+            object object = OBJECTS[unit_id];
+            if (distance(i.world_pos, float2(object.x, object.z) / 10) < 0.5)
+                o.color.g *= 3.0;
+            o.color.b *= 3.0;
+        }
         // o.color *= 1.0 - saturate(i.h * 0.00025);
     }
 
@@ -998,7 +1017,7 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
 
         // OUTLINING THICKNESS
         float2 f = frac(p);
-        float t = 0.02;        // thickness
+        float t = 0.01;        // thickness
         float feather = 0.01; // softness
         float px_p = max(fwidth(p.x), fwidth(p.y)); // how much does p change between two pixels
         // MEASURING GRID
@@ -1049,12 +1068,15 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         float slope = 1.0 - saturate(N.y);
         float slopeOcc = 1.0 - slope * 0.35;
         float3 light = skyLight * 0.6 + bounce + sun * float3(1.0,0.96,0.9) * 1.2;
+
+        // highlight selected objects
+        if (PUSH_CONSTANTS.mode == MESH_MODE && i.object_id == selected_object_id) {
+            light *= 3.0;
+        }
+
         o.color.rgb *= light * slopeOcc;
     }
 
-    if (PUSH_CONSTANTS.mode != SKY_MODE && i.object_id == selected_object_id) {
-        o.color.xyz += float3(0.2);
-    }
     // fade to fog at distance to avoid cutoff, seems like it continues further
     // todo: we want to have the actual sky there instead of the fog
     float d = length(i.world_pos.xy);
