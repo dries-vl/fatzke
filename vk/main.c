@@ -72,7 +72,7 @@ struct Uniforms {
     float camera_position[3]; // xyz
     float camera_pitch_sin, camera_pitch_cos;
     float camera_yaw_sin, camera_yaw_cos;
-    float time; // seconds
+    float time, delta; // seconds
     u32 selected_object_id;
     float drag_rect_start_x, drag_rect_start_y, drag_rect_end_x, drag_rect_end_y; // in uv
     float click_world_pos_x, click_world_pos_z, drag_world_pos_x, drag_world_pos_z;
@@ -682,11 +682,11 @@ int main(void) {
 
     #define PLANE_CHUNK_COUNT 6400
 
-    struct unit {u16 x, y, next_x, next_y;};
+    struct unit {i16 x, y, next_x, next_y;};
     struct unit units[1] = {
-        {.x = 0, .y = 0, .next_x = 100, .next_y = 100}
+        {.x = 0, .y = 0, .next_x = 0, .next_y = -10}
     };
-    #define UNIT_CHUNK_COUNT 1000
+    #define UNIT_CHUNK_COUNT 1
 
     #define TOTAL_CHUNK_COUNT (PLANE_CHUNK_COUNT + UNIT_CHUNK_COUNT)
 
@@ -698,7 +698,7 @@ int main(void) {
         [OBJECT_TYPE_UNIT]  = { .chunk_count = UNIT_CHUNK_COUNT,  .first_chunk = PLANE_CHUNK_COUNT }
     };
 
-    struct gpu_object { int16_t x,y,z; uint8_t cos,sin; };
+    struct gpu_object { float pos[2]; u8 cos,sin; u8 pad[6];}; // 10 bytes + 6 bytes padding
     // todo: ideally we don't even have any plane objects/chunks in memory, as their data is not needed in the shader
     static struct gpu_object gpu_objects[TOTAL_CHUNK_COUNT * OBJECTS_PER_CHUNK];
 
@@ -708,9 +708,8 @@ int main(void) {
         gpu_chunks[scene[OBJECT_TYPE_UNIT].first_chunk + i].object_type = OBJECT_TYPE_UNIT;
     }
     for (int i = 0; i < UNIT_CHUNK_COUNT * OBJECTS_PER_CHUNK; ++i) {
-        gpu_objects[first_unit_object + i].x = (uint16_t)(i % 256) * 7;
-        gpu_objects[first_unit_object + i].y = (uint16_t)((0)) << 16;
-        gpu_objects[first_unit_object + i].z = (uint16_t)((i / 256) * 7);
+        gpu_objects[first_unit_object + i].pos[0] = (float)(i % 512);
+        gpu_objects[first_unit_object + i].pos[1] = (float)((0));
         {
             float yaw = 0.0f;
             gpu_objects[first_unit_object + i].cos = (((uint8_t)lrintf(cosf(yaw) * 127.0f)));
@@ -1525,7 +1524,11 @@ int main(void) {
         do_pick(&machine, &swapchain);
 
         #pragma region update uniforms
-        u.time = (f32) (pf_ns_now() - pf_ns_start()) / 1e9; // send time in seconds to the gpu
+        static float frame_time = 0;
+        float current_time = (f32) (pf_ns_now() - pf_ns_start()) / 1e9; // seconds since application startup
+        u.time = frame_time; // seconds since application startup
+        u.delta = frame_time == 0 ? 0 : current_time - frame_time;
+        frame_time = current_time;
         u.selected_object_id = selected_object_id;
         if (buttons[MOUSE_LEFT]) {
             u.drag_rect_start_x = rect_x0; u.drag_rect_start_y = rect_y0;
@@ -1826,8 +1829,8 @@ int main(void) {
             break;
         }
 
-        #if DEBUG_CPU == 1
         f32 frame_end_time = (f32) (pf_ns_now() - pf_ns_start()) / 1e6;
+        #if DEBUG_CPU == 1
         printf("cpu time %.3fms - %.3fms [%.3fms]\n", frame_start_time, frame_end_time, frame_end_time - frame_start_time);
         #endif
         swapchain.previous_frame_image_index[renderer.frame_slot] = swap_image_index;

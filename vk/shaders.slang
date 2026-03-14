@@ -28,11 +28,11 @@ static const float tanHalfFovX = tanHalfFovY * aspect_ratio;
 struct object_metadata { uint meshes_offset, mesh_count; float radius;};
 [UnscopedEnum] enum object_type: int {TERRAIN, UNIT, BUILDING, VEGETATION};
 struct chunk { object_type object_type;};
-struct object { int16_t x, y, z; uint8_t cos, sin;};
+struct object { float2 pos; uint8_t cos, sin; uint8_t pad1,pad2,pad3,pad4,pad5,pad6;}; // 10 bytes + 6 bytes padding
 struct mdi {uint index_count, instance_count, first_index, base_vertex, first_instance;};
 struct di {uint group_count_x, group_count_y, group_count_z;};
 struct instance { uint object_id, animation;};
-struct unit { uint16_t x, y, next_x, next_y;};
+struct unit { int16_t x, y, next_x, next_y;};
 struct bucket{uint ids[16];};
 
 // functional data
@@ -63,10 +63,10 @@ cbuffer uniforms {
     float3 camera_position;
     float  camera_pitch_sin, camera_pitch_cos;
     float  camera_yaw_sin, camera_yaw_cos;
-    float  time; // seconds
+    float  time, delta; // seconds
     uint   selected_object_id;
-    float drag_rect_start_x, drag_rect_start_y, drag_rect_end_x, drag_rect_end_y;
-    float click_world_pos_x, click_world_pos_z, drag_world_pos_x, drag_world_pos_z;
+    float  drag_rect_start_x, drag_rect_start_y, drag_rect_end_x, drag_rect_end_y;
+    float  click_world_pos_x, click_world_pos_z, drag_world_pos_x, drag_world_pos_z;
 };
 [[vk::binding(19, 0)]] Sampler2D TEXTURES[64];
 [UnscopedEnum] enum mode: int {CHUNK_PASS, OBJECT_PASS, PREFIX_PASS, SCATTER_PASS, UI_MODE, FENCE_MODE, SEA_MODE, MESH_MODE, SKY_MODE};
@@ -136,8 +136,11 @@ static const uint bucket_size = 2; // size in meters of each bucket ~2mx2m
 static const uint map_size = 4096; // 4096m
 static const uint buckets_width = map_size / bucket_size;
 uint get_bucket_id(float x, float y) {
-    uint key = uint(floor(y / bucket_size) )* buckets_width + uint(floor(x / bucket_size));
-    return (key ^ (key >> 15)) & 0x1FFFFu; // take 17 bits for result between 0 and 131k
+    uint bx = uint(floor(x / bucket_size));
+    uint by = uint(floor(y / bucket_size));
+    uint h = bx * 0x8da6b343u ^ by * 0xd8163841u;
+    h ^= h >> 16;
+    return h & 0x1FFFFu;
 }
 
 groupshared uint counts[25];
@@ -174,7 +177,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
                 delta_position = chunk_position - (get_camera_position() / 10); // in meters
             } else {
                 object object = OBJECTS[chunk_id * 64];    // 8 bytes
-                chunk_position = float3(object.x, object.y, object.z);
+                chunk_position = float3(object.pos.x * 10, 0, object.pos.y * 10);
                 delta_position = chunk_position - get_camera_position();
             }
             // frustum
@@ -271,14 +274,25 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
             position = object_position - (camera_position / 10); // in meters
         } else if (object_type == UNIT) {
             object object = OBJECTS[object_id]; // 8 bytes
-            unit UNIT = UNITS[0];
-            // int rank = object_id % 64;
-            // float2 formation = float2(rank % 8, rank / 8) * 10.0f;
-            // float2 object_position = formation;
-            float2 world_pos = float2(object.x, object.z) / 10;
+            unit unit = UNITS[0];
+            int rank = object_id % 64;
+            float2 formation = float2(rank % 13, rank / 13);
+            float2 desired_position = float2(unit.next_x, unit.next_y) + formation;
+            float2 world_pos = object.pos;
             if (PUSH_CONSTANTS.mode == SCATTER_PASS) {
+                // MOVEMENT
+                float2 to_target = desired_position - world_pos;
+                float dist = length(to_target);
+                if (dist > 0.001) {
+                    float2 dir = to_target / dist; // normalize
+                    float step = 1.0 * delta; // speed 1.0 for now, will be calculated later
+                    float2 move = dir * min(step, dist); // prevent overshoot
+                    world_pos += move;
+                } else world_pos = desired_position;
+                OBJECTS[object_id].pos = world_pos;
+                // COLLISION BUCKET
                 uint bucket_id = get_bucket_id(world_pos.x + 2048, world_pos.y + 2048);
-                uint slot; InterlockedAdd(BUCKETS[bucket_id].ids[0], 1, slot);
+                uint slot; InterlockedAdd(BUCKETS[bucket_id].ids[0], 1, slot); slot++;
                 if (slot < 15) BUCKETS[bucket_id].ids[slot] = object_id;
                 // OBJECTS[object_id].z -= 1;
                 // OBJECTS[object_id].x -= 1;
@@ -286,7 +300,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
             float px_size = 1.0 / 641.0;
             float2 uv = chunk_uv_at(world_pos) + (px_size / 2);
             float height = chunk_height_at_uv(uv, false) / 10;
-            position = float3(object.x, height, object.z) - get_camera_position();
+            position = float3(object.pos.x * 10, height, object.pos.y * 10) - get_camera_position();
         }
         float position_yaw_z = camera_yaw_sin * position.x + camera_yaw_cos * position.z; // apply yaw to Z
         float3 view = float3(
@@ -619,9 +633,9 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
         int rank = object_id % 64;
         float2 formation = float2(rank % 8, rank / 8) * 10.0f;
         // float3 object_position = float3(formation.x, 0, formation.y);
-        float3 object_position = float3(object.x, 0, object.z);
-        world_pos = object_position.xz;
-        position = object_position - get_camera_position();
+        float3 object_position = float3(object.pos.x, 0, object.pos.y);
+        world_pos = object.pos;
+        position = (object_position * 10.0) - get_camera_position();
         float object_yaw_cos = float(object.cos) * divide_by_127;
         float object_yaw_sin = float(object.sin) * divide_by_127;
         uint packed_anim = INSTANCE.animation;
@@ -665,8 +679,7 @@ vs_out vs_main(uint VERTEX_ID : SV_VertexID, [[vk::location(0)]] instance INSTAN
             (packed_uv >> 16)    * (1.0/65535.0)
         );
         // height
-        float2 worldXZ_m = object_position.xz / 10.0f;
-        vertex.y += terrain_height_at(worldXZ_m);
+        vertex.y += terrain_height_at(world_pos);
     }
 
     // rotate position around y for the combined camera-instance yaw
@@ -800,10 +813,10 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         // debug draw triangles as distinct colors
         // float3 color = frac(sin((primID+43) * 43.5453) * float3(23.1407, 85.928, 43.533));
         // if(color.x+color.y+color.z < 0.1) color = float3(float(primID % 32) / 32, float((primID + 38) % 64) / 64, float((primID + 17) % 32) / 32);
-        uint bucket_id = get_bucket_id(i.world_pos.x + 2048, i.world_pos.y + 2048);
+        // uint bucket_id = get_bucket_id(i.world_pos.x + 2048, i.world_pos.y + 2048);
         // float g = frac(sin(primID * 12.9898) * 43758.5453);
-        float g = frac(sin(bucket_id * 12.9898) * 43758.5453);
-        float3 color = g.xxx;
+        // float g = frac(sin(bucket_id * 12.9898) * 43758.5453);
+        // float3 color = g.xxx;
         // float3 color = frac(sin((i.object_id+43) * 43.5453) * float3(23.1407, 85.928, 43.533));
         // if(color.x+color.y+color.z < 0.1) color = float3(float(i.object_id % 32) / 32, float((i.object_id + 38) % 64) / 64, float((i.object_id + 17) % 32) / 32);
         // return float4(color, 1.0);
@@ -918,14 +931,21 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
         //     i.normal = 0;
         // }
         // if (!i.is_chunk) o.color.xyz = color;
-        if (BUCKETS[bucket_id].ids[0] != 0) {
-            uint2 pix = (uint2)i.pos.xy;
-            uint v = (pix.x & 3) | ((pix.y & 3) << 2);
-            uint unit_id = BUCKETS[bucket_id].ids[v];
-            object object = OBJECTS[unit_id];
-            if (distance(i.world_pos, float2(object.x, object.z) / 10) < 0.5)
-                o.color.g *= 3.0;
-            o.color.b *= 3.0;
+        uint bucket_id = get_bucket_id(i.world_pos.x + 2048, i.world_pos.y + 2048);
+        uint bucket_count = BUCKETS[bucket_id].ids[0];
+        if (bucket_count != 0) {
+            if (bucket_count < 15) {
+                o.color.g *= 1.0 + (bucket_count * 0.2);
+            } else {
+                o.color.b *= 1.0 + (bucket_count * 0.2);
+            }
+            // uint2 pix = (uint2)i.pos.xy;
+            // uint v = (pix.x & 3) | ((pix.y & 3) << 2);
+            // uint unit_id = BUCKETS[bucket_id].ids[v];
+            // object object = OBJECTS[unit_id];
+            // float distance = distance(i.world_pos, float2(object.x, object.z)) / 10.0;
+            // if (distance < 0.5)
+                // o.color.g *= (distance * 10.0);
         }
         // o.color *= 1.0 - saturate(i.h * 0.00025);
     }
