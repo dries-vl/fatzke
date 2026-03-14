@@ -189,8 +189,10 @@ static void create_and_upload_device_local_buffer(
     vkDestroyBuffer(device, staging, NULL);
     vkFreeMemory(device, staging_mem, NULL);
 }
+#pragma endregion
 
 #include "texture.h"
+#include "map.h"
 
 int g_want_pick = 0;
 int g_mouse_x = 0, g_mouse_y = 0;
@@ -428,9 +430,10 @@ int main(void) {
     VkShaderModule shader_module; VK_CHECK(vkCreateShaderModule(machine.device,&smci,NULL,&shader_module));
 
     #pragma region COMPUTE PIPELINE
-    #define BINDINGS 20
-    #define UNIFORM_BINDING (BINDINGS-2)
-    #define TEXTURES_BINDING (BINDINGS-1)
+    #define BINDINGS 21
+    #define UNIFORM_BINDING (BINDINGS-3)
+    #define TEXTURES_BINDING (BINDINGS-2)
+    #define DETAIL_TEXTURES_BINDING (BINDINGS-1)
     VkDescriptorSetLayoutBinding bindings[BINDINGS];
     for (uint32_t i = 0; i < BINDINGS; ++i) {
         bindings[i] = (VkDescriptorSetLayoutBinding) {
@@ -449,6 +452,12 @@ int main(void) {
         .binding         = TEXTURES_BINDING,
         .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         .descriptorCount = MAX_TEXTURES,
+        .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT,
+    };
+    bindings[DETAIL_TEXTURES_BINDING] = (VkDescriptorSetLayoutBinding) {
+        .binding         = DETAIL_TEXTURES_BINDING,
+        .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .descriptorCount = MAX_DETAIL_TEXTURES,
         .stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT,
     };
     VkDescriptorSetLayoutCreateInfo set_layout_info = {
@@ -1040,9 +1049,9 @@ int main(void) {
 
     // --- Descriptor pool & set (unchanged, but note buffers are now DEVICE_LOCAL) ---
     VkDescriptorPoolSize pool_sizes[] = {
-        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,  BINDINGS-2 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,  BINDINGS - 3 },
         { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,  1 },
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MAX_TEXTURES },
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MAX_TEXTURES + MAX_DETAIL_TEXTURES },
     };
     VkDescriptorPoolCreateInfo pool_info_desc = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -1091,16 +1100,27 @@ int main(void) {
     };
     #pragma region TEXTURES
     create_textures(&machine, &swapchain);
+    update_detail_region_and_upload(&machine, &swapchain, 732, 937);
     VkDescriptorImageInfo tex_infos[MAX_TEXTURES];
     fill_texture_descriptor_infos(tex_infos, MAX_TEXTURES);
+    VkDescriptorImageInfo detail_tex_infos[MAX_DETAIL_TEXTURES];
+    fill_detail_texture_descriptor_infos(detail_tex_infos, MAX_DETAIL_TEXTURES);
     VkWriteDescriptorSet writes[BINDINGS];
     for (uint32_t i = 0; i < BINDINGS; ++i) {
+        writes[i] = (VkWriteDescriptorSet){0};
+    }
+    for (uint32_t i = 0; i < BINDINGS; ++i) {
+        if (i == TEXTURES_BINDING || i == DETAIL_TEXTURES_BINDING) {
+            continue;
+        }
         writes[i] = (VkWriteDescriptorSet){
             .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .dstSet = renderer.descriptor_set,
             .dstBinding = i,
             .descriptorCount = 1,
-            .descriptorType = (i != UNIFORM_BINDING) ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorType = (i != UNIFORM_BINDING)
+                ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+                : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
             .pBufferInfo = &buffer_infos[i]
         };
     }
@@ -1112,6 +1132,15 @@ int main(void) {
         .descriptorCount = MAX_TEXTURES,
         .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         .pImageInfo      = tex_infos,
+    };
+    writes[DETAIL_TEXTURES_BINDING] = (VkWriteDescriptorSet){
+        .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstSet          = renderer.descriptor_set,
+        .dstBinding      = DETAIL_TEXTURES_BINDING,
+        .dstArrayElement = 0,
+        .descriptorCount = MAX_DETAIL_TEXTURES,
+        .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .pImageInfo      = detail_tex_infos,
     };
     vkUpdateDescriptorSets(machine.device, BINDINGS, writes, 0, NULL);
     pf_timestamp("Descriptors created (DEVICE_LOCAL)");

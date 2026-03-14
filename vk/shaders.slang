@@ -69,6 +69,7 @@ cbuffer uniforms {
     float  click_world_pos_x, click_world_pos_z, drag_world_pos_x, drag_world_pos_z;
 };
 [[vk::binding(19, 0)]] Sampler2D TEXTURES[64];
+[[vk::binding(20, 0)]] Sampler2D DATA[2];
 [UnscopedEnum] enum mode: int {CHUNK_PASS, OBJECT_PASS, PREFIX_PASS, SCATTER_PASS, UI_MODE, FENCE_MODE, SEA_MODE, MESH_MODE, SKY_MODE};
 // push constants
 struct push_constants {
@@ -107,7 +108,7 @@ float chunk_height_at_uv(float2 uv, bool fs) {
         // h = TEXTURES[2].Sample(uv).x * 1000000.0f;
         // detail = TEXTURES[4].Sample(uv).x;
     // } else {
-        h = TEXTURES[2].SampleLevel(uv, 0).x * 1000000.0f;
+        h = DATA[1].SampleLevel(uv, 0).x * 200000.0f;
         detail = TEXTURES[4].SampleLevel(uv, 0).x;
     // }
     // optional micro detail

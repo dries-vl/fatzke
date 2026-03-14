@@ -1,6 +1,7 @@
 #pragma once
 
 #define MAX_TEXTURES 64
+#define MAX_DETAIL_TEXTURES 2
 
 extern const unsigned char font_atlas[];
 extern const unsigned char font_atlas_end[];
@@ -32,7 +33,12 @@ typedef struct Texture {
     VkImageView view;
 } Texture;
 
+enum {
+    DETAIL_TEXTURE_TERRAIN = 0,
+    DETAIL_TEXTURE_HEIGHT = 1
+};
 static Texture textures[MAX_TEXTURES];
+static Texture detail_textures[MAX_DETAIL_TEXTURES];
 static Texture dummy_texture;
 static VkSampler global_sampler;
 static uint32_t texture_count = 0;
@@ -399,6 +405,12 @@ static void create_dummy_texture(struct Machine* machine, struct Swapchain* swap
         textures[i] = dummy_texture;
     }
 
+    for (uint32_t i = 0; i < MAX_DETAIL_TEXTURES; ++i) {
+        detail_textures[i].image = VK_NULL_HANDLE;
+        detail_textures[i].memory = VK_NULL_HANDLE;
+        detail_textures[i].view = VK_NULL_HANDLE;
+    }
+
     texture_count = 0;
 }
 
@@ -466,4 +478,90 @@ static void fill_texture_descriptor_infos(VkDescriptorImageInfo* out_infos, uint
         out_infos[i].imageView = view;
         out_infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     }
+}
+
+static void fill_detail_texture_descriptor_infos(VkDescriptorImageInfo* out_infos, uint32_t count) {
+    for (uint32_t i = 0; i < count; ++i) {
+        VkImageView view = detail_textures[i].view;
+        if (view == VK_NULL_HANDLE) view = dummy_texture.view;
+        out_infos[i].sampler = global_sampler;
+        out_infos[i].imageView = view;
+        out_infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    }
+}
+static int create_texture_from_r8(
+    struct Machine* m,
+    struct Swapchain* swapchain,
+    const uint8_t* pixels,
+    uint32_t w,
+    uint32_t h,
+    Texture* out_tex
+) {
+    VkDevice dev = m->device;
+    VkPhysicalDevice phys = m->physical_device;
+    VkQueue queue = m->queue_graphics;
+    VkCommandPool pool = swapchain->command_pool_graphics;
+
+    if (out_tex->image == VK_NULL_HANDLE) {
+        create_image_2d_mipped(
+            dev,
+            phys,
+            w,
+            h,
+            VK_FORMAT_R8_UNORM,
+            1,
+            VK_IMAGE_USAGE_SAMPLED_BIT,
+            &out_tex->image,
+            &out_tex->memory
+        );
+
+        create_view_2d_mipped(
+            dev,
+            out_tex->image,
+            VK_FORMAT_R8_UNORM,
+            1,
+            &out_tex->view
+        );
+    }
+
+    upload_image_2d(
+        dev,
+        phys,
+        queue,
+        pool,
+        out_tex->image,
+        w,
+        h,
+        pixels,
+        (VkDeviceSize)(w * h)
+    );
+
+    return 1;
+}
+
+static int upload_detail_texture_pair(
+    struct Machine* machine,
+    struct Swapchain* swapchain,
+    const uint8_t* terrain_pixels,
+    const uint8_t* height_pixels,
+    uint32_t w,
+    uint32_t h
+) {
+    if (!create_texture_from_r8(
+            machine, swapchain,
+            terrain_pixels, w, h,
+            &detail_textures[DETAIL_TEXTURE_TERRAIN])) {
+        printf("Failed to upload terrain detail texture\n");
+        return 0;
+    }
+
+    if (!create_texture_from_r8(
+            machine, swapchain,
+            height_pixels, w, h,
+            &detail_textures[DETAIL_TEXTURE_HEIGHT])) {
+        printf("Failed to upload height detail texture\n");
+        return 0;
+    }
+
+    return 1;
 }
