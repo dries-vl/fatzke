@@ -693,7 +693,7 @@ int main(void) {
 
     struct unit {i16 x, y, next_x, next_y;};
     struct unit units[1] = {
-        {.x = 0, .y = 0, .next_x = 0, .next_y = -10}
+        {.x = 0, .y = 0, .next_x = 5, .next_y = -10}
     };
     #define UNIT_CHUNK_COUNT 1
 
@@ -717,8 +717,8 @@ int main(void) {
         gpu_chunks[scene[OBJECT_TYPE_UNIT].first_chunk + i].object_type = OBJECT_TYPE_UNIT;
     }
     for (int i = 0; i < UNIT_CHUNK_COUNT * OBJECTS_PER_CHUNK; ++i) {
-        gpu_objects[first_unit_object + i].pos[0] = (float)(i % 512);
-        gpu_objects[first_unit_object + i].pos[1] = (float)((0));
+        gpu_objects[first_unit_object + i].pos[0] = (float)(i % 8);
+        gpu_objects[first_unit_object + i].pos[1] = (float)(i / 8);
         {
             float yaw = 0.0f;
             gpu_objects[first_unit_object + i].cos = (((uint8_t)lrintf(cosf(yaw) * 127.0f)));
@@ -1100,7 +1100,7 @@ int main(void) {
     };
     #pragma region TEXTURES
     create_textures(&machine, &swapchain);
-    update_detail_region_and_upload(&machine, &swapchain, 732, 937);
+    update_detail_region_and_upload(&machine, &swapchain, 531, 1041);
     VkDescriptorImageInfo tex_infos[MAX_TEXTURES];
     fill_texture_descriptor_infos(tex_infos, MAX_TEXTURES);
     VkDescriptorImageInfo detail_tex_infos[MAX_DETAIL_TEXTURES];

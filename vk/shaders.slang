@@ -108,7 +108,7 @@ float chunk_height_at_uv(float2 uv, bool fs) {
         // h = TEXTURES[2].Sample(uv).x * 1000000.0f;
         // detail = TEXTURES[4].Sample(uv).x;
     // } else {
-        h = DATA[1].SampleLevel(uv, 0).x * 200000.0f;
+        h = DATA[1].SampleLevel(uv, 0).x * 400000.0f;
         detail = TEXTURES[4].SampleLevel(uv, 0).x;
     // }
     // optional micro detail
@@ -142,6 +142,30 @@ uint get_bucket_id(float x, float y) {
     uint h = bx * 0x8da6b343u ^ by * 0xd8163841u;
     h ^= h >> 16;
     return h & 0x1FFFFu;
+}
+
+int2 get_unit_formation(int id, int count, int width) {
+    int leftCount = (count + 1) >> 1;
+    int h = width >> 1;
+    bool side = (id >= leftCount);
+    int k = id - side * leftCount;
+    if ((width & 1) == 0) {
+        int y = k / h;
+        int p = k - y * h;
+        return int2(side ? (width - 1 - p) : p, y);
+    }
+    int pair = k / width;
+    int rem = k - pair * width;
+    int split = side ? h : (h + 1);
+    bool second = (rem >= split);
+    int y = pair * 2 + second;
+    int p = rem - second * split;
+    int x;
+    if (side)
+        x = second ? (h + p) : (width - 1 - p);
+    else
+        x = second ? p : ((((pair & 1) != 0) ? (h - p) : p));
+    return int2(x, y);
 }
 
 groupshared uint counts[25];
@@ -275,18 +299,23 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
             position = object_position - (camera_position / 10); // in meters
         } else if (object_type == UNIT) {
             object object = OBJECTS[object_id]; // 8 bytes
+            // MOVEMENT
             unit unit = UNITS[0];
             int rank = object_id % 64;
-            float2 formation = float2(rank % 13, rank / 13);
-            float2 desired_position = float2(unit.next_x, unit.next_y) + formation;
+            int formation_width = (int) ceil(distance(float2(click_world_pos_x,click_world_pos_z), float2(drag_world_pos_x,drag_world_pos_z)));
+            int2 formation = get_unit_formation(rank, 64, formation_width);
+            float2 desired_position = float2(drag_world_pos_x, drag_world_pos_z) + formation;
             float2 world_pos = object.pos;
             if (PUSH_CONSTANTS.mode == SCATTER_PASS) {
-                // MOVEMENT
+                // MOVE
+                // axis to target
+                // small step forward along axis (from unit pov not this guy)
+                // if this guy is far compared to unit far move faster
                 float2 to_target = desired_position - world_pos;
                 float dist = length(to_target);
                 if (dist > 0.001) {
                     float2 dir = to_target / dist; // normalize
-                    float step = 1.0 * delta; // speed 1.0 for now, will be calculated later
+                    float step = 5.0 * delta; // speed 1.0 for now, will be calculated later
                     float2 move = dir * min(step, dist); // prevent overshoot
                     world_pos += move;
                 } else world_pos = desired_position;
@@ -295,8 +324,6 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
                 uint bucket_id = get_bucket_id(world_pos.x + 2048, world_pos.y + 2048);
                 uint slot; InterlockedAdd(BUCKETS[bucket_id].ids[0], 1, slot); slot++;
                 if (slot < 15) BUCKETS[bucket_id].ids[slot] = object_id;
-                // OBJECTS[object_id].z -= 1;
-                // OBJECTS[object_id].x -= 1;
             }
             float px_size = 1.0 / 641.0;
             float2 uv = chunk_uv_at(world_pos) + (px_size / 2);
@@ -961,20 +988,21 @@ ps_out fs_main(vs_out i, uint primID : SV_PrimitiveID) : SV_Target0 {
 
     // PASSABLE GRID
     if (PUSH_CONSTANTS.mode == MESH_MODE) {
-        float2 snapped_world_pos = i.world_pos - (i.world_pos % float2(4.0));
-        float h00 = chunk_height_at_uv(chunk_uv_at(snapped_world_pos) + (px_size / 2), true);
-        float h10 = chunk_height_at_uv(chunk_uv_at(snapped_world_pos + float2(4, 0)) + (px_size / 2), true);
-        float h01 = chunk_height_at_uv(chunk_uv_at(snapped_world_pos + float2(0, 4)) + (px_size / 2), true);
-        float h11 = chunk_height_at_uv(chunk_uv_at(snapped_world_pos + float2(4, 4)) + (px_size / 2), true);
-        float hmin = min(min(h00, h10), min(h01, h11));
-        float hmax = max(max(h00, h10), max(h01, h11));
-        float steepness = hmax - hmin;
+        // float2 snapped_world_pos = i.world_pos - (i.world_pos % float2(4.0));
+        // float h00 = chunk_height_at_uv(chunk_uv_at(snapped_world_pos) + (px_size / 2), true);
+        // float h10 = chunk_height_at_uv(chunk_uv_at(snapped_world_pos + float2(4, 0)) + (px_size / 2), true);
+        // float h01 = chunk_height_at_uv(chunk_uv_at(snapped_world_pos + float2(0, 4)) + (px_size / 2), true);
+        // float h11 = chunk_height_at_uv(chunk_uv_at(snapped_world_pos + float2(4, 4)) + (px_size / 2), true);
+        // float hmin = min(min(h00, h10), min(h01, h11));
+        // float hmax = max(max(h00, h10), max(h01, h11));
+        // float steepness = hmax - hmin;
         // if (steepness > 400.0) o.color.rb = float2(1,1);
         // else if (steepness > 300.0) o.color.b = 1;
         // else if (steepness > 200.0) o.color.g = 1;
         // else if (steepness > 100.0) o.color.g = 0.5;
         // else if (steepness > 50.0) o.color.g = 0.25;
-        if (steepness >= 260.0) o.color.r = 1;
+        // if (steepness > 250.0) o.color.r = 1;
+        // if (steepness < 80.0) o.color.g = 1;
     }
 
     if (PUSH_CONSTANTS.mode == SEA_MODE) {
