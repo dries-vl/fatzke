@@ -695,7 +695,7 @@ int main(void) {
     struct unit units[1] = {
         {.x = 0, .y = 0, .next_x = 5, .next_y = -10}
     };
-    #define UNIT_CHUNK_COUNT 1
+    #define UNIT_CHUNK_COUNT 10
 
     #define TOTAL_CHUNK_COUNT (PLANE_CHUNK_COUNT + UNIT_CHUNK_COUNT)
 
@@ -707,7 +707,7 @@ int main(void) {
         [OBJECT_TYPE_UNIT]  = { .chunk_count = UNIT_CHUNK_COUNT,  .first_chunk = PLANE_CHUNK_COUNT }
     };
 
-    struct gpu_object { float pos[2]; u8 cos,sin; u8 pad[6];}; // 10 bytes + 6 bytes padding
+    struct gpu_object { float pos[2]; float step; u8 cos,sin; u8 pad[2];}; // padding to ensure 16b
     // todo: ideally we don't even have any plane objects/chunks in memory, as their data is not needed in the shader
     static struct gpu_object gpu_objects[TOTAL_CHUNK_COUNT * OBJECTS_PER_CHUNK];
 
@@ -1563,12 +1563,14 @@ int main(void) {
             u.drag_rect_start_x = rect_x0; u.drag_rect_start_y = rect_y0;
             u.drag_rect_end_x = rect_x1; u.drag_rect_end_y = rect_y1;
         }
-        if (buttons[MOUSE_RIGHT]) {
+        if (1 || buttons[MOUSE_RIGHT]) {
             u.drag_world_pos_x = drag_world_x;
             u.drag_world_pos_z = drag_world_z;
             u.click_world_pos_x = click_world_x;
             u.click_world_pos_z = click_world_z;
-        } else { drag_world_x = 0; drag_world_z = 0; click_world_x = 0; click_world_z = 0;}
+        } else { 
+            drag_world_x = 0; drag_world_z = 0; click_world_x = 0; click_world_z = 0;
+        }
         void*dst=NULL;
         VK_CHECK(vkMapMemory(machine.device, renderer.memory_uniforms, 0, sizeof u, 0, &dst));
         memcpy(dst, &u, sizeof u);
@@ -1621,8 +1623,7 @@ int main(void) {
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, swapchain.query_pool, q0 + Q_CHUNKS);
             #endif
 
-            // todo: BUCKET
-            // zero the bucket counts because we use it as cursor
+            // zero the bucket counts
             vkCmdFillBuffer(cmd, renderer.buffer_buckets, 0, size_buckets, 0);
             VkBufferMemoryBarrier2 bc_clear_to_cs =
                 buf_barrier2(ST_XFER, VK_ACCESS_2_TRANSFER_WRITE_BIT, ST_CS, AC_SRD | AC_SWR, renderer.buffer_buckets, 0, VK_WHOLE_SIZE);
@@ -1659,9 +1660,6 @@ int main(void) {
             vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, swapchain.query_pool, q0 + Q_PREPARE);
             #endif
 
-            // todo: BUCKET
-            // zero the bucket counts because we fill it in scatter
-            vkCmdFillBuffer(cmd, renderer.buffer_buckets, 0, size_buckets, 0);
             cmd_barrier2(cmd, NULL, 0, &bc_clear_to_cs, 1, NULL, 0);
             // SCATTER PASS
             mode = SCATTER_PASS;

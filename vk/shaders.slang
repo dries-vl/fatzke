@@ -28,7 +28,7 @@ static const float tanHalfFovX = tanHalfFovY * aspect_ratio;
 struct object_metadata { uint meshes_offset, mesh_count; float radius;};
 [UnscopedEnum] enum object_type: int {TERRAIN, UNIT, BUILDING, VEGETATION};
 struct chunk { object_type object_type;};
-struct object { float2 pos; uint8_t cos, sin; uint8_t pad1,pad2,pad3,pad4,pad5,pad6;}; // 10 bytes + 6 bytes padding
+struct object { float2 pos; half2 vel; uint8_t cos, sin; uint8_t pad1,pad2;}; // ensure padding to 16b
 struct mdi {uint index_count, instance_count, first_index, base_vertex, first_instance;};
 struct di {uint group_count_x, group_count_y, group_count_z;};
 struct instance { uint object_id, animation;};
@@ -144,27 +144,29 @@ uint get_bucket_id(float x, float y) {
     return h & 0x1FFFFu;
 }
 
-int2 get_unit_formation(int id, int count, int width) {
-    int leftCount = (count + 1) >> 1;
-    int h = width >> 1;
-    bool side = (id >= leftCount);
-    int k = id - side * leftCount;
-    if ((width & 1) == 0) {
-        int y = k / h;
-        int p = k - y * h;
-        return int2(side ? (width - 1 - p) : p, y);
-    }
-    int pair = k / width;
-    int rem = k - pair * width;
-    int split = side ? h : (h + 1);
-    bool second = (rem >= split);
-    int y = pair * 2 + second;
-    int p = rem - second * split;
-    int x;
-    if (side)
-        x = second ? (h + p) : (width - 1 - p);
-    else
-        x = second ? p : ((((pair & 1) != 0) ? (h - p) : p));
+// idea: divide unit in groups of 64, each can use the max 64 row or 64 column hardcoded formations
+// and for bigger units it's simply multiple of these 64 sized next to each other, never behind each other, just on a line
+// this means units can never have columns longer than 64, but that's fine, even 2048 guys could column at 32x64
+
+// data:
+// same idea: every index assigned a spot in the formation by x and y
+// and also a 'other index to stay aligned to', for example
+// the man standing in front, and for the front line the man standing to the right/left
+
+// Width assigned to one chunk, proportional to men alive.
+// For now men_alive == 64 for every chunk, so widths are equal.
+// total_width is the intended width of the whole formation in cells.
+int get_chunk_width(int men_alive, int total_men_alive, int total_width) {
+    if (men_alive <= 0 || total_men_alive <= 0 || total_width <= 0) return 0;
+    // Rounded proportional width, minimum 1 if chunk has men.
+    int w = (men_alive * total_width + total_men_alive / 2) / total_men_alive;
+    return max(1, w);
+}
+// Local slot inside one chunk.
+// Units fill rows left-to-right.
+int2 get_local_slot_in_chunk(int local_unit_index, int chunk_width) {
+    int x = local_unit_index % chunk_width;
+    int y = local_unit_index / chunk_width;
     return int2(x, y);
 }
 
@@ -301,29 +303,116 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
             object object = OBJECTS[object_id]; // 8 bytes
             // MOVEMENT
             unit unit = UNITS[0];
-            int rank = object_id % 64;
-            int formation_width = (int) ceil(distance(float2(click_world_pos_x,click_world_pos_z), float2(drag_world_pos_x,drag_world_pos_z)));
-            int2 formation = get_unit_formation(rank, 64, formation_width);
-            float2 desired_position = float2(drag_world_pos_x, drag_world_pos_z) + formation;
             float2 world_pos = object.pos;
-            if (PUSH_CONSTANTS.mode == SCATTER_PASS) {
-                // MOVE
-                // axis to target
-                // small step forward along axis (from unit pov not this guy)
-                // if this guy is far compared to unit far move faster
-                float2 to_target = desired_position - world_pos;
-                float dist = length(to_target);
-                if (dist > 0.001) {
-                    float2 dir = to_target / dist; // normalize
-                    float step = 5.0 * delta; // speed 1.0 for now, will be calculated later
-                    float2 move = dir * min(step, dist); // prevent overshoot
-                    world_pos += move;
-                } else world_pos = desired_position;
-                OBJECTS[object_id].pos = world_pos;
-                // COLLISION BUCKET
+
+            if (PUSH_CONSTANTS.mode == OBJECT_PASS) {
                 uint bucket_id = get_bucket_id(world_pos.x + 2048, world_pos.y + 2048);
-                uint slot; InterlockedAdd(BUCKETS[bucket_id].ids[0], 1, slot); slot++;
-                if (slot < 15) BUCKETS[bucket_id].ids[slot] = object_id;
+                uint slot;
+                InterlockedAdd(BUCKETS[bucket_id].ids[0], 1, slot);
+                slot++;
+                if (slot <= 15) BUCKETS[bucket_id].ids[slot] = object_id;
+            }
+
+            if (PUSH_CONSTANTS.mode == SCATTER_PASS) {
+                static const float move_speed = 5.0;
+                static const float body_radius = 0.4;
+                static const float block_radius = body_radius * 2.0;
+                static const float avoid_radius = 3.0;
+                static const float responsiveness = 2.0;
+                static const float repulse_weight = 2.0;
+                static const float penetration_weight = 20.0;
+                static const float epsilon = 1e-4;
+                static const float spacing = 1.0;
+                static const int chunk_count = 10;
+                static const int chunk_capacity = 64;
+                float2 world_pos = OBJECTS[object_id].pos;
+                float2 velocity  = OBJECTS[object_id].vel;
+                float2 formation_origin = float2(drag_world_pos_x, drag_world_pos_z);
+                // Intended width of the entire formation in cells.
+                int total_formation_width = (int)ceil(distance(float2(click_world_pos_x, click_world_pos_z), float2(drag_world_pos_x, drag_world_pos_z)));
+                // For now this is fixed. Later fill from real chunk state.
+                int men_per_chunk[chunk_count] = { 64,64,64,64,64,64,64,64,64,64 };
+                // You need these two values per unit.
+                int local_unit_index = object_id % chunk_capacity; // placeholder mapping
+                int chunk_id = (object_id % 640) / chunk_capacity;         // placeholder mapping
+                int total_men_alive = 0;
+                for (int i = 0; i < chunk_count; ++i) {
+                    total_men_alive += men_per_chunk[i];
+                }
+                int chunk_width = get_chunk_width(men_per_chunk[chunk_id], total_men_alive, total_formation_width);
+                int total_men_to_left = 0;
+                for (int i = 0; i < chunk_count; ++i) {
+                    total_men_to_left += men_per_chunk[i];
+                }
+                int start_x = 0;
+                for (int i = 0; i < chunk_id; ++i) {
+                    start_x += get_chunk_width(men_per_chunk[i], total_men_to_left, total_formation_width);
+                }
+                int chunk_start_x = start_x;
+                // Slot inside this chunk.
+                int2 local_slot = get_local_slot_in_chunk(local_unit_index, chunk_width);
+                // Final cell in the global formation.
+                int2 formation_cell = int2(chunk_start_x + local_slot.x, local_slot.y);
+                // Convert to world.
+                float2 desired_position = formation_origin + float2(
+                    (float)formation_cell.x * spacing,
+                    (float)formation_cell.y * spacing
+                );
+                // ------------------------------------------------------------
+                // Move toward assigned slot
+                // ------------------------------------------------------------
+                float2 to_target = desired_position - world_pos;
+                float dist_to_target = length(to_target);
+                float2 desired_dir = (dist_to_target > epsilon) ? (to_target / dist_to_target) : float2(0.0, 0.0);
+                float arrive_scale = saturate(dist_to_target / 1.0);
+                float2 desired_velocity = desired_dir * (move_speed * arrive_scale);
+                // ------------------------------------------------------------
+                // Collision / repulsion
+                // ------------------------------------------------------------
+                float2 repulse = float2(0.0, 0.0);
+                for (int bx = -1; bx <= 1; ++bx) {
+                    for (int by = -1; by <= 1; ++by) {
+                        uint bucket_id = get_bucket_id(
+                            world_pos.x + 2048 + bx * bucket_size,
+                            world_pos.y + 2048 + by * bucket_size
+                        );
+                        uint count = min(BUCKETS[bucket_id].ids[0], 15);
+                        for (uint i = 1; i <= count; ++i) {
+                            uint other_id = BUCKETS[bucket_id].ids[i];
+                            if (other_id == object_id) continue;
+                            float2 other_pos = OBJECTS[other_id].pos;
+                            float2 offset = world_pos - other_pos;
+                            float dist = length(offset);
+                            if (dist < epsilon || dist > avoid_radius) continue;
+                            float2 away = offset / dist;
+                            float t = saturate((avoid_radius - dist) / max(epsilon, avoid_radius - block_radius));
+                            float strength = repulse_weight * t * t;
+                            if (dist < block_radius) {
+                                float penetration = block_radius - dist;
+                                strength += penetration * penetration_weight;
+                                float inward_speed = dot(velocity, -away);
+                                if (inward_speed > 0.0) {
+                                    velocity -= (-away) * inward_speed;
+                                }
+                            }
+                            repulse += away * strength;
+                        }
+                    }
+                }
+                float2 target_velocity = desired_velocity + repulse;
+                float target_speed = length(target_velocity);
+                if (target_speed > move_speed) {
+                    target_velocity = target_velocity / target_speed * move_speed;
+                }
+                float blend = min(1.0, responsiveness * delta);
+                velocity += (target_velocity - velocity) * blend;
+                float speed = length(velocity);
+                if (speed > move_speed) {
+                    velocity = velocity / speed * move_speed;
+                }
+                world_pos += velocity * delta;
+                OBJECTS[object_id].vel = (half2)velocity;
+                OBJECTS[object_id].pos = world_pos;
             }
             float px_size = 1.0 / 641.0;
             float2 uv = chunk_uv_at(world_pos) + (px_size / 2);
