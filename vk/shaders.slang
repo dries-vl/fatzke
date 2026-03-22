@@ -144,6 +144,10 @@ uint get_bucket_id(float x, float y) {
     return h & 0x1FFFFu;
 }
 
+// stable front row by taking first indices as front
+// then second row
+// unit knows: 
+
 // idea: divide unit in groups of 64, each can use the max 64 row or 64 column hardcoded formations
 // and for bigger units it's simply multiple of these 64 sized next to each other, never behind each other, just on a line
 // this means units can never have columns longer than 64, but that's fine, even 2048 guys could column at 32x64
@@ -315,12 +319,12 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
 
             if (PUSH_CONSTANTS.mode == SCATTER_PASS) {
                 static const float move_speed = 5.0;
-                static const float body_radius = 0.4;
-                static const float block_radius = body_radius * 2.0;
-                static const float avoid_radius = 3.0;
-                static const float responsiveness = 2.0;
-                static const float repulse_weight = 2.0;
-                static const float penetration_weight = 20.0;
+                static const float body_radius = 0.6;
+                static const float block_radius = body_radius * 1.0;
+                static const float avoid_radius = 2.0;
+                static const float responsiveness = 1.0;
+                static const float repulse_weight = 1.0;
+                static const float penetration_weight = 10.0;
                 static const float epsilon = 1e-4;
                 static const float spacing = 1.0;
                 static const int chunk_count = 10;
@@ -331,7 +335,7 @@ void cs_main(uint3 gid: SV_GroupID, uint3 gtid: SV_GroupThreadID, uint3 tid: SV_
                 // Intended width of the entire formation in cells.
                 int total_formation_width = (int)ceil(distance(float2(click_world_pos_x, click_world_pos_z), float2(drag_world_pos_x, drag_world_pos_z)));
                 // For now this is fixed. Later fill from real chunk state.
-                int men_per_chunk[chunk_count] = { 64,64,64,64,64,64,64,64,64,64 };
+                int men_per_chunk[chunk_count] = { 64,50,50,64,20,64,64,11,64,64 };
                 // You need these two values per unit.
                 int local_unit_index = object_id % chunk_capacity; // placeholder mapping
                 int chunk_id = (object_id % 640) / chunk_capacity;         // placeholder mapping
